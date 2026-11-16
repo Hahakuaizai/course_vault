@@ -281,6 +281,19 @@ button:focus-visible {
    ============================================================ */
 .app { display: flex; flex-direction: column; height: 100vh; }
 
+/* ★ .app 必须自己解析一次 color。
+   `color` 是继承属性，而继承下来的是**计算值**：body 上写着
+   `color: var(--fg-1)`，在 :root 作用域里就解析成了当时的颜色。
+   .app 带着自己的 data-theme（深色规则里 --fg-1 是暖白），但它自己
+   没有 color 声明，就照单全收 body 算好的那个值 —— 于是出现
+   「html=浅色、.app=深色」时，深色底配深色字，卡片标题几乎看不见。
+   揭幕期间恰好就是这个状态：克隆层需要 html 是浅色（见 app.js
+   prepareThemeReveal 的注释），而真实界面已经带着目标主题的
+   data-theme。在 .app 上重新写一次，变量就会用 .app 自己的作用域
+   解析，两层各自正确。克隆层 #appL 早就有同样一条（见
+   theme-transition.css），这里补齐真实界面那一份。 */
+.app { color: var(--fg-1); }
+
 .titlebar {
   height: var(--titlebar-h);
   display: flex;

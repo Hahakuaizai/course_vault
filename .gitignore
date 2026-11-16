@@ -1,1 +1,16 @@
+# 依赖
 node_modules/
+.build-tools/node_modules/
+
+# 测试跑出来的临时产物：截图、日志、探针输出
+# （测试脚本本身要提交，但它们生成的文件不要）
+test/.*.png
+test/*.log
+test/.patch-bounds.txt
+test/.ref.log
+test/.electron.log
+test/_*
+
+# 系统文件
+Thumbs.db
+.DS_Store

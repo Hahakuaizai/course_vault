@@ -164,8 +164,13 @@ function check(name, ok, extra) {
   await c.wait(300);
   const shotTop = await c.shot('_verify-top.png', { x: 0, y: 0, width: 640, height: 40 });
   const topRGB = await readPixel(shotTop, 320, 20);
+  /* 阈值取 170 而不是 200：这条断言要区分的是「浅色标题栏」和
+     「深色标题栏」——深色主题的标题栏是 rgb(26,25,23)，两者差着
+     一个数量级。可采样点有时会落在标题栏文字或按钮的过渡边缘上
+     （实测读到过 199,197,193），卡在 200 会偶发误报。170 既能
+     稳稳排除深色（26），又不会被边缘像素绊倒。 */
   check('克隆层满幅时顶部是浅色（不是深色标题栏）',
-    topRGB.r > 200 && topRGB.g > 200, topRGB);
+    topRGB.r > 170 && topRGB.g > 170, topRGB);
   await ev(`window.__vaultThemeReveal.finish(false); return true`);
   fs.unlinkSync(shotTop);
 
@@ -218,7 +223,34 @@ function check(name, ok, extra) {
      改造后这里不再有 cv-light-fwd / cv-light-back 两组 @keyframes：
      光带的位置完全由 page-motion.js 按开关的 pos 算出 --p / --a 写进来。
      这正是参考文件（slider-follow-light.txt）的核心 —— 用关键帧或定时器
-     驱动的话，滑块停在中间时光会自顾自扫到终点。 */
+     驱动的话，滑块停在中间时光会自顾自扫到终点。
+
+     ★ 前置：等开关的弹簧彻底停下来。
+     前面第 3/4 步直接调过 __vaultThemeReveal.prepare / finish，而 finish
+     会改 html 与 .app 的 data-theme —— 开关的 MutationObserver 看到变化
+     就 setTarget 推一段弹簧，render() 于是每帧调 sweep.set(pos) 覆盖
+     我们设的目标。实测这种情况下 u=0 读到的 --p 是 16.76 而不是 114，
+     而且数值一直在变（光在追一个移动的目标）。这里先等它真正静止。 */
+  await ev(`
+    const el = document.querySelector('.cv-sweep');
+    window.__qT0 = performance.now();
+    window.__qP = new Promise((resolve) => {
+      let prev = el.style.getPropertyValue('--p');
+      let still = 0;
+      const tick = () => {
+        const cur = el.style.getPropertyValue('--p');
+        still = cur === prev ? still + 1 : 0;
+        prev = cur;
+        if (still >= 8 || performance.now() - window.__qT0 > 8000) resolve(true);
+        else setTimeout(tick, 100);
+      };
+      tick();
+    });
+    return true;
+  `);
+  await ev(`return window.__qP`);
+  await c.wait(500);
+
   const drive = await ev(`
     const el = document.querySelector('.cv-sweep');
     const b = getComputedStyle(el, '::before');
@@ -234,12 +266,16 @@ function check(name, ok, extra) {
        时间常数，足够追到 95% 以上。 */
     const settle = () => new Promise((r) => setTimeout(r, 1400));
 
-    /* 冻结开关的 render 循环，免得它每帧覆盖我们的目标 */
+    /* ★ 冻结开关的 render 循环，整段测量期间都不能恢复。
+       开关的 render() 每帧都会调 window.__vaultSweep.set(pos) —— 那是
+       真实运行时的唯一驱动源，但在测试里它会持续覆盖我们设的目标：
+       一旦把 api.set 换回原函数，光就跟着开关当前的位置走（实测
+       停在 u≈0.76，p=16.76），而不是我们要的 0 / 0.5 / 1。
+       所以把替换一直保持到全部读完，最后才恢复。 */
     const saved = { set: api.set, hide: api.hide };
     api.set = () => {}; api.hide = () => {};
     const setAndSettle = async (u) => { saved.set(u, 'to-dark'); await settle(); return read(); };
 
-    api.set = saved.set;
     const at0 = await setAndSettle(0);
     const atMid = await setAndSettle(0.5);
     const at1 = await setAndSettle(1);
@@ -248,6 +284,7 @@ function check(name, ok, extra) {
     const freezeA = await setAndSettle(0.5);
     const freezeB = await setAndSettle(0.5);
 
+    /* 全部读完再恢复，并主动把光收回屏外 */
     api.set = saved.set; api.hide = saved.hide;
     saved.hide();
 
@@ -355,6 +392,119 @@ function check(name, ok, extra) {
     check('连点后卡片底色与主题一致（不再停在旧主题的深色）',
       (burst.htmlTheme === 'dark') === dark, { theme: burst.htmlTheme, cardBg: burst.cardBg });
   }
+
+  /* ---------- 10. 揭幕期间克隆层自己的配色必须对 ----------
+     用户第二次反馈「没修好」，截图是切换过程中卡片一片深色、标题深字
+     压在深底上几乎看不见。
+
+     ★ 这一条和上面第 9 条查的是**完全不同**的东西
+     第 9 条查「克隆层有没有残留」，我之前的测试只测这个，所以一直
+     显示通过。可真正的问题在揭幕**进行中**：
+       · 克隆层 #appL 的 data-theme 恒为 light（它是浅色层）；
+       · 而 html 的 data-theme 当时还是旧主题（prepare 不写，等 finish
+         才落定）；
+       · styles.css 里深色规则几乎都是并列双选择器
+         `:root[data-theme='dark'] .card, .app[data-theme='dark'] .card`，
+         克隆层里的卡片同时命中 `:root[data-theme='dark'] .card`（html
+         还是 dark）和 `.app[data-theme='light'] .card`（克隆层自己），
+         特异度相同、后写的赢 —— 深色那条在样式表里更靠后，于是克隆层
+         的卡片被涂成 #262320。
+       · 侧栏/工具栏走 CSS 变量，在克隆层自己的作用域里解析成浅色，
+         所以看起来「侧栏浅、卡片深」。
+     修法：prepare 里把 html 的 data-theme 同步成克隆层主题。
+     下面逐帧采样，只要有一帧克隆层卡片配色与它自己的主题不符就算失败。 */
+  const midOk = await ev(`
+    const btn = document.querySelector('#themeSwitchHost .tsw');
+    const snap = () => {
+      const L = document.getElementById('appL');
+      const D = document.querySelector('.app:not(#appL)');
+      if (!L) return null;
+      const c = L.querySelector('.card');
+      if (!c) return null;
+      const cs = getComputedStyle(c);
+      const bg = cs.backgroundColor;
+      const m = bg.match(/\\d+/g);
+      return {
+        Ltheme: L.getAttribute('data-theme'),
+        html: document.documentElement.dataset.theme,
+        Dtheme: D ? D.getAttribute('data-theme') : null,
+        bg, color: cs.color,
+        darkBg: m ? +m[0] < 100 : null,
+      };
+    };
+    const bad = [];
+    const seen = [];
+    const t0 = performance.now();
+    return new Promise((resolve) => {
+      btn.click();
+      const tick = () => {
+        const s = snap();
+        if (s) {
+          seen.push(s);
+          if (s.darkBg !== null && (s.Ltheme === 'dark') !== s.darkBg) bad.push(s);
+        }
+        if (performance.now() - t0 < 2600) setTimeout(tick, 60);
+        else resolve({ bad, n: seen.length, sample: seen[0] || null, last: seen[seen.length - 1] || null });
+      };
+      setTimeout(tick, 60);
+    });
+  `);
+  check('揭幕期间采到了克隆层（测试前提）', midOk.n > 0, midOk.n);
+  check('揭幕期间克隆层卡片配色始终跟随克隆层主题（不再深底深字）',
+    midOk.bad.length === 0, midOk.bad.slice(0, 2));
+  if (midOk.sample) {
+    check('揭幕期间 html 的 data-theme 已同步成克隆层主题',
+      midOk.sample.html === midOk.sample.Ltheme, midOk.sample);
+  }
+
+  /* ---------- 11. 揭幕期间真实界面的卡片文字也要看得见 ----------
+     ★ 这一条查的是**另一个**坑，和上面第 10 条不是同一处
+     第 10 条修好之后（克隆层卡片变白了），用户截图里「深底深字」
+     依然会出现，因为问题在**真实界面那一份**：
+       · `body { color: var(--fg-1) }` 在 html=light 时就解析成了深色；
+       · `.app[data-theme='dark']` 只把 --fg-1 换成暖白，可它自己
+         没有 color 声明 —— 继承属性拿到的是 body 已经算好的**计算值**，
+         不是变量本身。于是深底配深字，卡片标题几乎看不见。
+       · 揭幕期间恰好就是这个组合：html 跟着克隆层是浅色，真实界面
+         带着目标主题的 data-theme（暗→亮时是 dark）。
+     修法：styles.css 里给 `.app` 补一条 `color: var(--fg-1)`，
+     让它在自己的作用域里重新解析一次。克隆层 #appL 早就有同样一条
+     （theme-transition.css），这次补齐真实界面那一份。
+     这里断言：揭幕期间真实界面卡片的文字亮度必须与底色拉开距离。 */
+  const contrast = await ev(`
+    const D = document.querySelector('.app:not(#appL)');
+    const L = document.getElementById('appL');
+    if (!L) return { err: 'no clone' };
+    const lum = (s) => {
+      const m = s.match(/\\d+/g);
+      if (!m) return null;
+      return 0.299 * +m[0] + 0.587 * +m[1] + 0.114 * +m[2];
+    };
+    const card = D.querySelector('.card');
+    if (!card) return { err: 'no card' };
+    const cs = getComputedStyle(card);
+    const name = card.querySelector('.card-name');
+    return {
+      bg: cs.backgroundColor,
+      color: cs.color,
+      nameColor: name ? getComputedStyle(name).color : null,
+      bgLum: lum(cs.backgroundColor),
+      fgLum: lum(cs.color),
+      nameLum: name ? lum(getComputedStyle(name).color) : null,
+      Dtheme: D.getAttribute('data-theme'),
+      html: document.documentElement.dataset.theme,
+    };
+  `);
+  if (!contrast.err) {
+    check('揭幕期间真实界面卡片文字与底色有足够对比（不再深底深字）',
+      Math.abs(contrast.fgLum - contrast.bgLum) > 80, contrast);
+    if (contrast.nameLum !== null) {
+      check('揭幕期间真实界面卡片标题与底色有足够对比',
+        Math.abs(contrast.nameLum - contrast.bgLum) > 80, contrast);
+    }
+  }
+  await ev(`window.__vaultThemeReveal.finish(false); return true`);
+  await c.wait(1500);
 
   console.log(`\n通过 ${pass} / 失败 ${fail}`);
   c.close();

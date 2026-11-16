@@ -116,6 +116,24 @@ function isDark() {
   return document.documentElement.dataset.theme === 'dark';
 }
 
+/**
+ * 真实界面当前的主题（揭幕期间不能用 isDark）。
+ *
+ * ★ 为什么需要单独一个函数
+ * 揭幕期间 app.js 的 prepareThemeReveal 会把 html 的 data-theme 同步成
+ * **克隆层**的主题（那是恒定的浅色层），好让 styles.css 里那批
+ * `:root[data-theme='dark'] .card` 并列规则不去污染克隆层。
+ * 于是从 DOM 读 html 拿到的是克隆层的主题，不是用户眼前真实界面的主题。
+ * 收尾判定（「旋钮到位了该提交吗」）要的是后者，所以有揭幕时问
+ * __vaultThemeReveal.from()，没有揭幕时才是普通的 isDark()。
+ */
+function isReallyDark() {
+  const api = window.__vaultThemeReveal;
+  const from = api && api.from ? api.from() : null;
+  if (from) return from === 'dark';
+  return isDark();
+}
+
 function reduceMotion() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches
     || document.documentElement.classList.contains('no-motion');
@@ -745,7 +763,7 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
         /* 首次（还没测出方向）先按「正在离开当前主题」猜一下：
            当前是深色，多半是往浅色拖 → 阳光金；反之月光紫。
            下一帧 u 一动就会被真实方向覆盖。 */
-        if (sweepDir < 0) sweepDir = isDark() ? 1 : 0;
+        if (sweepDir < 0) sweepDir = isReallyDark() ? 1 : 0;
         if (sweepLastU !== null) {
           if (u < sweepLastU - 0.0008) sweepDir = 0;
           else if (u > sweepLastU + 0.0008) sweepDir = 1;
@@ -922,16 +940,17 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
       pos = target;
       xv = 0;
       render();
-      const curDark = isDark();
+      const curDark = isReallyDark();
       const wantDark = target === 0;
       endReveal(wantDark !== curDark);
     }
+
 
     if (revealOn && revealStarted && knobArrived()) {
       pos = target;
       xv = 0;
       render();
-      const curDark = isDark();
+      const curDark = isReallyDark();
       const wantDark = target === 0;
       /* 目标主题和当前不同才提交；拖到一半弹回原位就只删层 */
       endReveal(wantDark !== curDark);
@@ -1228,6 +1247,9 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
        此刻还没决定切到哪边，克隆体按「当前主题的反面」建 ——
        反正 pos 走到哪边，clipPath 就写到哪边，两份 DOM 都是齐的。 */
     const revealOk = beginReveal();
+    /* 记下「这一层是按下时建的」：pointerup 里如果判定成点击，
+       toggle() 要复用它，而不是销毁重建（见 beginReveal 的注释） */
+    revealFromDown = revealOk;
     if (window.__tswDebug) window.__tswDebugDown = { revealOk, appL: !!document.getElementById('appL') };
     if (revealOk) {
       /* ★ 把开关顶到揭幕层之上（lift 的原理见其注释）。
@@ -1308,6 +1330,9 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
   let revealStartAt = 0;
   /* 独立看门狗定时器（不依赖 rAF，见 beginReveal） */
   let revealWatchdog = 0;
+  /* pointerdown 那一帧已经把揭幕层建好了，紧接着的 pointerup 里
+     toggle() 应当直接复用，不要销毁重建（原因见 toggle 里的注释） */
+  let revealFromDown = false;
 
   const revealApi = () => window.__vaultThemeReveal || null;
   const revealActive = () => revealOn;
@@ -1321,7 +1346,7 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
     api.write(u);
   }
 
-  function beginReveal() {
+  function beginReveal(opts = {}) {
     /* ★ 已经有一层在跑：先把它干净地收掉，再建新的。
        原先这里是 `if (revealOn) return true;` —— 直接复用旧的层。
        问题出在「连点」：用户连点两下，第二次点击时 revealOn 还是 true，
@@ -1333,14 +1358,28 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
        实测连点三次：页面会残留一到两个 .app 副本，而它们是完整副本、
        同样命中 `.app[data-theme='dark'] .card` 这类规则 —— 用户看到的
        就是「主题已经切了，网格里的卡片还是深色，过一会儿才变」。
-       先收尾再重建，状态永远是干净的。 */
-    if (revealOn) {
+       先收尾再重建，状态永远是干净的。
+
+       ★ 但「同一次按下」要豁免（opts.reuse）
+       一次普通点击的事件顺序是 pointerdown → pointerup → click：
+         pointerdown  先 beginReveal() 建层（此刻按钮还干净）
+         pointerup    up() 判定没拖动 → toggle() → 又 beginReveal()
+       上面那段「先收掉再重建」会让 toggle() 把刚建好的层销毁、重新
+       克隆一次。而这时候按钮**已经 lift 过了**（pointerdown 里紧接着
+       lift()），inline 定位和隐形占位全在身上 —— 第二次克隆把它们
+       一起复制进揭幕层，底栏那一行就错位了（详见 app.js
+       prepareThemeReveal 里摘痕迹那段注释）。
+       所以 pointerdown 建过层时打一个标记，toggle() 传 reuse 复用它。 */
+    if (revealOn && !opts.reuse) {
       endReveal(false);          /* 不提交：上一轮作废 */
     }
+    if (revealOn && opts.reuse) return true;
     const api = revealApi();
     /* 目标主题不在这里定死：拖到哪边算哪边，prepare 只负责把
        「浅色层 + 底下的目标态」备好（见 app.js）。 */
-    const cur = isDark() ? 'dark' : 'light';
+    /* 用 isReallyDark：揭幕期间 html 已被 prepare 改成克隆层主题，
+       isDark() 读到的是克隆层、不是真实界面 */
+    const cur = isReallyDark() ? 'dark' : 'light';
     let ok = false;
     try {
       ok = !!(api && api.prepare(cur === 'dark' ? 'light' : 'dark'));
@@ -1355,18 +1394,37 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
     revealOn = true;
     revealStarted = false;
 
-    /* ★ 独立看门狗：不依赖 frame() 的 rAF。
+    /* ★ 看门狗（不依赖 frame() 的 rAF）
+       ------------------------------------------------------------
        窗口最小化 / 切到后台时浏览器完全不派发 rAF，frame() 停摆，
-       frame() 里那个「超过 6 秒强制收尾」的检查也就永远跑不到 ——
-       appL 会一直挂在 DOM 上。而它是 `.app` 的完整副本，同样命中
-       `.app[data-theme='dark'] .card`，用户切回窗口看到的就是
-       「主题已经变了，网格里的卡片还是深色」。
-       setTimeout 在后台虽然被节流到约 1s 一次，但仍在跑，够用。 */
+       frame() 里那些收尾检查也就永远跑不到 —— appL 会一直挂在 DOM 上。
+       而它是 `.app` 的完整副本，同样命中 `.app[data-theme='dark'] .card`，
+       用户切回窗口看到的就是「主题已经变了，网格里的卡片还是深色」。
+       setTimeout 在后台虽然被节流到约 1s 一次，但仍在跑，够用。
+
+       ★ 为什么是两条而不是一条
+       只按「建层后 8 秒」兜底太晚 —— 用户等 8 秒才看到网格变白，
+       就是「要过几秒钟才恢复」那个抱怨。真正的漏层场景是「层建好了
+       但旋钮从来没动过」：
+         · pointerdown 建层 → pointerup 丢失（鼠标拖出窗口、系统吞掉
+           事件、触控被抢占）→ 永远走不到 setTarget；
+         · 此时 pos === target，revealMoving() 恒为 false，
+           revealStarted 永远是 false，frame() 里两条收尾条件都不成立；
+         · 而 prepare 已经把真实界面提前切成目标主题，html 的 data-theme
+           要等 finish 才落 —— 两边分叉，卡片继续是深色。
+       所以加一条短看门狗：建层后 1.2 秒还没动过，说明这一轮没戏了，
+       直接收掉（不提交）。1.2 秒足够区分「用户按住不动在犹豫」——
+       那种情况会走 pointerup，不会撞到这条。 */
     clearTimeout(revealWatchdog);
     revealWatchdog = setTimeout(() => {
       revealWatchdog = 0;
       if (!revealOn) return;
-      /* 到位了就走正常路径；没到位也强制收尾（按目标主题提交） */
+      if (!revealStarted) {
+        /* 没动过：这一轮什么也没发生，安静收掉 */
+        endReveal(false);
+        return;
+      }
+      /* 动过但没收干净：按目标主题强制提交 */
       pos = target;
       xv = 0;
       revealOn = false;
@@ -1375,7 +1433,7 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
       pendingLift = false;
       btn.classList.remove('is-veiled');
       if (lifted) scheduleLower();
-    }, 8000);
+    }, 1200);
 
     return true;
   }
@@ -1406,6 +1464,8 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
          「只拖了一点点就松手」也甩到对面（拖 10% 时 xv 往往已经很大），
          手感和直觉不符。这里加一条：离原位不足 35% 一律弹回。 */
       drag = false;
+      /* 拖动结束不走 toggle()，标记作废，免得下一次点击误复用旧层 */
+      revealFromDown = false;
       const moved = Math.abs(pos - dragOrigin);
       const goRight = moved < 0.35
         ? pos >= 0.5
@@ -1428,8 +1488,12 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
     if (window.__tswDebug) window.__tswToggleCalled = { lock: performance.now() < pageLockUntil, target, pos };
     if (performance.now() < pageLockUntil) return;
     const nextTarget = target === 1 ? 0 : 1;
-    /* 先建层。失败（克隆不出来）就退回老路 */
-    if (!beginReveal()) {
+    /* 先建层。失败（克隆不出来）就退回老路。
+       reuse：pointerdown 已经建好了就接着用，别销毁重建 —— 那会把
+       lift 之后的 inline 定位和隐形占位一起克隆进去，底栏错位。 */
+    const reuse = revealFromDown && revealOn;
+    revealFromDown = false;
+    if (!beginReveal({ reuse })) {
       if (typeof onToggle === 'function') onToggle();
       return;
     }
