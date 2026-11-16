@@ -95,6 +95,10 @@ protocol.registerSchemesAsPrivileged([
       standard: true,
       secure: true,
       supportFetchAPI: true,
+      /* 图片编辑器要用 fetch 把原图读成 blob（见下面协议处理里的
+         Access-Control-Allow-Origin）。不开这个，renderer 里对 vault://
+         的 fetch 一律 "Failed to fetch"。 */
+      corsEnabled: true,
       stream: true,
       bypassCSP: true,
     },
@@ -3152,6 +3156,51 @@ function registerIpc() {
     return { ok: true, state: snapshot() };
   });
 
+  /**
+   * 保存图片编辑结果（旋转 / 裁剪 / 画笔 / 马赛克 / 橡皮）。
+   *
+   * 和 saveText 一个套路：先备份旧版本，再覆盖原文件 —— 用户要的就是
+   * 「编辑完同步到本地文件」，而不是另存一份。
+   *
+   * 必须按扩展名校验格式：画布只能编码 png / jpeg / webp 三种。
+   * 如果放任前端把 PNG 字节写进 .gif，文件头对不上扩展名，双击就打不开了。
+   * 所以这里不猜、不转换，格式不支持就明确报错，让前端别显示编辑入口。
+   */
+  ipcMain.handle('file:saveImage', async (_e, { id, mime, data }) => {
+    const f = findFile(id);
+    if (!f) throw new Error('文件不存在');
+    if (!fs.existsSync(f.path)) throw new Error('原文件已不存在，无法保存');
+
+    if (kindOf(f.ext) !== 'image') throw new Error('该文件不是图片');
+
+    const EXPECT = {
+      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp',
+    };
+    const want = EXPECT[String(f.ext || '').toLowerCase()];
+    if (!want) throw new Error(`这种图片格式不支持内置编辑（${f.ext || '未知扩展名'}）`);
+    if (mime && mime !== want) throw new Error('图片格式和文件扩展名不匹配');
+
+    /* Uint8Array 经 IPC 过来会变成 Buffer 或普通对象，两种都接 */
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data || []);
+    if (!buf.length) throw new Error('没有收到图片数据');
+    if (buf.length > 200 * 1024 * 1024) throw new Error('图片数据过大，无法保存');
+
+    // 备份一份，和文本编辑保持一致（旧版本都在「编辑备份」里）
+    const backupDir = path.join(app.getPath('userData'), 'backups');
+    await fsp.mkdir(backupDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    await fsp.copyFile(f.path, path.join(backupDir, `${f.id}_${stamp}${f.ext}`));
+
+    await fsp.writeFile(f.path, buf);
+    const st = await fsp.stat(f.path);
+    f.size = st.size;
+    f.mtime = st.mtimeMs;
+    invalidateStat(f.path);
+    previewCache.delete(f.id); // 预览缓存里还是旧图，必须作废
+    saveStateNow();
+    return { ok: true, state: snapshot(), size: f.size };
+  });
+
   // 用系统默认程序打开编辑（Office / WPS 等）
   ipcMain.handle('file:openEditor', async (_e, id) => {
     const f = findFile(id);
@@ -3958,6 +4007,11 @@ app.whenReady().then(() => {
       headers.set('Content-Type', mime);
       headers.set('Accept-Ranges', 'bytes');
       headers.set('Cache-Control', 'no-store');
+      /* 图片编辑器要把原图读成 blob 再画到画布上（直接 drawImage 会
+         污染画布，马赛克和保存都做不了）。页面是 file:// 源，vault://
+         是另一个源，不加这条 fetch 会以「Failed to fetch」告终。
+         这里放开的只是索引里登记过的文件，不是任意路径读取。 */
+      headers.set('Access-Control-Allow-Origin', '*');
       return new Response(res.body, { status: res.status, headers });
     } catch (err) {
       return new Response(`Error: ${err.message}`, { status: 500 });

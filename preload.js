@@ -75,6 +75,8 @@ contextBridge.exposeInMainWorld('vault', {
     editorsForDir: () => invoke('editor:forDir'),
     rename: (id, name) => invoke('file:rename', { id, name }),
     saveText: (id, text) => invoke('file:saveText', { id, text }),
+    /** 保存图片编辑结果：data 是 Uint8Array（画布编码后的字节） */
+    saveImage: (id, mime, data) => invoke('file:saveImage', { id, mime, data }),
     moveToCourse: (id, courseId) => invoke('file:moveToCourse', { id, courseId }),
     setStorage: (id, storage) => invoke('file:setStorage', { id, storage }),
   },

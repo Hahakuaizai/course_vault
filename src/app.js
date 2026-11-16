@@ -248,6 +248,16 @@ const RELEASE_NOTES = [
   {
     date: '2026-11-16',
     items: [
+      { type: 'new', text: '图片预览里的「编辑」不再是摆设：点右上角编辑按钮（或按 Ctrl+E）进入真正的图片编辑器。支持向左 / 向右旋转 90°、裁剪（在图上拖出框再点「应用裁剪」）、画笔涂鸦（可换颜色和粗细）、马赛克笔（笔刷大小与马赛克块大小分开调）、橡皮擦，以及撤销 / 重做 / 还原' },
+      { type: 'new', text: '图片编辑保存后会直接写回磁盘上的原文件，改之前自动把旧版本复制一份到「编辑备份」（和文本编辑同一套规则）。按 Ctrl+S 保存、Ctrl+Z 撤销、Ctrl+Shift+Z 重做，关闭或退出时如果有没保存的改动会先问一声' },
+      { type: 'improve', text: '撤销 / 重做只作用于画笔、马赛克和橡皮这类涂抹动作；旋转和裁剪是直接改画布的，不进撤销栈，转错了用「还原」重来或退出不保存' },
+      { type: 'improve', text: '图片编辑器按原图像素编辑、只在屏幕上缩放显示，画笔和裁剪都是精确到像素的；保存时保持原格式（PNG / JPG / WebP），不会把图片转成别的格式' },
+      { type: 'fix', text: 'GIF、SVG、BMP、ICO、AVIF 这些格式不显示编辑入口：Chromium 的画布只能编码 PNG / JPG / WebP 三种，硬写会把文件头写坏导致打不开。这些格式仍可用「用其他应用打开」处理' },
+    ],
+  },
+  {
+    date: '2026-11-16',
+    items: [
       { type: 'fix', text: '修复「全部文件」里用名称搜索搜到某个文件夹后，点它进不去：标题和面包屑都换成了新目录，可网格里还是全库的搜索结果，里面的文件一个都看不见。原因是进目录时只清掉了搜索结果、没清掉搜索框里的文字，界面一直当自己还在搜索。现在点文件夹、点侧栏、点目录树、点面包屑、按 Alt+↑ / Alt+Home，都会把搜索一起收起来，进去就能看到里面的内容' },
     ],
   },
@@ -567,6 +577,9 @@ const GUIDE_SECTIONS = [
       <p>纯文本和代码可以直接在软件里改：按 <kbd>Ctrl</kbd>+<kbd>E</kbd> 进入编辑，
       <kbd>Ctrl</kbd>+<kbd>S</kbd> 保存。保存前会把旧版本复制一份到「编辑备份」，
       误改可以找回来。</p>
+      <p>图片（PNG / JPG / WebP）也能直接编辑：同样按 <kbd>Ctrl</kbd>+<kbd>E</kbd>
+      进入，可旋转、裁剪、涂鸦、打马赛克、用橡皮擦掉涂鸦，
+      <kbd>Ctrl</kbd>+<kbd>Z</kbd> 撤销、<kbd>Ctrl</kbd>+<kbd>S</kbd> 保存回原文件。</p>
       <p>右上角「打开」会用默认编辑器打开文件（在「设置 → 导入」里换）；
       展开它可以选其他已安装的程序。如果这个文件属于某个项目
       （目录里有 <code>package.json</code>、<code>.git</code>、<code>pom.xml</code> 之类的标志），
@@ -2144,6 +2157,11 @@ let currentPreview = null;
 async function openPreview(id) {
   const f = S.files.find((x) => x.id === id);
   if (!f) return;
+  // 换个文件预览时，旧的图片编辑器（连同它的 resize 监听）一起收掉
+  if (imageEditor) {
+    ieDispose(imageEditor);
+    imageEditor = null;
+  }
   S.previewFileId = id;
 
   $('#previewName').textContent = f.name;
@@ -2164,9 +2182,13 @@ async function openPreview(id) {
     currentPreview = p;
     body.innerHTML = '';
 
-    // 只有纯文本类才允许内置编辑，其余走系统程序
+    // 纯文本类走文本编辑器；png / jpg / webp 走图片编辑器；其余走系统程序
     setEditMode(false);
-    $('#btnEdit').hidden = !p.editable;
+    const imgEditable = imageEditablePreview(p);
+    $('#btnEdit').hidden = !(p.editable || imgEditable);
+    $('#btnEdit').title = imgEditable
+      ? '编辑图片 (Ctrl+E，再按退出)'
+      : '编辑 (Ctrl+E，再按退出)';
 
     // 「用编辑器打开」：代码 / 文本类文件都显示
     const runBtn = $('#btnRun');
@@ -2193,7 +2215,9 @@ async function openPreview(id) {
       const wrap = document.createElement('div');
       wrap.className = 'pv-center';
       const img = document.createElement('img');
-      img.src = p.url;
+      /* 带 mtime 当版本号：同一条记录刚被编辑保存过时，避免内存缓存
+         把旧图再显示一遍（协议本身也是 no-store，这里再兜一层） */
+      img.src = f.mtime ? `${p.url}?v=${Math.round(f.mtime)}` : p.url;
       img.alt = p.name;
       wrap.appendChild(img);
       body.appendChild(wrap);
@@ -2361,6 +2385,22 @@ async function openPreview(id) {
 }
 
 async function closePreview() {
+  // 图片编辑：有没保存的改动先问一声（和文本编辑一致）
+  if (imageEditor && imageEditor.ops.length) {
+    const ok = await askConfirm({
+      title: '有未保存的修改',
+      lead: '关闭后这次的图片改动会丢失。要放弃修改并关闭吗？',
+      okText: '放弃修改',
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  if (imageEditor) {
+    ieDispose(imageEditor);
+    imageEditor = null;
+    setImageEditMode(false);
+  }
+
   if (isEditing) {
     // 内容没变过就别烦用户 —— 打开就关、什么都没改时不该弹提示
     const changed = editorEl && editorEl.value !== (currentPreview?.text || '');
@@ -2653,8 +2693,14 @@ async function exitEditMode() {
 
 /** Ctrl+E 是开关：只读时进入编辑，编辑中则退出 */
 function toggleEditMode() {
+  if (imageEditor) {
+    exitImageEdit().catch((err) => toast(err?.message || '退出编辑失败', 'error'));
+    return;
+  }
   if (isEditing) {
     exitEditMode().catch((err) => toast(err?.message || '退出编辑失败', 'error'));
+  } else if (imageEditablePreview(currentPreview)) {
+    enterImageEdit().catch((err) => toast(err?.message || '进入图片编辑失败', 'error'));
   } else if (currentPreview?.editable) {
     enterEditMode();
   }
@@ -2678,6 +2724,822 @@ async function saveEdit() {
     toast(err.message || '保存失败', 'error');
   } finally {
     btn.disabled = false;
+  }
+}
+
+/* ============================================================
+   图片编辑
+   ------------------------------------------------------------
+   预览图片时点右上角「编辑」(Ctrl+E) 进入：旋转、裁剪、画笔、
+   马赛克笔、橡皮，外加撤销 / 重做 / 还原。保存后直接写回原文件，
+   写之前留一份备份 —— 和文本编辑同一套规则。
+
+   为什么分两层：
+     base —— 原图经过「旋转 / 裁剪」之后的样子
+     ink  —— 画笔、马赛克、橡皮留下的痕迹，透明底
+   两层叠在 DOM 里就是屏幕上的效果。每次操作记成一条 op，
+   撤销 = 丢掉最后一条从头重放，比每一步都存整张画布省内存。
+
+   两个坑：
+     1. 图片走 vault:// 协议，和页面不同源，直接 drawImage 画布会被
+        污染（getImageData / toBlob 全报 SecurityError）。所以先用
+        fetch 读成 blob、转成同源的 blob: URL 再画。
+     2. 画布只能编码 png / jpeg / webp。别的格式（gif、svg、bmp…）
+        不给编辑入口 —— 把 PNG 字节写进 .gif 会直接打不开。
+   ============================================================ */
+const IMAGE_EDIT_MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+};
+const IMAGE_EDIT_EXTS = new Set(Object.keys(IMAGE_EDIT_MIME));
+/** 超过这个像素数就拒绝：画布面积太大时 Chromium 会直接给一张空白画布 */
+const IMAGE_EDIT_MAX_PIXELS = 50 * 1000 * 1000;
+
+let imageEditor = null;
+/** 正在读图建编辑器：连点两下「编辑」不要建出两份 */
+let imageEditLoading = false;
+
+const IE_ICONS = {
+  crop: '<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>',
+  brush: '<path d="M18.37 2.63 14 7l-1.59-1.59a2 2 0 0 0-2.82 0L8 7l9 9 1.59-1.59a2 2 0 0 0 0-2.82L17 10l4.37-4.37a2.12 2.12 0 1 0-3-3Z"/><path d="M9 8c-2 3-4 3.5-7 4l8 10c2-1 6-5 6-7"/>',
+  mosaic: '<rect x="3.6" y="3.6" width="6.4" height="6.4" rx="1.2"/><rect x="14" y="3.6" width="6.4" height="6.4" rx="1.2"/><rect x="3.6" y="14" width="6.4" height="6.4" rx="1.2"/><rect x="14" y="14" width="6.4" height="6.4" rx="1.2"/>',
+  eraser: '<path d="M21 21H8a2 2 0 0 1-1.42-.587l-3.994-3.999a2 2 0 0 1 0-2.828l10-10a2 2 0 0 1 2.829 0l5.999 6a2 2 0 0 1 0 2.828L12.834 21"/><path d="M5.082 11.09l8.828 8.829"/>',
+  rotateLeft: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+  rotateRight: '<path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+  undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/>',
+  redo: '<path d="M15 14l5-5-5-5"/><path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5v0A5.5 5.5 0 0 0 9.5 20H13"/>',
+  reset: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 8v4l2.5 1.5"/>',
+};
+
+/** 这个预览对象能不能用内置图片编辑器 */
+function imageEditablePreview(p) {
+  return !!p && p.type === 'image'
+    && IMAGE_EDIT_EXTS.has(String(p.ext || '').toLowerCase());
+}
+
+/**
+ * 把图片读成一张同源的画布。
+ * 必须走 fetch + blob: URL —— vault:// 和页面不同源，直接画会污染画布，
+ * 后面 toBlob / getImageData 全部报 SecurityError（马赛克和保存都要用）。
+ */
+async function imageToCanvas(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`读取图片失败（${res.status}）`);
+  const blob = await res.blob();
+  const objUrl = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('图片解码失败，无法编辑'));
+      el.src = objUrl;
+    });
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth || img.width;
+    c.height = img.naturalHeight || img.height;
+    if (!c.width || !c.height) throw new Error('图片尺寸异常，无法编辑');
+    c.getContext('2d').drawImage(img, 0, 0);
+    return c;
+  } finally {
+    URL.revokeObjectURL(objUrl);
+  }
+}
+
+/** 进入图片编辑：把只读的 <img> 换成画布 + 工具栏 */
+async function enterImageEdit() {
+  const p = currentPreview;
+  const id = S.previewFileId;
+  if (!id || imageEditor || imageEditLoading || !imageEditablePreview(p)) return;
+
+  let src;
+  imageEditLoading = true;
+  try {
+    src = await imageToCanvas(p.url);
+  } catch (err) {
+    toast(err.message || '无法编辑这张图片', 'error');
+    return;
+  } finally {
+    imageEditLoading = false;
+  }
+  /* 读图期间用户可能已经关了预览 / 换了一张图 */
+  if (S.previewFileId !== id || currentPreview !== p) return;
+  if (src.width * src.height > IMAGE_EDIT_MAX_PIXELS) {
+    toast('图片太大（超过 5000 万像素），无法在软件里编辑', 'error');
+    return;
+  }
+
+  const body = $('#previewBody');
+  body.innerHTML = '';
+  const root = document.createElement('div');
+  root.className = 'img-editor';
+  root.innerHTML = `
+    <div class="ie-bar">
+      <div class="ie-group ie-tools">
+        ${[
+          ['crop', '裁剪'], ['brush', '画笔'], ['mosaic', '马赛克'], ['eraser', '橡皮'],
+        ].map(([key, label]) => `
+          <button class="ie-btn ie-tool" data-tool="${key}" title="${label}">
+            <svg viewBox="0 0 24 24">${IE_ICONS[key]}</svg><span>${label}</span>
+          </button>`).join('')}
+      </div>
+      <div class="ie-group ie-opts" id="ieOpts"></div>
+      <div class="ie-group ie-acts">
+        <button class="ie-btn" data-act="rotate-left" title="向左旋转 90°">
+          <svg viewBox="0 0 24 24">${IE_ICONS.rotateLeft}</svg>
+        </button>
+        <button class="ie-btn" data-act="rotate-right" title="向右旋转 90°">
+          <svg viewBox="0 0 24 24">${IE_ICONS.rotateRight}</svg>
+        </button>
+        <span class="ie-sep"></span>
+        <button class="ie-btn" data-act="undo" title="撤销 (Ctrl+Z)">
+          <svg viewBox="0 0 24 24">${IE_ICONS.undo}</svg>
+        </button>
+        <button class="ie-btn" data-act="redo" title="重做 (Ctrl+Shift+Z)">
+          <svg viewBox="0 0 24 24">${IE_ICONS.redo}</svg>
+        </button>
+        <button class="ie-btn" data-act="reset" title="还原为原图（放弃本次所有编辑）">
+          <svg viewBox="0 0 24 24">${IE_ICONS.reset}</svg>
+        </button>
+        <button class="ie-save" data-act="save">保存</button>
+      </div>
+    </div>
+    <div class="ie-stage" id="ieStage">
+      <div class="ie-wrap" id="ieWrap">
+        <canvas id="ieBase"></canvas>
+        <canvas id="ieInk"></canvas>
+        <div class="ie-crop-rect" id="ieCropRect" hidden></div>
+      </div>
+      <div class="ie-cropbar" id="ieCropBar" hidden>
+        <button class="primary-btn" data-act="crop-apply">应用裁剪</button>
+        <button class="ghost-btn" data-act="crop-cancel">取消</button>
+      </div>
+    </div>
+    <div class="ie-foot"><span id="ieFootText"></span></div>`;
+  body.appendChild(root);
+
+  const baseCanvas = root.querySelector('#ieBase');
+  const inkCanvas = root.querySelector('#ieInk');
+  const ie = {
+    id,
+    ext: String(p.ext || '').toLowerCase(),
+    src,
+    root,
+    stage: root.querySelector('#ieStage'),
+    wrap: root.querySelector('#ieWrap'),
+    baseCanvas,
+    inkCanvas,
+    baseCtx: baseCanvas.getContext('2d'),
+    inkCtx: inkCanvas.getContext('2d'),
+    cropEl: root.querySelector('#ieCropRect'),
+    ops: [],
+    redo: [],
+    tool: 'brush',
+    color: '#e5484d',
+    brushSize: 8,
+    eraserSize: 26,
+    mosaicSize: 44,
+    mosaicBlock: 14,
+    pending: null,
+    cropRect: null,
+  };
+  imageEditor = ie;
+  setImageEditMode(true);
+  ieRenderOpts(ie);
+  ieBindCanvas(ie);
+  ieBindBar(ie);
+  ieRender(ie);
+  ieFit(ie);
+}
+
+/** 编辑模式与只读模式的界面切换（不动文本编辑那套 isEditing） */
+function setImageEditMode(on) {
+  $('#previewBody').classList.toggle('is-editing', on);
+  $('#btnSaveEdit').hidden = !on;
+  if (on) {
+    $('#btnEdit').hidden = true;
+  } else {
+    const p = currentPreview;
+    $('#btnEdit').hidden = !(p?.editable || imageEditablePreview(p));
+  }
+}
+
+function ieRenderOpts(ie) {
+  const box = ie.root.querySelector('#ieOpts');
+  if (!box) return;
+  if (ie.tool === 'brush') {
+    box.innerHTML = `
+      <label class="ie-color" title="画笔颜色">
+        <input type="color" id="ieColor" value="${escapeHtml(ie.color)}">
+      </label>
+      <label class="ie-range">粗细
+        <input type="range" id="ieBrushSize" min="1" max="48" step="1" value="${ie.brushSize}">
+        <span class="ie-val">${ie.brushSize}px</span>
+      </label>`;
+  } else if (ie.tool === 'eraser') {
+    box.innerHTML = `
+      <label class="ie-range">橡皮大小
+        <input type="range" id="ieEraserSize" min="4" max="120" step="2" value="${ie.eraserSize}">
+        <span class="ie-val">${ie.eraserSize}px</span>
+      </label>`;
+  } else if (ie.tool === 'mosaic') {
+    box.innerHTML = `
+      <label class="ie-range">笔刷
+        <input type="range" id="ieMosaicSize" min="12" max="160" step="4" value="${ie.mosaicSize}">
+        <span class="ie-val">${ie.mosaicSize}px</span>
+      </label>
+      <label class="ie-range">块大小
+        <input type="range" id="ieMosaicBlock" min="4" max="40" step="2" value="${ie.mosaicBlock}">
+        <span class="ie-val">${ie.mosaicBlock}px</span>
+      </label>`;
+  } else {
+    box.innerHTML = '<span class="ie-tip">在图上拖动框选，再点「应用裁剪」</span>';
+  }
+}
+
+function ieBindBar(ie) {
+  const root = ie.root;
+
+  root.addEventListener('click', (e) => {
+    const toolBtn = e.target.closest('[data-tool]');
+    if (toolBtn) {
+      ieSetTool(ie, toolBtn.dataset.tool);
+      return;
+    }
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (!act) return;
+    if (act === 'rotate-left') iePushOp(ie, { kind: 'rotate', dir: 'ccw' });
+    else if (act === 'rotate-right') iePushOp(ie, { kind: 'rotate', dir: 'cw' });
+    else if (act === 'undo') ieUndo(ie);
+    else if (act === 'redo') ieRedo(ie);
+    else if (act === 'reset') ieReset(ie);
+    else if (act === 'crop-apply') ieApplyCrop(ie);
+    else if (act === 'crop-cancel') ieClearCrop(ie);
+    else if (act === 'save') saveImageEdit();
+  });
+
+  root.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t.id === 'ieColor') ie.color = t.value;
+    else if (t.id === 'ieBrushSize') ie.brushSize = Number(t.value);
+    else if (t.id === 'ieEraserSize') ie.eraserSize = Number(t.value);
+    else if (t.id === 'ieMosaicSize') ie.mosaicSize = Number(t.value);
+    else if (t.id === 'ieMosaicBlock') ie.mosaicBlock = Number(t.value);
+    const val = t.closest('.ie-range')?.querySelector('.ie-val');
+    if (val) val.textContent = `${t.value}px`;
+  });
+}
+
+function ieBindCanvas(ie) {
+  const wrap = ie.wrap;
+
+  wrap.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || imageEditor !== ie) return;
+    e.preventDefault();
+    const pt = iePoint(ie, e);
+    try { wrap.setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
+    if (ie.tool === 'crop') {
+      ie.pending = { cropStart: pt, cropRect: null };
+      ieShowCrop(ie, { x: pt.x, y: pt.y, w: 0, h: 0 });
+      return;
+    }
+    ie.pending = ieStartStroke(ie, pt);
+  });
+
+  wrap.addEventListener('pointermove', (e) => {
+    const pend = ie.pending;
+    if (!pend || imageEditor !== ie) return;
+    const pt = iePoint(ie, e);
+    if (pend.cropStart) {
+      const rect = ieNormRect(pend.cropStart, pt);
+      pend.cropRect = rect;
+      ieShowCrop(ie, rect);
+      return;
+    }
+    ieContinueStroke(ie, pend, pt);
+  });
+
+  const finish = () => {
+    const pend = ie.pending;
+    if (!pend) return;
+    ie.pending = null;
+    if (pend.cropStart) {
+      if (pend.cropRect && pend.cropRect.w >= 2 && pend.cropRect.h >= 2) {
+        ie.cropRect = pend.cropRect;
+        ieShowCrop(ie, ie.cropRect);
+        ie.root.querySelector('#ieCropBar').hidden = false;
+      } else {
+        ieClearCrop(ie);
+      }
+      return;
+    }
+    ieFinishStroke(ie, pend);
+  };
+  wrap.addEventListener('pointerup', finish);
+  wrap.addEventListener('pointercancel', finish);
+
+  /* 窗口大小变了，画布要重新按可用空间缩放 */
+  ie.onResize = () => {
+    if (imageEditor === ie) ieFit(ie);
+  };
+  window.addEventListener('resize', ie.onResize);
+}
+
+/** 关掉编辑器时摘掉挂在 window 上的监听，别让旧实例越攒越多 */
+function ieDispose(ie) {
+  if (!ie) return;
+  if (ie.onResize) {
+    window.removeEventListener('resize', ie.onResize);
+    ie.onResize = null;
+  }
+}
+
+/** 屏幕坐标 → 图片像素坐标（缩放到原图尺寸） */
+function iePoint(ie, e) {
+  const r = ie.wrap.getBoundingClientRect();
+  const w = ie.baseCanvas.width;
+  const h = ie.baseCanvas.height;
+  const x = ((e.clientX - r.left) / (r.width || 1)) * w;
+  const y = ((e.clientY - r.top) / (r.height || 1)) * h;
+  return {
+    x: Math.max(0, Math.min(w, x)),
+    y: Math.max(0, Math.min(h, y)),
+  };
+}
+
+function ieStartStroke(ie, pt) {
+  const kind = ie.tool === 'eraser' ? 'erase' : (ie.tool === 'mosaic' ? 'mosaic' : 'brush');
+  const op = {
+    kind,
+    points: [pt],
+    size: kind === 'brush' ? ie.brushSize : (kind === 'erase' ? ie.eraserSize : ie.mosaicSize),
+    block: kind === 'mosaic' ? ie.mosaicBlock : 0,
+    color: ie.color,
+  };
+  const pend = { op, last: pt, stamped: 0, done: new Set() };
+  if (kind === 'mosaic') {
+    /* 采样源是「这一笔开始之前」的画面：画笔自己画出来的块不能再被采样，
+       否则越描越糊。整笔期间只取一次 ImageData。 */
+    const flat = ieCompose(ie.baseCanvas, ie.inkCanvas, true);
+    pend.sample = flat.getContext('2d', { willReadFrequently: true })
+      .getImageData(0, 0, flat.width, flat.height);
+  }
+  return pend;
+}
+
+function ieContinueStroke(ie, pend, pt) {
+  const op = pend.op;
+  if (pt.x === pend.last.x && pt.y === pend.last.y) return;
+  op.points.push(pt);
+
+  if (op.kind === 'mosaic') {
+    const from = Math.max(0, pend.stamped - 1);
+    const seg = { ...op, points: op.points.slice(from) };
+    const blocks = ieMosaicBlocks(seg, ie.baseCanvas.width, ie.baseCanvas.height);
+    ieStampMosaic(ie.inkCtx, pend.sample.data, ie.baseCanvas.width, ie.baseCanvas.height,
+      blocks, op.block, pend.done);
+    pend.stamped = op.points.length - 1;
+  } else {
+    const g = ie.inkCtx;
+    g.save();
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    g.lineWidth = op.size;
+    g.globalCompositeOperation = op.kind === 'erase' ? 'destination-out' : 'source-over';
+    g.strokeStyle = op.kind === 'erase' ? '#000' : op.color;
+    g.beginPath();
+    g.moveTo(pend.last.x, pend.last.y);
+    g.lineTo(pt.x, pt.y);
+    g.stroke();
+    g.restore();
+  }
+  pend.last = pt;
+}
+
+function ieFinishStroke(ie, pend) {
+  const op = pend.op;
+  if (op.points.length === 1 && op.kind !== 'mosaic') {
+    /* 只点了一下也要有痕迹，否则用户以为没生效。
+       马赛克除外：它要按格子上色，交给下面的重放统一处理。 */
+    const p = op.points[0];
+    const g = ie.inkCtx;
+    g.save();
+    g.globalCompositeOperation = op.kind === 'erase' ? 'destination-out' : 'source-over';
+    g.fillStyle = op.kind === 'erase' ? '#000' : op.color;
+    g.beginPath();
+    g.arc(p.x, p.y, Math.max(0.5, op.size / 2), 0, Math.PI * 2);
+    g.fill();
+    g.restore();
+  }
+  ie.ops.push(op);
+  ie.redo.length = 0;
+  ieRender(ie);
+}
+
+/** 拼出一张新画布：base 打底，ink 叠上去 */
+function ieCompose(base, ink, readOften = false) {
+  if (!ink) return base;
+  const c = document.createElement('canvas');
+  c.width = base.width;
+  c.height = base.height;
+  const g = c.getContext('2d', readOften ? { willReadFrequently: true } : undefined);
+  g.drawImage(base, 0, 0);
+  g.drawImage(ink, 0, 0);
+  return c;
+}
+
+/**
+ * 旋转一张画布 90°。
+ * 顺时针：新画布宽 = 原高，先平移到右上角再转 +90°，原图就落进新画布。
+ */
+function ieRotateCanvas(src, dir) {
+  const out = document.createElement('canvas');
+  out.width = src.height;
+  out.height = src.width;
+  const g = out.getContext('2d');
+  if (dir === 'cw') {
+    g.translate(out.width, 0);
+    g.rotate(Math.PI / 2);
+  } else {
+    g.translate(0, out.height);
+    g.rotate(-Math.PI / 2);
+  }
+  g.drawImage(src, 0, 0);
+  return out;
+}
+
+function ieCropCanvas(src, rect) {
+  const x = Math.max(0, Math.round(rect.x));
+  const y = Math.max(0, Math.round(rect.y));
+  const w = Math.max(1, Math.min(src.width - x, Math.round(rect.w)));
+  const h = Math.max(1, Math.min(src.height - y, Math.round(rect.h)));
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  out.getContext('2d').drawImage(src, x, y, w, h, 0, 0, w, h);
+  return out;
+}
+
+/**
+ * 一次马赛克笔画覆盖的格子（"bx,by" 集合）。
+ * 沿路径按半个格子插值，快速拖动时不会漏段。
+ * 重放和实时绘制共用这一份，结果才一致。
+ */
+function ieMosaicBlocks(op, W, H) {
+  const bs = Math.max(2, op.block || 14);
+  const rad = Math.max(bs, op.size || bs) / 2;
+  const maxBx = Math.max(0, Math.ceil(W / bs) - 1);
+  const maxBy = Math.max(0, Math.ceil(H / bs) - 1);
+  const out = new Set();
+
+  const stamp = (x, y) => {
+    const minX = Math.max(0, Math.floor((x - rad) / bs));
+    const maxX = Math.min(maxBx, Math.floor((x + rad) / bs));
+    const minY = Math.max(0, Math.floor((y - rad) / bs));
+    const maxY = Math.min(maxBy, Math.floor((y + rad) / bs));
+    for (let by = minY; by <= maxY; by += 1) {
+      for (let bx = minX; bx <= maxX; bx += 1) {
+        /* 圆形笔头：块中心离笔尖太远的不要，否则笔刷是方的 */
+        const cx = bx * bs + bs / 2;
+        const cy = by * bs + bs / 2;
+        if (Math.hypot(cx - x, cy - y) > rad + bs / 2) continue;
+        out.add(`${bx},${by}`);
+      }
+    }
+  };
+
+  const pts = op.points || [];
+  if (!pts.length) return out;
+  stamp(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i += 1) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+    const steps = Math.max(1, Math.ceil(dist / Math.max(2, bs / 2)));
+    for (let s = 1; s <= steps; s += 1) {
+      stamp(a.x + ((b.x - a.x) * s) / steps, a.y + ((b.y - a.y) * s) / steps);
+    }
+  }
+  return out;
+}
+
+/** 一个格子的平均颜色（按 alpha 加权，透明区域不会把颜色拉暗） */
+function ieBlockColor(data, W, H, x0, y0, bs) {
+  const x1 = Math.min(x0 + bs, W);
+  const y1 = Math.min(y0 + bs, H);
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let a = 0;
+  let n = 0;
+  for (let y = y0; y < y1; y += 1) {
+    for (let x = x0; x < x1; x += 1) {
+      const i = (y * W + x) * 4;
+      const al = data[i + 3];
+      r += data[i] * al;
+      g += data[i + 1] * al;
+      b += data[i + 2] * al;
+      a += al;
+      n += 1;
+    }
+  }
+  if (!n || !a) return null;
+  return `rgba(${Math.round(r / a)},${Math.round(g / a)},${Math.round(b / a)},${(a / n / 255).toFixed(3)})`;
+}
+
+function ieStampMosaic(g, data, W, H, blocks, bs, done) {
+  for (const key of blocks) {
+    if (done && done.has(key)) continue;
+    if (done) done.add(key);
+    const [bx, by] = key.split(',').map(Number);
+    const x0 = bx * bs;
+    const y0 = by * bs;
+    if (x0 >= W || y0 >= H) continue;
+    const color = ieBlockColor(data, W, H, x0, y0, bs);
+    if (!color) continue;
+    g.fillStyle = color;
+    g.fillRect(x0, y0, Math.min(bs, W - x0), Math.min(bs, H - y0));
+  }
+}
+
+/** 把一条笔画画到（透明）墨迹层上 */
+function ieDrawOp(g, op, sample) {
+  if (op.kind === 'mosaic') {
+    const W = sample.width;
+    const H = sample.height;
+    const data = sample.getContext('2d', { willReadFrequently: true })
+      .getImageData(0, 0, W, H).data;
+    ieStampMosaic(g, data, W, H, ieMosaicBlocks(op, W, H), op.block, null);
+    return;
+  }
+
+  const pts = op.points || [];
+  if (!pts.length) return;
+  g.save();
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
+  g.lineWidth = op.size;
+  g.globalCompositeOperation = op.kind === 'erase' ? 'destination-out' : 'source-over';
+  const color = op.kind === 'erase' ? '#000' : op.color;
+  g.strokeStyle = color;
+  if (pts.length === 1) {
+    g.fillStyle = color;
+    g.beginPath();
+    g.arc(pts[0].x, pts[0].y, Math.max(0.5, op.size / 2), 0, Math.PI * 2);
+    g.fill();
+  } else {
+    g.beginPath();
+    g.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i += 1) g.lineTo(pts[i].x, pts[i].y);
+    g.stroke();
+  }
+  g.restore();
+}
+
+/**
+ * 从原图开始重放所有操作，结果写进两层可见画布。
+ * 撤销 = 弹掉最后一条再跑一遍这个函数 —— 画布本身不存历史。
+ */
+function ieRender(ie) {
+  let base = ie.src;
+  let ink = null;
+
+  for (const op of ie.ops) {
+    if (op.kind === 'rotate') {
+      base = ieRotateCanvas(ieCompose(base, ink), op.dir);
+      ink = null;
+    } else if (op.kind === 'crop') {
+      base = ieCropCanvas(ieCompose(base, ink), op.rect);
+      ink = null;
+    } else {
+      if (!ink) {
+        ink = document.createElement('canvas');
+        ink.width = base.width;
+        ink.height = base.height;
+      }
+      const sample = op.kind === 'mosaic' ? ieCompose(base, ink, true) : null;
+      ieDrawOp(ink.getContext('2d'), op, sample);
+    }
+  }
+
+  const W = base.width;
+  const H = base.height;
+  if (ie.baseCanvas.width !== W) ie.baseCanvas.width = W;
+  if (ie.baseCanvas.height !== H) ie.baseCanvas.height = H;
+  ie.baseCtx.clearRect(0, 0, W, H);
+  ie.baseCtx.drawImage(base, 0, 0);
+
+  if (ie.inkCanvas.width !== W) ie.inkCanvas.width = W;
+  if (ie.inkCanvas.height !== H) ie.inkCanvas.height = H;
+  ie.inkCtx.clearRect(0, 0, W, H);
+  if (ink) ie.inkCtx.drawImage(ink, 0, 0);
+
+  ieFit(ie);
+  ieUpdateUI(ie);
+}
+
+/** 按可用空间把画布缩放到合适大小（不放大，小图保持原尺寸） */
+function ieFit(ie) {
+  const stage = ie.stage;
+  const cw = ie.baseCanvas.width;
+  const ch = ie.baseCanvas.height;
+  if (!cw || !ch || !stage) return;
+  const availW = Math.max(60, stage.clientWidth - 36);
+  const availH = Math.max(60, stage.clientHeight - 36);
+  const s = Math.min(availW / cw, availH / ch, 1);
+  ie.wrap.style.width = `${Math.round(cw * s)}px`;
+  ie.wrap.style.height = `${Math.round(ch * s)}px`;
+  if (ie.cropRect) ieShowCrop(ie, ie.cropRect);
+}
+
+function ieUpdateUI(ie) {
+  if (!ie || imageEditor !== ie) return;
+  ie.root.querySelectorAll('.ie-tool').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.tool === ie.tool);
+  });
+  const setDisabled = (act, off) => {
+    const el = ie.root.querySelector(`[data-act="${act}"]`);
+    if (el) el.disabled = !!off;
+  };
+  const canUndo = ie.ops.some(ieIsStrokeOp);
+  setDisabled('undo', !canUndo);
+  setDisabled('redo', !ie.redo.length);
+  setDisabled('reset', !ie.ops.length);
+
+  const foot = ie.root.querySelector('#ieFootText');
+  if (foot) {
+    const n = ie.ops.length;
+    foot.textContent = `${ie.baseCanvas.width} × ${ie.baseCanvas.height}px`
+      + (n ? ` · 已编辑 ${n} 步` : ' · 用上方工具开始编辑')
+      + (canUndo ? '，Ctrl+Z 撤销笔画' : '');
+  }
+}
+
+function ieSetTool(ie, key) {
+  if (!key || ie.tool === key) return;
+  ie.tool = key;
+  ieClearCrop(ie);
+  ieRenderOpts(ie);
+  ieUpdateUI(ie);
+}
+
+/**
+ * 哪些操作能撤销：只有涂抹类（画笔 / 马赛克 / 橡皮）。
+ * 旋转和裁剪是「改画布结构」的操作，用户明确要求它们不进撤销栈 ——
+ * 点一下撤销就转回去太容易误操作，想反悔用「还原」或直接不保存退出。
+ * 但旋转 / 裁剪本身仍要记进 ops：重放时得先有它们，笔画才有正确坐标。
+ */
+function ieIsStrokeOp(op) {
+  return op.kind === 'brush' || op.kind === 'mosaic' || op.kind === 'erase';
+}
+
+/** 旋转 / 裁剪：改动画布结构，不进撤销栈，并把「重做」作废 */
+function iePushStructure(ie, op) {
+  ieClearCrop(ie);
+  ie.ops.push(op);
+  ie.redo.length = 0;
+  ieRender(ie);
+}
+
+function iePushOp(ie, op) {
+  iePushStructure(ie, op);
+}
+
+/** 撤销最近一次「涂抹」；旋转 / 裁剪会被跳过、留在原处 */
+function ieUndo(ie) {
+  ieClearCrop(ie);
+  for (let i = ie.ops.length - 1; i >= 0; i -= 1) {
+    if (!ieIsStrokeOp(ie.ops[i])) continue;
+    const [op] = ie.ops.splice(i, 1);
+    ie.redo.push({ op, index: i });
+    ieRender(ie);
+    return;
+  }
+}
+
+/** 重做刚撤销的那一笔，插回它原来的位置 */
+function ieRedo(ie) {
+  ieClearCrop(ie);
+  const item = ie.redo.pop();
+  if (!item) return;
+  ie.ops.splice(Math.min(item.index, ie.ops.length), 0, item.op);
+  ieRender(ie);
+}
+
+function ieReset(ie) {
+  if (!ie.ops.length) return;
+  ieClearCrop(ie);
+  ie.ops.length = 0;
+  ie.redo.length = 0;
+  ieRender(ie);
+}
+
+function ieNormRect(a, b) {
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    w: Math.abs(b.x - a.x),
+    h: Math.abs(b.y - a.y),
+  };
+}
+
+function ieShowCrop(ie, rect) {
+  const el = ie.cropEl;
+  if (!el) return;
+  const r = ie.wrap.getBoundingClientRect();
+  const sx = r.width / (ie.baseCanvas.width || 1);
+  const sy = r.height / (ie.baseCanvas.height || 1);
+  el.hidden = false;
+  el.style.left = `${rect.x * sx}px`;
+  el.style.top = `${rect.y * sy}px`;
+  el.style.width = `${rect.w * sx}px`;
+  el.style.height = `${rect.h * sy}px`;
+}
+
+function ieClearCrop(ie) {
+  ie.pending = null;
+  ie.cropRect = null;
+  if (ie.cropEl) ie.cropEl.hidden = true;
+  const bar = ie.root.querySelector('#ieCropBar');
+  if (bar) bar.hidden = true;
+}
+
+function ieApplyCrop(ie) {
+  const rect = ie.cropRect;
+  ieClearCrop(ie);
+  if (!rect || rect.w < 2 || rect.h < 2) return;
+  ie.ops.push({ kind: 'crop', rect });
+  ie.redo.length = 0;
+  ieRender(ie);
+}
+
+/** 把两层画布合成为最终图片 */
+function ieFlatten(ie) {
+  const c = document.createElement('canvas');
+  c.width = ie.baseCanvas.width;
+  c.height = ie.baseCanvas.height;
+  const g = c.getContext('2d');
+  g.drawImage(ie.baseCanvas, 0, 0);
+  g.drawImage(ie.inkCanvas, 0, 0);
+  return c;
+}
+
+/** 退出图片编辑（force=true 时不问未保存） */
+async function exitImageEdit(force = false) {
+  const ie = imageEditor;
+  if (!ie) return;
+  if (!force && ie.ops.length) {
+    const ok = await askConfirm({
+      title: '放弃图片修改？',
+      lead: '退出编辑后，这次没保存的改动会丢失。',
+      okText: '放弃修改',
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  const id = ie.id;
+  ieDispose(ie);
+  imageEditor = null;
+  setImageEditMode(false);
+  await openPreview(id);
+}
+
+async function saveImageEdit() {
+  const ie = imageEditor;
+  if (!ie) return;
+  const mime = IMAGE_EDIT_MIME[ie.ext];
+  if (!mime) {
+    toast('这种图片格式不支持保存', 'error');
+    return;
+  }
+  if (!ie.ops.length) {
+    // 什么都没改，不必往磁盘上写一份一模一样的
+    await exitImageEdit(true);
+    return;
+  }
+
+  const btn = $('#btnSaveEdit');
+  if (btn) btn.disabled = true;
+  try {
+    const flat = ieFlatten(ie);
+    const blob = await new Promise((resolve, reject) => {
+      flat.toBlob((b) => (b ? resolve(b) : reject(new Error('图片编码失败'))), mime, 0.92);
+    });
+    const data = new Uint8Array(await blob.arrayBuffer());
+    const res = await api.files.saveImage(ie.id, mime, data);
+    applyState(res.state);
+    toast('图片已保存，原文件已更新（旧版有备份）', 'ok');
+
+    const id = ie.id;
+    ieDispose(ie);
+    imageEditor = null;
+    setImageEditMode(false);
+    await openPreview(id);
+  } catch (err) {
+    toast(err.message || '保存失败', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -3570,6 +4432,12 @@ function handleEscape() {
   if (!$('#confirmModal').hidden) return;
   // 更新公告放最前面：它是启动时弹的，其他弹窗都还没开
   if (!$('#changelogModal').hidden) { closeChangelog(); return; }
+  /* 图片编辑器里正框着裁剪区域：Esc 先取消这个选区，
+     不要把整个预览关掉（用户的意图往往是「这次裁剪我不想要了」） */
+  if (!$('#overlay').hidden && imageEditor?.cropRect) {
+    ieClearCrop(imageEditor);
+    return;
+  }
   if (!$('#overlay').hidden) { closePreview(); return; }
   // 走取消按钮，确保挂起的 Promise 被正常 resolve
   if (!$('#delModal').hidden) { $('#btnDelCancel').click(); return; }
@@ -4902,8 +5770,17 @@ function bindEvents() {
     if (!S.previewFileId) return;
     api.files.openExternal(S.previewFileId).catch((x) => toast(x.message, 'error'));
   });
-  $('#btnEdit').addEventListener('click', enterEditMode);
-  $('#btnSaveEdit').addEventListener('click', saveEdit);
+  $('#btnEdit').addEventListener('click', () => {
+    if (currentPreview?.type === 'image') {
+      enterImageEdit().catch((x) => toast(x?.message || '进入图片编辑失败', 'error'));
+    } else {
+      enterEditMode();
+    }
+  });
+  $('#btnSaveEdit').addEventListener('click', () => {
+    if (imageEditor) saveImageEdit();
+    else saveEdit();
+  });
 
   // 「打开方式」：点一下弹出本机可用的程序列表，选中即打开
   $('#btnRun').addEventListener('click', async (e) => {
@@ -5133,10 +6010,23 @@ function bindEvents() {
     if (inPreview && e.ctrlKey) {
       const k = e.key.toLowerCase();
 
-      // Ctrl+S 保存
+      // Ctrl+S 保存（文本编辑 / 图片编辑各自保存）
       if (k === 's') {
         e.preventDefault();
         if (isEditing) saveEdit();
+        else if (imageEditor) saveImageEdit();
+        return;
+      }
+      // 图片编辑里 Ctrl+Z 撤销、Ctrl+Shift+Z / Ctrl+Y 重做
+      if (imageEditor && k === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) ieRedo(imageEditor);
+        else ieUndo(imageEditor);
+        return;
+      }
+      if (imageEditor && k === 'y') {
+        e.preventDefault();
+        ieRedo(imageEditor);
         return;
       }
       // Ctrl+E 编辑开关：进入 / 退出
@@ -5863,6 +6753,24 @@ function prepareThemeReveal(target) {
   appL.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
   appL.removeAttribute('id');
   appL.id = 'appL';
+
+  /* ★ canvas 的像素不在 cloneNode 的复制范围内：宽高这些属性会复制，
+     画出来的内容不会。揭幕用的是「克隆层的画面」，所以克隆层里的画布
+     必须把像素补上，否则那一块在动画期间是空白。
+     （当前 `.app` 里带画布的是主题开关的 .tsw-cv；预览层虽然在 .app 之外
+     不参与克隆，但这里按「克隆体里所有画布」统一处理，以后有画布挪进来
+     也不会漏。） */
+  const canvasesSrc = appD.querySelectorAll('canvas');
+  const canvasesDst = appL.querySelectorAll('canvas');
+  canvasesSrc.forEach((src, i) => {
+    const dst = canvasesDst[i];
+    if (!dst || !src.width || !src.height) return;
+    try {
+      dst.width = src.width;
+      dst.height = src.height;
+      dst.getContext('2d').drawImage(src, 0, 0);
+    } catch { /* 画布不可读时宁可空白，也不要让整次切换失败 */ }
+  });
 
   /* ★ 摘掉主题开关「运行期」留在真实 DOM 上的痕迹。
      开关在揭幕期间会把自己提升到 top layer（theme-switch.js 的 lift()）：
@@ -6615,6 +7523,8 @@ async function boot() {
 // 调试/自动化钩子：供开发期脚本驱动界面，不参与业务逻辑
 window.__vaultDebug = {
   get state() { return S; },
+  /** 图片编辑器的内部状态（自动化测试用来核对撤销栈 / 画布尺寸） */
+  get imageEditor() { return imageEditor; },
   apply: applyState,
   render,
   openPreview,

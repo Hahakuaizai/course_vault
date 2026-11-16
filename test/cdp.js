@@ -71,7 +71,7 @@ async function connect() {
   try {
     await send('Page.setWebLifecycleState', { state: 'active' });
   } catch { /* 忽略 */ }
-  return { evaluate, shot, wait, send, close: () => ws.close() };
+  return { evaluate, ev: evaluate, shot, wait, send, close: () => ws.close() };
 }
 
 module.exports = { connect };

@@ -1592,6 +1592,144 @@ button:focus-visible {
 }
 .pv-audio { width: min(520px, 100%); }
 
+/* ---------- 图片编辑 ---------- */
+.img-editor {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+}
+
+.ie-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-1);
+  background: var(--bg-2);
+}
+.ie-group { display: flex; align-items: center; gap: 2px; }
+.ie-acts { margin-left: auto; }
+.ie-sep { width: 1px; height: 18px; margin: 0 5px; background: var(--line-2); }
+
+.ie-btn {
+  height: 30px;
+  min-width: 30px;
+  padding: 0 7px;
+  border-radius: var(--radius-s);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg-3);
+  font-size: 11.6px;
+  transition: background-color 0.16s var(--ease-out), color 0.16s var(--ease-out);
+}
+.ie-btn svg { width: 15px; height: 15px; }
+.ie-btn:hover { background: var(--bg-4); color: var(--fg-1); }
+.ie-btn.is-active { background: var(--accent-soft); color: var(--accent); }
+.ie-btn:disabled { opacity: 0.32; pointer-events: none; }
+
+.ie-save {
+  height: 30px;
+  margin-left: 6px;
+  padding: 0 15px;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 560;
+  transition: background-color 0.16s var(--ease-out);
+}
+.ie-save:hover { background: var(--accent-hover); }
+
+.ie-opts { gap: 12px; padding-left: 2px; }
+.ie-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.4px;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.ie-range input[type='range'] {
+  width: 82px;
+  accent-color: var(--accent);
+}
+.ie-val { min-width: 34px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.ie-color { display: inline-flex; align-items: center; }
+.ie-color input[type='color'] {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-s);
+  background: none;
+  cursor: pointer;
+}
+.ie-tip { font-size: 11.4px; color: var(--fg-3); }
+
+.ie-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  overflow: hidden;
+  /* 棋盘格底：透明 PNG 也能看出边界 */
+  background:
+    repeating-conic-gradient(var(--bg-3) 0% 25%, var(--bg-2) 0% 50%) 0 0 / 16px 16px;
+}
+
+.ie-wrap {
+  position: relative;
+  line-height: 0;
+  box-shadow: var(--shadow-2);
+  touch-action: none;
+  user-select: none;
+}
+.ie-wrap canvas { display: block; width: 100%; height: 100%; }
+#ieInk { position: absolute; inset: 0; cursor: crosshair; }
+
+.ie-crop-rect {
+  position: absolute;
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 0 9999px rgba(10, 9, 8, 0.38);
+  pointer-events: none;
+}
+.ie-crop-rect[hidden] { display: none; }
+
+.ie-cropbar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-2);
+}
+.ie-cropbar[hidden] { display: none; }
+.ie-cropbar .primary-btn,
+.ie-cropbar .ghost-btn { padding: 6px 14px; font-size: 12px; }
+
+.ie-foot {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border-top: 1px solid var(--line-1);
+  background: var(--bg-2);
+  font-size: 11.2px;
+  color: var(--fg-3);
+}
+
+
 .pv-doc {
   padding: 34px 46px 60px;
   max-width: 860px;
