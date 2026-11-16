@@ -1,0 +1,507 @@
+/* ============================================================
+   主题开关 · Aurora
+   ------------------------------------------------------------
+   照抄 aurora-win11-fx.html 的开关实现。
+
+   ★ 关键决定：**不再为 60×30 重新设计一套小尺寸参数**。
+   参考版的整套布局都写在 440×230 的坐标系里（轨道 440×230、
+   旋钮 200×200、光弧 viewBox 200×200、点阵 15×15 格）。
+   这里把这些数字原样搬进来，外层用 transform: scale() 缩到 60×30。
+
+   上一版失败的原因就在这儿：我在 26px 的旋钮上「按可读性」重新调了
+   点阵密度（9×9）、光弧描边（non-scaling-stroke 1.2px）、轨道阴影、
+   图层结构，结果形状、比例、层次全都不是参考版的样子 —— 一眼就看出来。
+
+   等比缩放的代价是细节变细（光弧核心层只剩 0.44px），但那是参考版
+   缩小后的真实样子，形状和层次是完整的。
+
+   唯一非等比的地方：参考版 440:230 ≈ 1.913，我们 60:30 = 2.0。
+   水平缩 60/440 = 0.13636，垂直缩 30/230 = 0.13043，差 4.5%，
+   肉眼不可见，换来的是「开关整体正好 60×30，和原来一样大」。
+   ============================================================ */
+
+/* ---------- 外层：就是按钮本身 ----------
+   尺寸取 84×42（参考版 440×230 按 0.19 缩），是原来 60×30 的 1.4 倍。
+   用户反馈 60×30 太小、点不准也拖不动，所以放大。
+   缩放后旋钮约 38px，拖动行程约 40px，手指/鼠标都够用。 */
+.tsw {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 84px;
+  height: 42px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  cursor: grab;
+  border-radius: 21px;
+  corner-shape: squircle;
+  touch-action: none;
+  -webkit-appearance: none;
+  appearance: none;
+  outline: none;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.tsw:active { cursor: grabbing; }
+
+.tsw:focus-visible { box-shadow: 0 0 0 4px var(--arc, #d4ccff); }
+
+/* ---------- 内层：参考版的 440×230 坐标系，整体缩放 ---------- */
+.tsw-dock {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 440px;
+  height: 230px;
+  transform-origin: 0 0;
+  transform: scale(0.190909, 0.182609); /* 84/440, 42/230 */
+
+  /* 由 JS 逐帧写入的插值颜色，先给一套暗态兜底 */
+  --t1: rgb(10, 14, 24);
+  --t2: rgb(19, 25, 39);
+  --tsa: rgba(0, 0, 0, 0.72);
+  --tsb: rgba(190, 207, 255, 0.12);
+  --drop: rgba(0, 0, 0, 0.46);
+  --k1: rgb(151, 165, 202);
+  --k2: rgb(54, 65, 91);
+  --kh: rgba(255, 255, 255, 0.34);
+  --kd: rgba(0, 0, 0, 0.55);
+  --kb: rgba(228, 221, 255, 0.8);
+  --kb2: rgba(190, 176, 255, 0.3);
+  --kref: rgba(172, 146, 255, 0.22);
+  --kouter: rgba(165, 142, 255, 0.22);
+  --arc: rgb(212, 204, 255);
+  --arcw: rgb(246, 244, 255);
+  --glow: rgba(184, 162, 255, 0.52);
+  --halo: rgba(160, 138, 255, 0.44);
+}
+
+/* ---------- 轨道 ---------- */
+.tsw-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 115px;
+  corner-shape: squircle;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--t1) 92%, white 8%), var(--t2));
+  box-shadow:
+    inset 0 3px 10px var(--tsa),
+    inset 0 -2px 7px var(--tsb),
+    0 1px 0 var(--tsb),
+    0 14px 30px var(--drop);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-sizing: border-box;
+}
+
+/* ---------- 光晕：跟着光弧位置在轨道上滑 ---------- */
+.tsw-halo {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 380px;
+  height: 380px;
+  margin: -190px 0 0 -190px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--halo) 0%, transparent 62%);
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* ---------- 旋钮：玻璃陶瓷 ---------- */
+.tsw-knob {
+  position: absolute;
+  left: 0;
+  top: 15px;
+  width: 200px;
+  height: 200px;
+  box-sizing: border-box;
+  border-radius: 56px;
+  corner-shape: squircle;
+  transform-origin: 50% 50%;
+  will-change: transform;
+  isolation: isolate;
+  background:
+    radial-gradient(ellipse 72% 42% at 18% 3%, rgba(255, 255, 255, 0.88), transparent 72%),
+    radial-gradient(ellipse 68% 48% at 92% 100%, var(--kref), transparent 76%),
+    linear-gradient(
+      150deg,
+      rgba(255, 255, 255, 0.72) 0%,
+      color-mix(in srgb, var(--k1) 97%, white 3%) 17%,
+      var(--k1) 46%,
+      var(--k2) 100%
+    );
+  box-shadow:
+    inset 0 1.4px 0 rgba(255, 255, 255, 0.98),
+    inset 1.2px 0 0 rgba(255, 255, 255, 0.62),
+    inset -1px 0 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(35, 48, 75, 0.14),
+    inset 0 -20px 34px rgba(20, 28, 45, 0.13),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 1px 2px rgba(255, 255, 255, 0.62),
+    0 14px 30px var(--kd),
+    0 4px 9px rgba(15, 25, 45, 0.16),
+    0 0 26px var(--kouter),
+    0 0 64px color-mix(in srgb, var(--kouter) 55%, transparent);
+}
+
+/* 内描边：一圈极细的高光边，让旋钮边缘「立」起来 */
+.tsw-knob::after {
+  content: '';
+  position: absolute;
+  inset: 7px;
+  border-radius: 48px;
+  corner-shape: squircle;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  box-shadow:
+    inset 0 0 0 1px rgba(120, 145, 190, 0.08),
+    0 0 0 1px rgba(30, 45, 75, 0.035);
+  pointer-events: none;
+  z-index: 4;
+}
+
+/* 外描边：155° 渐变，用 mask 只留 1.5px 的边 */
+.tsw-knob::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: linear-gradient(155deg, var(--kb), transparent 42%, var(--kb2));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0.96;
+  pointer-events: none;
+}
+
+/* ---------- 玻璃罩：底部暖光 + 斜向 soft-light ---------- */
+.tsw-gw {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  corner-shape: squircle;
+  overflow: hidden;
+  z-index: 1;
+}
+
+.tsw-gw::before {
+  content: '';
+  position: absolute;
+  left: 7%;
+  right: 7%;
+  bottom: 5%;
+  height: 24%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 100%, var(--kref), transparent 72%);
+  filter: blur(10px);
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.tsw-gw::after {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    125deg,
+    rgba(255, 255, 255, 0.18),
+    transparent 34%,
+    transparent 70%,
+    rgba(90, 115, 160, 0.08)
+  );
+  mix-blend-mode: soft-light;
+}
+
+/* ---------- 内辉光：跟着光弧走的 280px 径向光 ---------- */
+.tsw-ig {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 280px;
+  height: 280px;
+  margin: -140px 0 0 -140px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    var(--glow) 0%,
+    color-mix(in srgb, var(--glow) 28%, transparent) 34%,
+    transparent 68%
+  );
+  will-change: transform;
+}
+
+/* ---------- 顶部斜向扫光 ---------- */
+.tsw-sheen {
+  position: absolute;
+  left: 9px;
+  top: 7px;
+  right: 31%;
+  height: 40%;
+  border-radius: 46px 46px 70px 70px;
+  corner-shape: squircle;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.48),
+    rgba(255, 255, 255, 0.12) 46%,
+    rgba(255, 255, 255, 0)
+  );
+  filter: blur(0.35px);
+  mix-blend-mode: screen;
+  pointer-events: none;
+}
+
+/* ---------- 点阵图标（canvas 画月亮 / 太阳） ---------- */
+.tsw-cv {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 200px;
+  height: 200px;
+  z-index: 2;
+  filter: drop-shadow(0 2px 3px rgba(25, 35, 65, 0.16));
+  pointer-events: none;
+}
+
+/* ---------- 光弧 ----------
+   viewBox 200×200，描边宽度是 viewBox 相对值（22/14/8/2.4/3/3.4），
+   **不是** non-scaling-stroke —— 缩到 26px 后核心层只剩 0.44px，
+   但那正是参考版缩小后的样子。 */
+.tsw-arcs {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 200px;
+  height: 200px;
+  overflow: visible;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.tsw-arcs path {
+  fill: none;
+  stroke: var(--arc);
+  stroke-linecap: round;
+}
+
+.tsw-arcs path:last-of-type { stroke: var(--arcw); }
+
+/* ---------- 十字光点：光弧当前位置的亮斑 ---------- */
+.tsw-gl {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 52px;
+  height: 52px;
+  margin: -26px 0 0 -26px;
+  opacity: 0;
+  z-index: 5;
+  pointer-events: none;
+  will-change: transform, opacity;
+  background:
+    radial-gradient(circle, #fff 0, rgba(255, 238, 196, 0.85) 9%, transparent 32%),
+    linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.95), transparent) center / 100% 2px no-repeat,
+    linear-gradient(0deg, transparent, rgba(255, 255, 255, 0.95), transparent) center / 2px 100% no-repeat;
+}
+
+/* ---------- 日冕：到位时从旋钮底部浮起的暖色光芒 ---------- */
+.tsw-cor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  will-change: transform, opacity;
+}
+
+.tsw-cor i {
+  position: absolute;
+  left: -190px;
+  top: -190px;
+  width: 380px;
+  height: 380px;
+  border-radius: 50%;
+  background: repeating-conic-gradient(
+    from 0deg,
+    rgba(255, 205, 120, 0) 0 6deg,
+    rgba(255, 196, 104, 0.5) 8deg,
+    rgba(255, 205, 120, 0) 11deg 20deg
+  );
+  -webkit-mask: radial-gradient(circle, transparent 0 46%, #000 58%, transparent 74%);
+  mask: radial-gradient(circle, transparent 0 46%, #000 58%, transparent 74%);
+  animation: tsw-cor-spin 26s linear infinite;
+}
+
+.tsw-cor b {
+  position: absolute;
+  left: -100px;
+  top: -100px;
+  width: 200px;
+  height: 200px;
+  animation: tsw-mote 3.4s ease-out infinite;
+  background:
+    radial-gradient(circle at 20% 80%, #fff0c8 0 1.5px, transparent 2.5px),
+    radial-gradient(circle at 78% 70%, #ffe2a0 0 1.2px, transparent 2.2px),
+    radial-gradient(circle at 46% 92%, #fff6dc 0 1.8px, transparent 2.8px),
+    radial-gradient(circle at 62% 84%, #ffd890 0 1.2px, transparent 2.2px),
+    radial-gradient(circle at 32% 60%, #fff 0 1px, transparent 2px);
+}
+
+@keyframes tsw-cor-spin { to { transform: rotate(360deg); } }
+@keyframes tsw-mote {
+  0% { transform: translateY(14px); opacity: 0; }
+  25% { opacity: 1; }
+  100% { transform: translateY(-52px); opacity: 0; }
+}
+
+/* ---------- 轨道上那道横向扫光 ---------- */
+.tsw-swp {
+  position: absolute;
+  top: -20%;
+  bottom: -20%;
+  left: 0;
+  width: 34%;
+  opacity: 0;
+  pointer-events: none;
+  will-change: transform;
+  background: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0),
+    rgba(255, 255, 255, 0.8),
+    rgba(255, 255, 255, 0)
+  );
+  animation: tsw-swp 5.2s ease-in-out infinite;
+}
+
+@keyframes tsw-swp {
+  0%, 55% { transform: translateX(-170%) skewX(-18deg); }
+  100% { transform: translateX(420%) skewX(-18deg); }
+}
+
+/* ---------- 碰撞闪光 ---------- */
+.tsw-knob.is-hit { animation: tsw-hit 440ms ease-out 1; }
+
+@keyframes tsw-hit {
+  0% { filter: brightness(1.5) saturate(1.25) drop-shadow(0 0 16px var(--arc)); }
+  100% { filter: brightness(1) saturate(1) drop-shadow(0 0 0 transparent); }
+}
+
+/* ============================================================
+   全屏特效层
+   ------------------------------------------------------------
+   参考版挂在 .root 里（absolute）；这里挂 body，用 fixed。
+   z-index 取 25：盖得住侧栏和内容区，又低于弹窗（70 以上）。
+   ============================================================ */
+.tsw-fx {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 25;
+}
+
+/* 斜向光带：亮暗交界处扫过的一道白光 */
+.tsw-band {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 25;
+  opacity: 0;
+}
+
+/* ============================================================
+   popover 提升（揭幕期间浮到 top layer）
+   ------------------------------------------------------------
+   View Transition 的快照覆盖层是 top layer 最上面的一层，实时 DOM
+   全被盖住。揭幕这 800ms 里开关就算在下面一帧帧地画，用户也看不见。
+   popover 是在覆盖层之后进入 top layer 的，所以能浮在揭幕之上。
+
+   带 popover 属性之后 UA 会给元素套一套默认样式（display: none、
+   position: fixed、inset: 0、border、padding、background、overflow: auto），
+   必须逐条压回去。 */
+.tsw[popover] {
+  display: inline-flex;
+  position: relative;
+  inset: auto;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+}
+.tsw[popover]:popover-open {
+  position: fixed;
+  inset: auto;
+  display: inline-flex;
+}
+.tsw[popover]::backdrop {
+  background: transparent;
+  pointer-events: none;
+}
+
+.tsw-placeholder {
+  display: inline-block;
+  flex: 0 0 auto;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+/* popover 不可用时的回退：揭幕期间淡出，结束再演 */
+.tsw.is-veiled { opacity: 0.12; }
+
+/* ---------- 高对比度：退化成普通开关 ---------- */
+@media (forced-colors: active) {
+  .tsw {
+    border: 2px solid CanvasText;
+    background: Canvas;
+  }
+  .tsw-band,
+  .tsw-fx,
+  .tsw-halo,
+  .tsw-ig,
+  .tsw-arcs,
+  .tsw-cv,
+  .tsw-knob::before,
+  .tsw-knob::after,
+  .tsw-sheen,
+  .tsw-gw,
+  .tsw-cor,
+  .tsw-gl,
+  .tsw-swp { display: none; }
+  .tsw-track {
+    background: Canvas !important;
+    border: 2px solid CanvasText !important;
+    box-shadow: none !important;
+  }
+  .tsw-knob {
+    background: ButtonFace !important;
+    border: 2px solid ButtonText !important;
+    box-shadow: none !important;
+  }
+  .tsw:focus-visible { outline: 2px solid Highlight; box-shadow: none; }
+}
+
+/* ---------- 减少动画：不播粒子、弧光、扫光、日冕 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .tsw-knob,
+  .tsw-halo,
+  .tsw-ig { will-change: auto; }
+  .tsw-knob.is-hit,
+  .tsw-cor i,
+  .tsw-cor b,
+  .tsw-swp { animation: none !important; }
+  .tsw-fx { display: none; }
+}
+
+:root.no-motion .tsw-knob.is-hit,
+:root.no-motion .tsw-cor i,
+:root.no-motion .tsw-cor b,
+:root.no-motion .tsw-swp { animation: none !important; }

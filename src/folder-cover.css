@@ -1,0 +1,236 @@
+/* ============================================================
+   文件夹封面 · 样式
+   ------------------------------------------------------------
+   所有选择器都限定在 [data-fc] / .fc-* 上：没有自定义封面的卡片
+   匹配不到任何一条，渲染结果与改动前完全一致。
+   颜色两套主题各一份，全部走本文件内的局部变量，
+   不改 styles.css 里的任何变量和规则。
+   ============================================================ */
+
+/* ---------- 预设颜色 ---------- */
+/* 改的是**文件夹图形本身**的颜色（.dir-icon 里那个文件夹 SVG 的填充），
+   封面区背景、白色图标方块、圆点、文字、计数一律不动。
+   默认色不写规则：内联的 --dc 还在，自然回到原来的颜色。 */
+.card-thumb.dir-thumb[data-fc='slate']  .dir-icon svg { fill: #7c8b9a; }
+.card-thumb.dir-thumb[data-fc='coral']  .dir-icon svg { fill: #d9705a; }
+.card-thumb.dir-thumb[data-fc='blue']   .dir-icon svg { fill: #5b8def; }
+.card-thumb.dir-thumb[data-fc='green']  .dir-icon svg { fill: #4f9d6b; }
+.card-thumb.dir-thumb[data-fc='purple'] .dir-icon svg { fill: #8b7bd8; }
+.card-thumb.dir-thumb[data-fc='pink']   .dir-icon svg { fill: #d9739a; }
+.card-thumb.dir-thumb[data-fc='yellow'] .dir-icon svg { fill: #d9a93f; }
+.card-thumb.dir-thumb[data-fc='teal']   .dir-icon svg { fill: #3f9d9d; }
+
+/* 暗色底上同色相提亮一档，避免发闷 */
+:root[data-theme='dark'] .card-thumb.dir-thumb[data-fc='slate']  .dir-icon svg, .app[data-theme='dark'] .card-thumb.dir-thumb[data-fc='slate']  .dir-icon svg { fill: #93a2b1; }
+:root[data-theme='dark'] .card-thumb.dir-thumb[data-fc='coral']  .dir-icon svg, .app[data-theme='dark'] .card-thumb.dir-thumb[data-fc='coral']  .dir-icon svg { fill: #e88a75; }
+:root[data-theme='dark'] .card-thumb.dir-thumb[data-fc='blue']   .dir-icon svg, .app[data-theme='dark'] .card-thumb.dir-thumb[data-fc='blue']   .dir-icon svg { fill: #7aa3f5; }
+:root[data-theme='dark'] .card-thumb.dir-thumb[data-fc='green']  .dir-icon svg, .app[data-theme='dark'] .card-thumb.dir-thumb[data-fc='green']  .dir-icon svg { fill: #6fbb8a; }
+:root[data-theme='dark'] .card-thumb.dir-thumb[data-fc='purple'] .dir-icon svg, .app[data-theme='dark'] .card-thumb.dir-thumb[data-fc='purple'] .dir-icon svg { fill: #a596e6; }
+:root[data-theme='dark'] .card-thumb.dir-thumb[data-fc='pink']   .dir-icon svg, .app[data-theme='dark'] .card-thumb.dir-thumb[data-fc='pink']   .dir-icon svg { fill: #e890b0; }
+:root[data-theme='dark'] .card-thumb.dir-thumb[data-fc='yellow'] .dir-icon svg, .app[data-theme='dark'] .card-thumb.dir-thumb[data-fc='yellow'] .dir-icon svg { fill: #e8bd63; }
+:root[data-theme='dark'] .card-thumb.dir-thumb[data-fc='teal']   .dir-icon svg, .app[data-theme='dark'] .card-thumb.dir-thumb[data-fc='teal']   .dir-icon svg { fill: #63b8b8; }
+
+/* ---------- 图片封面 ---------- */
+/* 图片绝对定位铺满，object-fit: cover 居中裁切，不拉伸。
+   底下的 .dir-thumb 原渐变仍然在，加载完成前看到的就是它 —— 不会有布局跳动。 */
+.fc-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  display: block;
+  opacity: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+/* 只有带 .fc-fade 的才淡入（即「更改封面」那一刻），
+   普通重绘直接出现，不重复播动画。
+   只动 opacity，不碰 layout 属性。 */
+.fc-img.fc-fade { transition: opacity 0.18s var(--ease-out); }
+.fc-img.is-loaded { opacity: 1; }
+/* 减少动画 / 应用内关动画时直接显示 */
+:root.no-motion .fc-img.fc-fade { transition: none; }
+
+/* 1px 低透明度内描边：亮图和白色卡片之间留一条界线 */
+.card-thumb.dir-thumb[data-fc='image'] {
+  box-shadow: inset 0 0 0 1px rgba(31, 30, 29, 0.08);
+}
+:root[data-theme='dark'] .card-thumb.dir-thumb[data-fc='image'], .app[data-theme='dark'] .card-thumb.dir-thumb[data-fc='image'] {
+  box-shadow: inset 0 0 0 1px rgba(255, 248, 235, 0.09);
+}
+
+/* 暗色主题压暗 12%，亮图不刺眼 */
+.fc-veil {
+  position: absolute;
+  inset: 0;
+  display: none;
+  pointer-events: none;
+}
+:root[data-theme='dark'] .card-thumb.dir-thumb[data-fc='image'] .fc-veil, .app[data-theme='dark'] .card-thumb.dir-thumb[data-fc='image'] .fc-veil {
+  display: block;
+  background: rgba(10, 9, 8, 0.12);
+}
+
+/* 图片和遮罩都是绝对定位，会盖在普通流内的图标方块之上。
+   给图标一个层级，保证「不隐藏图标」时它仍然显示在图片上方。
+   这条只对「图片封面」卡片生效，其余卡片不受影响。 */
+.card-thumb.dir-thumb[data-fc='image'] .dir-icon {
+  position: relative;
+  z-index: 1;
+}
+
+/* HIDE_ICON_TILE_ON_IMAGE 打开时隐藏中间的白色方块 */
+.card-thumb.dir-thumb[data-fc-hide-icon='1'] .dir-icon { display: none; }
+
+/* ---------- 色块 ---------- */
+/* 色点直接展示「文件夹图标会变成的颜色」。
+   「默认」用中性灰表示「恢复这个目录自己的图标颜色」——
+   不用米色，米色是背景色，这里改的不是背景。 */
+.fc-swatch[data-color='default'] { --sw: linear-gradient(160deg, #b9b2a4, #9d9587); --fc-check: #ffffff; }
+.fc-swatch[data-color='slate']   { --sw: #7c8b9a; --fc-check: #ffffff; }
+.fc-swatch[data-color='coral']   { --sw: #d9705a; --fc-check: #ffffff; }
+.fc-swatch[data-color='blue']    { --sw: #5b8def; --fc-check: #ffffff; }
+.fc-swatch[data-color='green']   { --sw: #4f9d6b; --fc-check: #ffffff; }
+.fc-swatch[data-color='purple']  { --sw: #8b7bd8; --fc-check: #ffffff; }
+.fc-swatch[data-color='pink']    { --sw: #d9739a; --fc-check: #ffffff; }
+.fc-swatch[data-color='yellow']  { --sw: #d9a93f; --fc-check: #ffffff; }
+.fc-swatch[data-color='teal']    { --sw: #3f9d9d; --fc-check: #ffffff; }
+
+/* 暗色面板里色点用暗色那套取值 —— 所见即所得，
+   和切到暗色主题后卡片上图标的颜色一致 */
+:root[data-theme='dark'] .fc-swatch[data-color='slate'], .app[data-theme='dark'] .fc-swatch[data-color='slate'] { --sw: #93a2b1; }
+:root[data-theme='dark'] .fc-swatch[data-color='coral'], .app[data-theme='dark'] .fc-swatch[data-color='coral'] { --sw: #e88a75; }
+:root[data-theme='dark'] .fc-swatch[data-color='blue'], .app[data-theme='dark'] .fc-swatch[data-color='blue'] { --sw: #7aa3f5; }
+:root[data-theme='dark'] .fc-swatch[data-color='green'], .app[data-theme='dark'] .fc-swatch[data-color='green'] { --sw: #6fbb8a; }
+:root[data-theme='dark'] .fc-swatch[data-color='purple'], .app[data-theme='dark'] .fc-swatch[data-color='purple'] { --sw: #a596e6; }
+:root[data-theme='dark'] .fc-swatch[data-color='pink'], .app[data-theme='dark'] .fc-swatch[data-color='pink'] { --sw: #e890b0; }
+:root[data-theme='dark'] .fc-swatch[data-color='yellow'], .app[data-theme='dark'] .fc-swatch[data-color='yellow'] { --sw: #e8bd63; }
+:root[data-theme='dark'] .fc-swatch[data-color='teal'], .app[data-theme='dark'] .fc-swatch[data-color='teal'] { --sw: #63b8b8; }
+
+.fc-swatches {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 2px;
+  padding: 2px 0 4px;
+}
+/* 视觉 24px，热区 32px：按钮本体撑到 32，色点画在 ::before 里 */
+.fc-swatch {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  position: relative;
+  flex: none;
+}
+.fc-swatch::before {
+  content: '';
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--sw);
+  box-shadow: inset 0 0 0 1px rgba(31, 30, 29, 0.14);
+  transition: transform 0.16s var(--ease-out);
+}
+.fc-swatch:hover::before { transform: scale(1.1); }
+.fc-swatch:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+/* 选中：外圈描边 + 对勾 */
+.fc-swatch[aria-checked='true']::before {
+  box-shadow: inset 0 0 0 1px rgba(31, 30, 29, 0.14), 0 0 0 2px var(--accent);
+}
+/* 对勾颜色跟着色块深浅走：浅底用深色勾，深底用白勾，
+   否则黄、青这类浅色块上的白勾几乎看不见 */
+.fc-swatch[aria-checked='true']::after {
+  content: '';
+  position: absolute;
+  width: 11px;
+  height: 6px;
+  border-left: 1.8px solid var(--fc-check, #fff);
+  border-bottom: 1.8px solid var(--fc-check, #fff);
+  transform: translateY(-1px) rotate(-45deg);
+  filter: drop-shadow(0 0 1.5px rgba(255, 255, 255, 0.5));
+  pointer-events: none;
+}
+/* 高对比度模式下色点靠边框保底可见。
+   保留色块本身颜色（否则全部变成同一个系统色，分不出哪个是哪个），
+   只补一圈系统边框保证边界清楚。 */
+@media (forced-colors: active) {
+  .fc-swatch::before {
+    forced-color-adjust: none;
+    border: 1px solid ButtonText;
+  }
+  .fc-swatch[aria-checked='true']::before { border-width: 2px; }
+  .fc-swatch[aria-checked='true']::after { filter: none; }
+}
+
+/* ---------- 面板 ---------- */
+.fc-panel {
+  position: fixed;
+  z-index: 97;
+  width: 196px;
+  padding: 9px 10px 8px;
+  border-radius: var(--radius-m);
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--shadow-3);
+  animation: fcPanelIn 0.16s var(--ease-out);
+}
+@keyframes fcPanelIn {
+  from { opacity: 0; transform: translateY(-4px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+.fc-title {
+  font-size: 11px;
+  /* 用 fg-3 而不是 fg-4：暗色下 fg-4 太淡，标题几乎看不见 */
+  color: var(--fg-3);
+  letter-spacing: 0.03em;
+  padding: 0 2px 6px;
+}
+.fc-sep { height: 1px; background: var(--line-1); margin: 7px 0 5px; }
+.fc-action {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 6px;
+  font-size: 12.4px;
+  color: var(--fg-2);
+  text-align: left;
+}
+.fc-action > span {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fc-action svg { width: 13px; height: 13px; flex: none; opacity: 0.75; }
+.fc-action:hover { background: var(--bg-4); color: var(--fg-1); }
+.fc-action:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: -1px;
+}
+.fc-action[disabled] {
+  color: var(--fg-4);
+  cursor: default;
+}
+.fc-action[disabled]:hover { background: transparent; }
+.fc-note {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--danger);
+  padding: 4px 8px 2px;
+}
+.fc-note[hidden] { display: none; }
+
+/* 系统关闭动画时不要淡入 */
+@media (prefers-reduced-motion: reduce) {
+  .fc-img.fc-fade { transition: none; }
+  .fc-panel { animation: none; }
+}

@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' vault: data: blob:; media-src 'self' vault: blob:; frame-src 'self' vault:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:;" />
+  <title>资料库</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="folder-cover.css" />
+  <link rel="stylesheet" href="theme-transition.css" />
+  <link rel="stylesheet" href="theme-switch.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- 顶部拖拽区 -->
+    <header class="titlebar">
+      <div class="titlebar-drag"></div>
+      <div class="titlebar-actions">
+        <button class="tb-btn" id="btnMin" title="最小化">
+          <svg viewBox="0 0 12 12"><path d="M2 6h8" /></svg>
+        </button>
+        <button class="tb-btn" id="btnMax" title="最大化">
+          <svg viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7" rx="1" /></svg>
+        </button>
+        <button class="tb-btn tb-close" id="btnClose" title="关闭">
+          <svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6" /></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <!-- 侧栏 -->
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">
+            <svg viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/></svg>
+          </div>
+          <div class="brand-text">
+            <span class="brand-title">资料库</span>
+            <span class="brand-sub" id="libRootLabel">本地文件库</span>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <button class="nav-item is-active" id="navAll" data-view="all"
+                  title="把文件或文件夹拖到这里即可移到顶层">
+            <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+            <span>全部文件</span>
+            <em id="countAll">0</em>
+          </button>
+          <button class="nav-item" data-view="recent">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>
+            <span>最近导入</span>
+          </button>
+          <button class="nav-item" id="navTrash" data-view="trash"
+                  title="把文件或文件夹拖到这里即可放进回收站">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13"/><path d="M10 11v6M14 11v6"/></svg>
+            <span>回收站</span>
+            <em id="countTrash">0</em>
+          </button>
+          <button class="nav-item" id="navDupes" title="按文件内容比对，找出内容完全相同的副本">
+            <svg viewBox="0 0 24 24"><rect x="4" y="4" width="11" height="11" rx="2"/><rect x="9" y="9" width="11" height="11" rx="2"/></svg>
+            <span>查找重复</span>
+          </button>
+        </nav>
+
+        <div class="side-section">
+          <div class="side-head">
+            <span>目录</span>
+            <button class="icon-btn" id="btnAddCourse" title="新建目录">
+              <svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>
+            </button>
+          </div>
+          <div class="course-list" id="courseList"></div>
+        </div>
+
+        <div class="side-foot">
+          <div class="foot-row">
+            <button class="ghost-btn icon-only" id="btnOpenRoot"
+                    title="编辑备份：内置编辑保存前的旧版本都存在这里">
+              <svg viewBox="0 0 24 24"><path d="M12 4v10M8 10l4 4 4-4"/><path d="M4 18h16"/></svg>
+            </button>
+            <button class="ghost-btn icon-only" id="btnShortcuts" title="快捷键 (Ctrl+/)">
+              <svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2.2"/><path d="M6 9.5h.01M9.5 9.5h.01M13 9.5h.01M16.5 9.5h.01M6 13h.01M9.5 13h.01M13 13h.01M16.5 13h.01M8 16.2h8"/></svg>
+            </button>
+            <button class="ghost-btn icon-only" id="btnSettings" title="设置">
+              <svg viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="3.2"/>
+                <path d="M19.4 14.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.56-1.1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9.1a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.08a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1.03z"/>
+              </svg>
+            </button>
+            <!-- 新主题开关的挂载点（USE_NEW_THEME_SWITCH 为 true 时用，
+                 见 src/theme-switch.js；为 false 时这里为空，显示后面的旧按钮） -->
+            <div class="theme-switch-host" id="themeSwitchHost"></div>
+
+            <button class="theme-btn" id="btnTheme" title="切换深色 / 浅色"
+                    aria-pressed="false" aria-label="切换深色模式">
+              <span class="theme-track">
+                <span class="theme-knob" id="themeKnob">
+                  <!-- 白底单独一层：辉光画在它下面，才不会被白底盖住 -->
+                  <span class="knob-face"></span>
+                  <!--
+                    图标用点阵画，不是线条。
+                    做法是把圆 / 方块填上 SVG pattern（一个个小圆点），
+                    再用径向渐变的 mask 让边缘的点淡出 —— 中心实、边缘散，
+                    和视频里那种「粒子构成」的观感一致。
+                    点阵比描边路线在 18px 下更清晰，也不会糊成一团。
+                  -->
+                  <svg class="ic-sun" viewBox="0 0 24 24" aria-hidden="true">
+                    <defs>
+                      <pattern id="dmSun" width="2.5" height="2.5" patternUnits="userSpaceOnUse"
+                               x="0.3" y="0.3">
+                        <circle cx="1.25" cy="1.25" r=".8" fill="currentColor"/>
+                      </pattern>
+                      <radialGradient id="fadeSun" cx="12" cy="12" r="9.6" gradientUnits="userSpaceOnUse">
+                        <stop offset="0" stop-color="#fff"/>
+                        <stop offset=".56" stop-color="#fff"/>
+                        <stop offset="1" stop-color="#000"/>
+                      </radialGradient>
+                      <mask id="maskSun" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+                        <rect width="24" height="24" fill="url(#fadeSun)"/>
+                      </mask>
+                    </defs>
+                    <g mask="url(#maskSun)">
+                      <circle cx="12" cy="12" r="5.6" fill="url(#dmSun)"/>
+                      <!-- 八条放射线，各用一个点阵矩形，靠 rotate 摆角度 -->
+                      <g fill="url(#dmSun)">
+                        <rect x="11.1" y="2.6" width="1.8" height="2.4" rx=".9"/>
+                        <rect x="11.1" y="19" width="1.8" height="2.4" rx=".9"/>
+                        <rect x="2.6" y="11.1" width="2.4" height="1.8" rx=".9"/>
+                        <rect x="19" y="11.1" width="2.4" height="1.8" rx=".9"/>
+                        <rect x="11.1" y="2.6" width="1.8" height="2.4" rx=".9"
+                              transform="rotate(45 12 12)"/>
+                        <rect x="11.1" y="19" width="1.8" height="2.4" rx=".9"
+                              transform="rotate(45 12 12)"/>
+                        <rect x="2.6" y="11.1" width="2.4" height="1.8" rx=".9"
+                              transform="rotate(45 12 12)"/>
+                        <rect x="19" y="11.1" width="2.4" height="1.8" rx=".9"
+                              transform="rotate(45 12 12)"/>
+                      </g>
+                    </g>
+                  </svg>
+                  <svg class="ic-moon" viewBox="0 0 24 24" aria-hidden="true">
+                    <defs>
+                      <pattern id="dmMoon" width="2.5" height="2.5" patternUnits="userSpaceOnUse"
+                               x="0.3" y="0.3">
+                        <circle cx="1.25" cy="1.25" r=".8" fill="currentColor"/>
+                      </pattern>
+                      <!-- 弯月：白色大圆减去偏移的黑色小圆 -->
+                      <mask id="shapeMoon" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+                        <circle cx="11.6" cy="12.6" r="7.6" fill="#fff"/>
+                        <circle cx="16.2" cy="8.2" r="6.5" fill="#000"/>
+                      </mask>
+                      <radialGradient id="fadeMoon" cx="10" cy="13" r="9" gradientUnits="userSpaceOnUse">
+                        <stop offset="0" stop-color="#fff"/>
+                        <stop offset=".55" stop-color="#fff"/>
+                        <stop offset="1" stop-color="#000"/>
+                      </radialGradient>
+                      <mask id="fadeMoonMask" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+                        <rect width="24" height="24" fill="url(#fadeMoon)"/>
+                      </mask>
+                    </defs>
+                    <g mask="url(#fadeMoonMask)">
+                      <g mask="url(#shapeMoon)">
+                        <rect width="24" height="24" fill="url(#dmMoon)"/>
+                      </g>
+                    </g>
+                    <!-- 月亮边上散落的小星点 -->
+                    <g fill="currentColor">
+                      <circle cx="18.8" cy="6" r=".85"/>
+                      <circle cx="20.6" cy="10.4" r=".6"/>
+                      <circle cx="16.2" cy="3.2" r=".55"/>
+                    </g>
+                  </svg>
+                </span>
+              </span>
+            </button>
+
+          </div>
+        </div>
+      </aside>
+
+      <!-- 主区 -->
+      <main class="main">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <div class="title-line">
+              <button class="back-btn" id="btnBack" title="返回上级目录（Alt+←）" hidden>
+                <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
+              </button>
+              <h1 id="viewTitle">全部文件</h1>
+              <span class="toolbar-count" id="viewCount"></span>
+            </div>
+            <nav class="crumbs" id="crumbs" hidden></nav>
+          </div>
+          <div class="toolbar-right">
+            <div class="search-wrap" id="searchWrap">
+              <div class="search">
+                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+                <input id="searchInput" type="search" placeholder="搜索文件夹名、文件名…" autocomplete="off" />
+              </div>
+              <div class="seg seg-sm search-scope" id="searchScope">
+                <button class="seg-btn is-active" data-scope="name" title="搜文件夹名和文件名">名称</button>
+                <button class="seg-btn" data-scope="content" title="搜文件内部的文字">内容</button>
+              </div>
+            </div>
+            <div class="seg" id="kindFilter">
+              <button class="seg-btn is-active" data-kind="all">全部</button>
+              <button class="seg-btn" data-kind="folder">文件夹</button>
+              <button class="seg-btn" data-kind="doc">文档</button>
+              <button class="seg-btn" data-kind="image">图片</button>
+              <button class="seg-btn" data-kind="media">音视频</button>
+              <button class="seg-btn" data-kind="code">代码</button>
+              <button class="seg-btn" data-kind="other">其他</button>
+            </div>
+            <button class="ghost-btn sel-toggle" id="btnSelectMode" title="多选模式（Ctrl+M）">
+              <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><path d="M13.5 16.5l2 2 3.5-3.5"/></svg>
+              <span>多选</span>
+            </button>
+            <button class="danger-btn trash-empty-btn" id="btnEmptyTrash" hidden>清空回收站</button>
+            <button class="ghost-btn newfile-btn" id="btnNewFile" title="在当前目录新建文件">
+              <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+              新建
+            </button>
+            <button class="primary-btn" id="btnImport">
+              <svg viewBox="0 0 24 24"><path d="M12 16V4M7.5 8.5L12 4l4.5 4.5"/><path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16"/></svg>
+              导入
+            </button>
+          </div>
+        </div>
+
+        <!-- 文档子分类：选了「文档」才出现 -->
+        <div class="subfilter" id="docSubFilter" hidden>
+          <button class="subfilter-btn is-active" data-dockey="all">全部文档</button>
+          <button class="subfilter-btn" data-dockey="pdf">PDF</button>
+          <button class="subfilter-btn" data-dockey="word">DOCX</button>
+          <button class="subfilter-btn" data-dockey="excel">Excel / CSV</button>
+          <button class="subfilter-btn" data-dockey="ppt">PPT</button>
+          <button class="subfilter-btn" data-dockey="text">TXT</button>
+          <button class="subfilter-btn" data-dockey="markdown">Markdown</button>
+        </div>
+
+        <!-- 代码子分类：选了「代码」才出现 -->
+        <div class="subfilter" id="codeSubFilter" hidden>
+          <button class="subfilter-btn is-active" data-codekey="all">全部代码</button>
+          <button class="subfilter-btn" data-codekey="python">Python</button>
+          <button class="subfilter-btn" data-codekey="cpp">C / C++</button>
+          <button class="subfilter-btn" data-codekey="java">Java / Kotlin</button>
+          <button class="subfilter-btn" data-codekey="web">前端</button>
+          <button class="subfilter-btn" data-codekey="go">Go</button>
+          <button class="subfilter-btn" data-codekey="rust">Rust</button>
+          <button class="subfilter-btn" data-codekey="shell">脚本</button>
+          <button class="subfilter-btn" data-codekey="data">数据配置</button>
+          <button class="subfilter-btn" data-codekey="other">其他</button>
+        </div>
+
+        <div class="content" id="content">
+          <div class="empty" id="emptyState">
+            <div class="empty-art">
+              <svg viewBox="0 0 120 120">
+                <rect x="18" y="30" width="84" height="62" rx="10" class="e-rect"/>
+                <path d="M18 46h84" class="e-line"/>
+                <path d="M34 62h32M34 74h22" class="e-line2"/>
+              </svg>
+            </div>
+            <h2>还没有目录</h2>
+            <p>先建一个目录，再把实验报告、作业和课件导入进来。</p>
+            <button class="primary-btn" id="btnEmptyCreate">新建目录</button>
+          </div>
+          <div class="grid" id="grid"></div>
+          <!-- 框选矩形（拖动时出现） -->
+          <div class="marquee" id="marquee" hidden></div>
+        </div>
+
+        <!-- 多选操作条 -->
+        <div class="selbar" id="selBar" hidden>
+          <span class="selbar-count" id="selCount">已选 0 个</span>
+          <div class="selbar-actions">
+            <button class="ghost-btn" id="btnSelMove">移动到…</button>
+            <button class="ghost-btn" id="btnSelClear">取消选择</button>
+            <button class="danger-btn" id="btnSelRemove">移除</button>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- 预览面板 -->
+  <div class="overlay" id="overlay" hidden>
+    <section class="preview" id="preview" role="dialog" aria-modal="true">
+      <header class="preview-head">
+        <div class="preview-title">
+          <span class="preview-name" id="previewName">—</span>
+          <span class="preview-meta" id="previewMeta"></span>
+        </div>
+        <div class="preview-tools">
+          <button class="tool-btn" id="btnEdit" title="编辑 (Ctrl+E，再按退出)" hidden>
+            <svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M14 5l4 4"/></svg>
+          </button>
+          <button class="tool-btn" id="btnSaveEdit" title="保存 (Ctrl+S)" hidden>
+            <svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4"/><rect x="8" y="13" width="8" height="7" rx="1"/></svg>
+          </button>
+          <button class="tool-btn" id="btnRun" title="用编辑器打开（Ctrl+Shift+E）" hidden>
+            <svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7V5z"/></svg>
+          </button>
+          <button class="tool-btn" id="btnOpenSys" title="用其他应用打开 (Ctrl+O)">
+            <svg viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4l-8 8"/><path d="M18 14v4.5A1.5 1.5 0 0 1 16.5 20h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"/></svg>
+          </button>
+          <button class="tool-btn" id="btnReveal" title="在文件夹中显示 (Ctrl+Shift+R)">
+            <svg viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/></svg>
+          </button>
+          <button class="tool-btn tool-close" id="btnPreviewClose" title="关闭 (Esc)">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+      </header>
+      <div class="preview-body" id="previewBody"></div>
+    </section>
+  </div>
+
+  <!-- 新建文件 -->
+  <div class="modal-backdrop" id="newFileModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3>新建文件</h3>
+        <button class="icon-btn" id="btnNewFileClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <div class="field">
+          <span class="field-label">保存到目录</span>
+          <div class="dir-tree" id="newFileCourse" role="tree"></div>
+        </div>
+
+        <label class="field">
+          <span class="field-label">文件名</span>
+          <input id="newFileName" class="input" type="text"
+                 placeholder="例如 实验报告.md" autocomplete="off" />
+          <span class="field-hint">带上扩展名，比如 .md / .txt / .py</span>
+        </label>
+
+        <div class="field" id="newFileDirField">
+          <span class="field-label">电脑上的保存位置</span>
+          <div class="srow">
+            <div class="srow-text">
+              <small id="newFileDirPath">桌面</small>
+            </div>
+            <button class="ghost-btn" id="btnNewFileDir">选择…</button>
+          </div>
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="btnNewFileCancel">取消</button>
+        <button class="primary-btn" id="btnNewFileConfirm">创建</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 文件详情 -->
+  <div class="modal-backdrop" id="detailModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3>文件详情</h3>
+        <button class="icon-btn" id="btnDetailClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <div class="detail-name" id="detailName"></div>
+        <div class="detail-rows" id="detailRows"></div>
+        <div class="detail-path">
+          <span class="field-label">电脑上的存储路径</span>
+          <div class="path-box">
+            <code id="detailPath"></code>
+            <button class="ghost-btn" id="btnCopyPath" title="复制路径">复制</button>
+          </div>
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="btnDetailReveal">在文件夹中显示</button>
+        <button class="ghost-btn" id="btnDetailOpen">用其他应用打开</button>
+        <button class="primary-btn" id="btnDetailDone">完成</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 导入对话框 -->
+  <div class="modal-backdrop" id="importModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3>导入文件</h3>
+        <button class="icon-btn" id="btnImportClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <div class="field">
+          <span class="field-label">归入目录</span>
+          <div class="dir-tree" id="importCourse" role="tree"></div>
+        </div>
+
+        <div class="hint-box" id="modeHint">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="8" r="0.9" fill="currentColor"/></svg>
+          <span id="modeHintText">文件只会被登记，<b>不会移动或复制</b>，始终留在原来的位置。在这里编辑也会直接改到原文件。</span>
+        </div>
+
+        <div class="field">
+          <span class="field-label">来源</span>
+          <div class="pick-row">
+            <button class="ghost-btn wide" id="btnPickFiles">
+              <svg viewBox="0 0 24 24"><path d="M6 4h8l4 4v12H6z"/><path d="M14 4v4h4"/></svg>
+              选择文件
+            </button>
+            <button class="ghost-btn wide" id="btnPickFolder">
+              <svg viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/></svg>
+              选择文件夹
+            </button>
+          </div>
+          <div class="picked" id="pickedList">未选择任何文件</div>
+        </div>
+
+        <div class="srow" id="buildTreeRow" hidden>
+          <div class="srow-text">
+            <strong>保留文件夹结构</strong>
+            <small>按源文件夹里的层级自动建子目录，不把文件全平铺在一起</small>
+          </div>
+          <button class="switch" id="swBuildTree"></button>
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="btnImportCancel">取消</button>
+        <button class="primary-btn" id="btnImportConfirm" disabled>开始导入</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 导入冲突：让用户当场决定怎么处理重复文件 -->
+  <div class="modal-backdrop" id="dupModal" hidden>
+    <div class="modal narrow" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3>发现重复文件</h3>
+        <button class="icon-btn" id="btnDupClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <p class="dup-lead">
+          这 <b id="dupCount">0</b> 个文件之前已经导入过，你想怎么处理？
+        </p>
+        <div class="dup-list" id="dupList"></div>
+        <div class="dup-choices" id="dupChoices">
+          <button class="choice-card" data-choice="skip">
+            <strong>跳过</strong>
+            <small>保留库中原有的记录，不重复导入</small>
+          </button>
+          <button class="choice-card" data-choice="replace">
+            <strong>替换</strong>
+            <small>用这次的版本覆盖原有记录</small>
+          </button>
+          <button class="choice-card" data-choice="allow">
+            <strong>允许重复</strong>
+            <small>两份都保留，库中会出现两条</small>
+          </button>
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="btnDupCancel">取消导入</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 重命名文件（会同步改磁盘上的真实文件名） -->
+  <div class="modal-backdrop" id="renameModal" hidden>
+    <div class="modal narrow" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3>重命名文件</h3>
+        <button class="icon-btn" id="btnRenameClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <label class="field">
+          <span class="field-label">文件名</span>
+          <input id="renameInput" class="input" type="text" maxlength="200" spellcheck="false" />
+        </label>
+        <p class="rename-note" id="renameNote"></p>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="btnRenameCancel">取消</button>
+        <button class="primary-btn" id="btnRenameSave">重命名</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 重复文件检测结果 -->
+  <div class="modal-backdrop" id="dupeModal" hidden>
+    <div class="modal wide" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3>重复文件</h3>
+        <button class="icon-btn" id="btnDupeClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <div class="dupe-summary" id="dupeSummary"></div>
+        <div class="dupe-groups" id="dupeGroups"></div>
+      </div>
+      <footer class="modal-foot">
+        <span class="dupe-foot-note" id="dupeFootNote"></span>
+        <button class="ghost-btn" id="btnDupeCancel">关闭</button>
+        <button class="primary-btn" id="btnDupeRemove" disabled>删除所选</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 原文件丢失后重新定位 -->
+  <div class="modal-backdrop" id="relocateModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3>重新定位文件</h3>
+        <button class="icon-btn" id="btnRelocClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <p class="dup-lead" id="relocLead"></p>
+        <div class="reloc-list" id="relocList"></div>
+      </div>
+      <footer class="modal-foot">
+        <span class="dupe-foot-note" id="relocNote"></span>
+        <button class="ghost-btn" id="btnRelocPick">手动选择…</button>
+        <button class="primary-btn" id="btnRelocSearch">重新搜索</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 快捷键一览 -->
+  <div class="modal-backdrop" id="shortcutsModal" hidden>
+    <div class="modal wide shortcuts-modal" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3>快捷键</h3>
+        <button class="icon-btn" id="btnShortcutsClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <div class="sc-groups" id="scGroups"></div>
+      </div>
+      <footer class="modal-foot">
+        <span class="sc-hint">随时按 <kbd>Ctrl</kbd><kbd>/</kbd> 打开这个面板</span>
+        <button class="primary-btn" id="btnShortcutsDone">知道了</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 通用确认框（替代系统原生的白色 window.confirm） -->
+  <div class="modal-backdrop" id="confirmModal" hidden>
+    <div class="modal narrow confirm-modal" role="dialog" aria-modal="true">
+      <div class="confirm-body">
+        <div class="confirm-icon" id="confirmIcon">
+          <svg viewBox="0 0 24 24"><path d="M12 8.5v5.5"/><circle cx="12" cy="17.2" r="0.9" fill="currentColor" stroke="none"/><path d="M12 3.6l9 15.8H3z"/></svg>
+        </div>
+        <div class="confirm-text">
+          <h3 id="confirmTitle">确认</h3>
+          <p id="confirmLead"></p>
+          <div class="confirm-note" id="confirmNote" hidden></div>
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="btnConfirmCancel">取消</button>
+        <button class="primary-btn" id="btnConfirmOk">确定</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 删除确认：回收站 / 彻底删除 -->
+  <div class="modal-backdrop" id="delModal" hidden>
+    <div class="modal narrow" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3 id="delTitle">删除</h3>
+        <button class="icon-btn" id="btnDelClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <p class="dup-lead" id="delLead"></p>
+        <div class="dup-choices">
+          <button class="choice-card" data-del="trash">
+            <strong>放进回收站</strong>
+            <small>随时可以还原，不会真的丢掉</small>
+          </button>
+          <button class="choice-card is-danger" data-del="purge">
+            <strong>彻底删除</strong>
+            <small>从库里清掉，不留还原入口</small>
+          </button>
+        </div>
+        <!-- 这句话必须常驻、且要显眼：用户最担心的就是「点一下会不会
+             把我硬盘上的文件删了」。软件默认只登记路径（storage: link），
+             真正的磁盘文件始终不动；只有用户主动选了「复制入库」的文件，
+             才会连带清掉软件自己存的那份副本。 -->
+        <p class="del-note">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 1.5l5.5 2.2v4.1c0 3.2-2.2 5.8-5.5 6.7-3.3-.9-5.5-3.5-5.5-6.7V3.7L8 1.5z"/>
+            <path d="M5.8 8.1l1.6 1.6 3-3.1"/>
+          </svg>
+          <span>两种方式都<b>不会删除你电脑里的原文件</b>，只是把它从资料库的列表里拿掉。
+            <em id="delCopyNote" hidden>其中标着「复制入库」的文件，软件自己存的那份副本会被一并清理。</em>
+          </span>
+        </p>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="btnDelCancel">取消</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 新建/重命名目录 -->
+  <div class="modal-backdrop" id="courseModal" hidden>
+    <div class="modal narrow" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3 id="courseModalTitle">新建目录</h3>
+        <button class="icon-btn" id="btnCourseClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body">
+        <label class="field">
+          <span class="field-label">目录名称</span>
+          <input id="courseNameInput" class="input" type="text" placeholder="例如：数据结构" maxlength="60" />
+        </label>
+        <div class="field">
+          <span class="field-label">标记颜色</span>
+          <div class="swatches" id="swatches"></div>
+        </div>
+      </div>
+      <footer class="modal-foot">
+        <button class="ghost-btn" id="btnCourseCancel">取消</button>
+        <button class="primary-btn" id="btnCourseSave">创建</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div class="modal-backdrop" id="settingsModal" hidden>
+    <div class="modal settings-modal" role="dialog" aria-modal="true">
+      <header class="modal-head">
+        <h3>设置</h3>
+        <button class="icon-btn" id="btnSettingsClose">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+
+      <div class="settings-body">
+        <!-- 左：分类 -->
+        <nav class="settings-nav" id="settingsNav">
+          <button class="snav-item is-active" data-pane="general">通用</button>
+          <button class="snav-item" data-pane="appearance">外观</button>
+          <button class="snav-item" data-pane="import">导入</button>
+          <button class="snav-item" data-pane="data">数据</button>
+          <button class="snav-item" data-pane="guide">使用教程</button>
+          <button class="snav-item" data-pane="about">关于</button>
+        </nav>
+
+        <!-- 右：内容 -->
+        <div class="settings-panes">
+          <!-- 通用 -->
+          <section class="spane is-active" data-pane="general">
+            <div class="srow">
+              <div class="srow-text">
+                <strong>启动时打开上次的目录</strong>
+                <small>关闭则总是从「全部文件」开始</small>
+              </div>
+              <button class="switch" id="swRestoreView" data-key="restoreView"></button>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>显示文件大小</strong>
+                <small>在卡片上显示文件尺寸</small>
+              </div>
+              <button class="switch" id="swShowSize" data-key="showSize"></button>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>网格密度</strong>
+                <small>每行显示多少列</small>
+              </div>
+              <div class="seg seg-sm" id="densitySeg">
+                <button class="seg-btn" data-density="compact">紧凑</button>
+                <button class="seg-btn" data-density="comfortable">标准</button>
+                <button class="seg-btn" data-density="spacious">宽松</button>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>快捷键</strong>
+                <small>Ctrl+F 搜索 · Ctrl+S 保存编辑 · Esc 关闭</small>
+              </div>
+            </div>
+          </section>
+
+          <!-- 外观 -->
+          <section class="spane" data-pane="appearance">
+            <div class="srow">
+              <div class="srow-text">
+                <strong>主题</strong>
+                <small>浅色 / 深色，也可跟随系统</small>
+              </div>
+              <div class="theme-picker" id="themePicker">
+                <button class="tp-card" data-theme="light" title="浅色">
+                  <span class="tp-preview tp-light"></span>
+                  <span class="tp-name">浅色</span>
+                </button>
+                <button class="tp-card" data-theme="dark" title="深色">
+                  <span class="tp-preview tp-dark"></span>
+                  <span class="tp-name">深色</span>
+                </button>
+                <button class="tp-card" data-theme="system" title="跟随系统">
+                  <span class="tp-preview tp-auto"></span>
+                  <span class="tp-name">跟随系统</span>
+                </button>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>减少动画</strong>
+                <small>关闭过渡效果，界面更直接</small>
+              </div>
+              <button class="switch" id="swReduceMotion" data-key="reduceMotion"></button>
+            </div>
+          </section>
+
+          <!-- 导入 -->
+          <section class="spane" data-pane="import">
+            <div class="info-card">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="8" r="0.9" fill="currentColor"/></svg>
+              <div>
+                <strong>导入只登记，不移动文件</strong>
+                <p>文件始终保留在原位置。删除目录或从库中移除，都不会影响磁盘上的原文件。</p>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>导入后自动切换到该目录</strong>
+                <small>方便马上查看刚导入的内容</small>
+              </div>
+              <button class="switch" id="swAutoSwitch" data-key="autoSwitchCourse"></button>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>重复文件处理</strong>
+                <small>同一路径再次导入时的行为</small>
+              </div>
+              <div class="seg seg-sm" id="dupSeg">
+                <button class="seg-btn" data-dup="skip">跳过</button>
+                <button class="seg-btn" data-dup="allow">允许重复</button>
+                <button class="seg-btn" data-dup="replace">替换</button>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>默认编辑器</strong>
+                <small>预览右上角「打开」按钮标出的是默认项，点开可换其他已安装的程序</small>
+              </div>
+              <div class="seg seg-sm" id="editorSeg">
+                <button class="seg-btn" data-editor="vscode">VS Code</button>
+                <button class="seg-btn" data-editor="cursor">Cursor</button>
+                <button class="seg-btn" data-editor="notepadpp">Notepad++</button>
+                <button class="seg-btn" data-editor="notepad">记事本</button>
+              </div>
+            </div>
+          </section>
+
+          <!-- 数据 -->
+          <section class="spane" data-pane="data">
+            <div class="srow">
+              <div class="srow-text">
+                <strong>已登记文件</strong>
+                <small id="statFiles">—</small>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>目录数</strong>
+                <small id="statCourses">—</small>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>编辑备份</strong>
+                <small>内置编辑保存前的旧版本</small>
+              </div>
+              <button class="ghost-btn" id="btnOpenBackup">打开文件夹</button>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>数据库位置</strong>
+                <small id="statDataPath">—</small>
+                <small class="srow-note">只存目录结构和文件登记，不含你的文件本体</small>
+              </div>
+              <button class="ghost-btn" id="btnOpenDataDir">打开</button>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>重复文件检测</strong>
+                <small>按文件内容比对，找出内容完全相同的副本；名字不同的会单独标出来</small>
+              </div>
+              <button class="ghost-btn" id="btnFindDupes">开始检测</button>
+            </div>
+          </section>
+
+          <!-- 使用教程 -->
+          <section class="spane" data-pane="guide">
+            <div class="guide-toc" id="guideToc"></div>
+            <div class="guide" id="guideBody"></div>
+          </section>
+
+          <!-- 关于（含更新） -->
+          <section class="spane" data-pane="about">
+            <div class="about-box">
+              <div class="about-mark">
+                <svg viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/></svg>
+              </div>
+              <h4>资料库</h4>
+              <p class="about-ver" id="aboutVer">版本 —</p>
+              <p class="about-desc">把散落的资料集中归档、检索与预览。<br>文件始终留在原位置，不做任何移动。</p>
+            </div>
+
+            <div class="about-section">
+              <div class="about-section-head">
+                <strong>软件更新</strong>
+                <small>比对开发目录里的代码文件，把变化同步过来。只同步代码，不碰你的文件。</small>
+              </div>
+
+              <div class="srow">
+                <div class="srow-text">
+                  <strong>当前版本</strong>
+                  <small id="verCurrent">—</small>
+                </div>
+              </div>
+              <div class="srow">
+                <div class="srow-text">
+                  <strong>开发目录</strong>
+                  <small id="sourcePath">未设置</small>
+                </div>
+                <button class="ghost-btn" id="btnPickSource">选择</button>
+              </div>
+              <div class="srow">
+                <div class="srow-text">
+                  <strong>自动检测更新</strong>
+                  <small>后台定时比对开发目录，发现变化在下面提醒，不自动安装</small>
+                </div>
+                <button class="switch" id="swAutoCheckUpdate" data-key="autoCheckUpdate"></button>
+              </div>
+              <!-- 频率这排按钮比一行文字宽，左右排会把左边的说明挤成竖排，
+                   所以让它在标题下面独占一行 -->
+              <div class="srow srow-stack" id="autoCheckIntervalRow" hidden>
+                <div class="srow-text">
+                  <strong>检测频率</strong>
+                  <small>多久比对一次开发目录</small>
+                  <div class="seg seg-sm" id="autoCheckSeg">
+                    <button class="seg-btn" data-interval="startup">每次启动</button>
+                    <button class="seg-btn" data-interval="1h">每 1 小时</button>
+                    <button class="seg-btn" data-interval="6h">每 6 小时</button>
+                    <button class="seg-btn" data-interval="24h">每天一次</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="update-result" id="updateResult" hidden></div>
+              <div class="update-actions">
+                <button class="ghost-btn" id="btnCheckUpdate">检查更新</button>
+                <button class="primary-btn" id="btnApplyUpdate" disabled>应用并重启</button>
+              </div>
+
+              <!-- 自动检测到更新时的提醒条：不弹窗、不抢焦点，就摆在这里 -->
+              <div class="update-avail" id="updateAvail" hidden>
+                <svg viewBox="0 0 24 24"><path d="M12 4v10"/><path d="M8 10l4 4 4-4"/><path d="M5 19h14"/></svg>
+                <div class="ua-text">
+                  <strong>有新版本可以更新</strong>
+                  <small id="updateAvailDesc">—</small>
+                </div>
+                <button class="ghost-btn" id="btnUpdateAvailView">查看明细</button>
+                <button class="icon-btn" id="btnUpdateAvailClose" title="忽略这次提醒">
+                  <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="srow">
+              <div class="srow-text">
+                <strong>更新内容</strong>
+                <small>每次更新改了什么都在这里，可以往上翻看以前的。更新重启后会自动弹一次</small>
+              </div>
+              <button class="ghost-btn" id="btnShowChangelog">查看</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!--
+    更新内容公告：版本号变了（更新并重启之后）自动弹一次。
+    Esc 或点「知道了」关闭，关掉后记住这个版本，下次不再打扰。
+  -->
+  <div class="modal-backdrop" id="changelogModal" hidden>
+    <div class="modal changelog-modal" role="dialog" aria-modal="true" aria-labelledby="changelogTitle">
+      <header class="modal-head">
+        <h3 id="changelogTitle">更新内容</h3>
+        <button class="icon-btn" id="btnChangelogClose" title="关闭 (Esc)">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="modal-body changelog-body" id="changelogBody"></div>
+      <footer class="modal-foot">
+        <span class="sc-hint">按 <kbd>Esc</kbd> 关闭，之后可在「设置 → 关于」里再看</span>
+        <button class="primary-btn" id="btnChangelogOk">知道了</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 悬停信息浮层：鼠标停在文件/文件夹卡片上时显示归属和磁盘位置 -->
+  <div class="hover-tip" id="hoverTip" hidden></div>
+
+  <div class="toast-stack" id="toasts"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

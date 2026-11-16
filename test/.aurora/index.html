@@ -1,0 +1,1391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Aurora · Windows 11</title>
+  <style>
+    :root {
+      box-sizing: border-box;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      --sw: clamp(150px, 20vw, 264px)
+    }
+
+    html {
+      scroll-padding-top: env(safe-area-inset-top, 0px)
+    }
+
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #17171b
+    }
+
+    .root {
+      position: fixed;
+      inset: 0
+    }
+
+    .app {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--tx);
+      font: 14px/20px "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      text-rendering: optimizeLegibility
+    }
+
+    .app[data-theme=dark] {
+      --bg: #272727;
+      --sb: #202020;
+      --cd: #2d2d2d;
+      --tx: #fff;
+      --mu: rgba(255, 255, 255, .64);
+      --ln: rgba(255, 255, 255, .085);
+      --ac: #9ba8ff;
+      --ac2: rgba(155, 168, 255, .26);
+      --hv: rgba(255, 255, 255, .065);
+      --pr: rgba(255, 255, 255, .04);
+      --cap: rgba(255, 255, 255, .1)
+    }
+
+    .app[data-theme=light] {
+      --bg: #fafafa;
+      --sb: #f0f0f0;
+      --cd: #fff;
+      --tx: #1a1a1a;
+      --mu: rgba(0, 0, 0, .6);
+      --ln: rgba(0, 0, 0, .08);
+      --ac: #5b84d6;
+      --ac2: rgba(91, 132, 214, .22);
+      --hv: rgba(0, 0, 0, .05);
+      --pr: rgba(0, 0, 0, .03);
+      --cap: rgba(0, 0, 0, .08)
+    }
+
+    #appL {
+      pointer-events: none;
+      will-change: clip-path
+    }
+
+    .tb {
+      display: flex;
+      align-items: center;
+      height: 32px;
+      padding-top: env(safe-area-inset-top, 0px);
+      background: var(--sb);
+      font-size: 12px;
+      line-height: 16px;
+      flex: none;
+      app-region: drag;
+      -webkit-app-region: drag;
+      user-select: none
+    }
+
+    .ti {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: 12px
+    }
+
+    .lg {
+      width: 16px;
+      height: 16px;
+      border-radius: 5px;
+      background: var(--ac);
+      position: relative
+    }
+
+    .lg::after {
+      content: "";
+      position: absolute;
+      left: 5px;
+      top: 5px;
+      width: 6px;
+      height: 6px;
+      border-radius: 2px;
+      background: var(--bg)
+    }
+
+    .cb {
+      display: flex;
+      margin-left: auto;
+      align-self: stretch;
+      padding-right: env(safe-area-inset-right, 0px);
+      app-region: no-drag;
+      -webkit-app-region: no-drag
+    }
+
+    .cb span {
+      width: 46px;
+      height: 100%;
+      display: grid;
+      place-items: center;
+      transition: background .12s
+    }
+
+    .cb span:hover {
+      background: var(--cap)
+    }
+
+    .cb span:active {
+      background: var(--pr);
+      opacity: .8
+    }
+
+    .cb span:last-child:hover {
+      background: #c42b1c;
+      color: #fff
+    }
+
+    .cp {
+      width: 10px;
+      height: 10px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1
+    }
+
+    .bd {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      background: var(--sb)
+    }
+
+    .sd {
+      width: calc(var(--sw) + env(safe-area-inset-left, 0px));
+      flex: none;
+      display: flex;
+      flex-direction: column;
+      padding: 6px 8px 0 calc(8px + env(safe-area-inset-left, 0px));
+      box-sizing: border-box
+    }
+
+    .nv {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      height: 38px;
+      padding: 0 12px;
+      margin-bottom: 2px;
+      border-radius: 4px;
+      color: var(--tx);
+      opacity: .78;
+      transition: background .15s, opacity .15s, transform .12s cubic-bezier(.1, .9, .2, 1)
+    }
+
+    .nv:hover {
+      background: var(--hv);
+      opacity: 1
+    }
+
+    .nv:active {
+      background: var(--pr);
+      transform: scale(.985)
+    }
+
+    .nv.on {
+      background: var(--hv);
+      opacity: 1
+    }
+
+    .nv.on::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 11px;
+      width: 3px;
+      height: 16px;
+      border-radius: 2px;
+      background: var(--ac);
+      animation: pill .32s cubic-bezier(.1, .9, .2, 1) .2s both
+    }
+
+    .ic {
+      width: 16px;
+      height: 16px;
+      flex: none;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round
+    }
+
+    .sl {
+      margin: auto 8px calc(14px + env(safe-area-inset-bottom, 0px));
+      aspect-ratio: 440/230
+    }
+
+    .mn {
+      flex: 1;
+      min-width: 0;
+      padding: 24px calc(28px + env(safe-area-inset-right, 0px)) 24px 28px;
+      background: var(--bg);
+      border-top-left-radius: 8px;
+      border-top: 1px solid var(--ln);
+      border-left: 1px solid var(--ln)
+    }
+
+    .hd {
+      display: flex;
+      align-items: center;
+      gap: 12px
+    }
+
+    h1 {
+      margin: 0;
+      font: 600 24px/32px "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+      letter-spacing: -.01em
+    }
+
+    .hd p {
+      margin: 2px 0 0;
+      color: var(--mu)
+    }
+
+    .se {
+      margin-left: auto;
+      width: 220px;
+      max-width: 34%;
+      height: 32px;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      border-radius: 4px;
+      background: var(--cd);
+      border: 1px solid var(--ln);
+      border-bottom-color: color-mix(in srgb, var(--tx) 45%, transparent);
+      color: var(--mu)
+    }
+
+    .gr {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 20px
+    }
+
+    .cd {
+      background: var(--cd);
+      border: 1px solid var(--ln);
+      border-radius: 8px;
+      padding: 16px 18px;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
+      transition: background .15s;
+      animation: rise .42s cubic-bezier(.1, .9, .2, 1) both
+    }
+
+    .w2 {
+      grid-column: span 2
+    }
+
+    .k {
+      color: var(--mu);
+      font-size: 12px
+    }
+
+    .v {
+      font-size: 28px;
+      font-weight: 600;
+      letter-spacing: -.02em;
+      margin: 2px 0
+    }
+
+    .dl {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--ac);
+      font-size: 12px
+    }
+
+    .sp {
+      width: 64px;
+      height: 20px;
+      fill: none;
+      stroke: var(--ac);
+      stroke-width: 1.6;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-dasharray: 100;
+      animation: dash .9s cubic-bezier(.2, .8, .2, 1) .35s both
+    }
+
+    .bars {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      height: 104px;
+      margin-top: 12px
+    }
+
+    .bars i {
+      flex: 1;
+      border-radius: 5px 5px 2px 2px;
+      background: var(--ac2);
+      transform-origin: 50% 100%;
+      animation: grow .6s cubic-bezier(.1, .9, .2, 1) .3s both;
+      animation-delay: calc(.25s + sibling-index()*.045s)
+    }
+
+    .bars i.on {
+      background: var(--ac)
+    }
+
+    .dy {
+      display: flex;
+      gap: 10px;
+      margin-top: 6px;
+      color: var(--mu);
+      font-size: 11px
+    }
+
+    .dy span {
+      flex: 1;
+      text-align: center
+    }
+
+    .fl {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+      border-top: 1px solid var(--ln)
+    }
+
+    .fl:first-of-type {
+      border-top: 0
+    }
+
+    .fl b {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--ac)
+    }
+
+    .fl em {
+      margin-left: auto;
+      font-style: normal;
+      color: var(--mu);
+      font-size: 12px;
+      white-space: nowrap
+    }
+
+    .fl span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap
+    }
+
+    @media(max-width:760px) {
+      .gr {
+        grid-template-columns: 1fr 1fr
+      }
+
+      .se {
+        display: none
+      }
+    }
+
+    @media(max-width:520px) {
+      .gr {
+        grid-template-columns: 1fr
+      }
+
+      .w2 {
+        grid-column: auto
+      }
+
+      .mn {
+        padding: 16px
+      }
+    }
+
+    @media(max-height:520px) {
+      .tb {
+        height: 30px
+      }
+
+      .cb span {
+        height: 30px;
+        width: 40px
+      }
+
+      .sd {
+        padding-top: 4px
+      }
+
+      .nv {
+        height: 30px;
+        margin-bottom: 1px
+      }
+
+      .mn {
+        padding-top: 12px;
+        padding-bottom: 12px
+      }
+
+      h1 {
+        font-size: 18px
+      }
+
+      .hd p {
+        display: none
+      }
+
+      .gr {
+        gap: 10px;
+        margin-top: 12px
+      }
+
+      .cd {
+        padding: 10px 12px
+      }
+
+      .v {
+        font-size: 22px;
+        margin: 0
+      }
+
+      .sp {
+        display: none
+      }
+
+      .bars {
+        height: 64px;
+        margin-top: 8px
+      }
+
+      .fl {
+        padding: 5px 0
+      }
+    }
+
+    .gl {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 52px;
+      height: 52px;
+      margin: -26px 0 0 -26px;
+      opacity: 0;
+      z-index: 5;
+      pointer-events: none;
+      will-change: transform, opacity;
+      background: radial-gradient(circle, #fff 0, rgba(255, 238, 196, .85) 9%, transparent 32%), linear-gradient(90deg, transparent, rgba(255, 255, 255, .95), transparent) center/100% 2px no-repeat, linear-gradient(0deg, transparent, rgba(255, 255, 255, .95), transparent) center/2px 100% no-repeat
+    }
+
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translate3d(0, 14px, 0)
+      }
+    }
+
+    @keyframes grow {
+      from {
+        transform: scaleY(.04);
+        opacity: .4
+      }
+    }
+
+    @keyframes dash {
+      from {
+        stroke-dashoffset: 100
+      }
+    }
+
+    @keyframes pill {
+      from {
+        transform: scaleY(.2);
+        opacity: 0
+      }
+    }
+
+    .gr .cd:nth-child(2) {
+      animation-delay: .05s
+    }
+
+    .gr .cd:nth-child(3) {
+      animation-delay: .1s
+    }
+
+    .gr .cd:nth-child(4) {
+      animation-delay: .15s
+    }
+
+    .gr .cd:nth-child(5) {
+      animation-delay: .2s
+    }
+
+    .cd:hover {
+      background: color-mix(in srgb, var(--cd) 93%, var(--tx))
+    }
+
+
+    @media(display-mode:window-controls-overlay) {
+      .cb {
+        display: none
+      }
+
+      .tb {
+        height: env(titlebar-area-height, 32px);
+        padding-right: calc(100vw - env(titlebar-area-width, 100vw) - env(titlebar-area-x, 0px))
+      }
+    }
+
+    @media(forced-colors:active) {
+
+      .cd,
+      .se {
+        border: 1px solid CanvasText
+      }
+
+      .nv.on {
+        outline: 2px solid Highlight
+      }
+
+      .band,
+      #fx,
+      .halo,
+      .ig,
+      .fill,
+      #arcs,
+      #cv,
+      .knob::before,
+      .knob::after,
+      .sheen,
+      .gw,
+      .cor {
+        display: none
+      }
+
+      .track {
+        background: Canvas !important;
+        border: 2px solid CanvasText !important;
+        box-shadow: none !important
+      }
+
+      .knob {
+        background: ButtonFace !important;
+        border: 2px solid ButtonText !important;
+        box-shadow: none !important
+      }
+
+      .sw:focus-visible {
+        box-shadow: none;
+        outline: 2px solid Highlight
+      }
+    }
+
+    .band {
+      position: absolute;
+      inset: 0;
+      pointer-events: none
+    }
+
+    #fx {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none
+    }
+
+    .dock {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 440px;
+      height: 230px;
+      transform-origin: 0 0
+    }
+
+    .sw {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      border: 0;
+      padding: 0;
+      margin: 0;
+      background: none;
+      cursor: grab;
+      border-radius: 115px;
+      corner-shape: squircle;
+      touch-action: none;
+      -webkit-appearance: none;
+      appearance: none;
+      outline: none;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none
+    }
+
+    .sw:focus-visible {
+      box-shadow: 0 0 0 4px var(--arc)
+    }
+
+    .sw:active {
+      cursor: grabbing
+    }
+
+    .track {
+      position: absolute;
+      inset: 0;
+      border-radius: 115px;
+      corner-shape: squircle;
+      background: linear-gradient(180deg, color-mix(in srgb, var(--t1) 92%, white 8%), var(--t2));
+      box-shadow: inset 0 3px 10px var(--tsa), inset 0 -2px 7px var(--tsb), 0 1px 0 var(--tsb), 0 14px 30px var(--drop);
+      border: 1px solid rgba(255, 255, 255, .08);
+      box-sizing: border-box
+    }
+
+    .halo {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 380px;
+      height: 380px;
+      margin: -190px 0 0 -190px;
+      border-radius: 50%;
+      background: radial-gradient(circle, var(--halo) 0%, transparent 62%);
+      pointer-events: none;
+      will-change: transform
+    }
+
+    .knob {
+      position: absolute;
+      left: 0;
+      top: 15px;
+      width: 200px;
+      height: 200px;
+      box-sizing: border-box;
+      border-radius: 56px;
+      corner-shape: squircle;
+      transform-origin: 50% 50%;
+      will-change: transform;
+      isolation: isolate;
+      background: radial-gradient(ellipse 72% 42% at 18% 3%, rgba(255, 255, 255, .88), transparent 72%), radial-gradient(ellipse 68% 48% at 92% 100%, var(--kref), transparent 76%), linear-gradient(150deg, rgba(255, 255, 255, .72) 0%, color-mix(in srgb, var(--k1) 97%, white 3%) 17%, var(--k1) 46%, var(--k2) 100%);
+      box-shadow: inset 0 1.4px 0 rgba(255, 255, 255, .98), inset 1.2px 0 0 rgba(255, 255, 255, .62), inset -1px 0 0 rgba(255, 255, 255, .18), inset 0 -1px 0 rgba(35, 48, 75, .14), inset 0 -20px 34px rgba(20, 28, 45, .13), inset 0 0 0 1px rgba(255, 255, 255, .18), 0 1px 2px rgba(255, 255, 255, .62), 0 14px 30px var(--kd), 0 4px 9px rgba(15, 25, 45, .16), 0 0 26px var(--kouter), 0 0 64px color-mix(in srgb, var(--kouter) 55%, transparent)
+    }
+
+    .knob.settle-breath {
+      animation: settle-breath 720ms cubic-bezier(.2, .75, .25, 1) 1
+    }
+
+    @keyframes settle-breath {
+      0% {
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, .72), inset 0 2px 3px var(--kh), inset 0 -16px 28px rgba(20, 28, 45, .075), 0 10px 22px var(--kd), 0 2px 5px rgba(15, 25, 45, .10)
+      }
+
+      35% {
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9), 0 0 0 5px rgba(155, 183, 255, .18), 0 0 34px rgba(155, 183, 255, .38), 0 12px 28px var(--kd)
+      }
+
+      100% {
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, .72), inset 0 2px 3px var(--kh), inset 0 -16px 28px rgba(20, 28, 45, .075), 0 10px 22px var(--kd), 0 2px 5px rgba(15, 25, 45, .10)
+      }
+    }
+
+    .knob::after {
+      content: "";
+      position: absolute;
+      inset: 7px;
+      border-radius: 48px;
+      corner-shape: squircle;
+      border: 1px solid rgba(255, 255, 255, .42);
+      box-shadow: inset 0 0 0 1px rgba(120, 145, 190, .08), 0 0 0 1px rgba(30, 45, 75, .035);
+      pointer-events: none;
+      z-index: 4
+    }
+
+    .knob .sheen {
+      mix-blend-mode: screen;
+      left: 9px;
+      top: 7px;
+      right: 31%;
+      height: 40%;
+      background: linear-gradient(180deg, rgba(255, 255, 255, .48), rgba(255, 255, 255, .12) 46%, rgba(255, 255, 255, 0));
+      filter: blur(.35px)
+    }
+
+    .knob::before {
+      opacity: .96
+    }
+
+    .knob::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      padding: 1.5px;
+      background: linear-gradient(155deg, var(--kb), transparent 42%, var(--kb2));
+      -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude
+    }
+
+    .knob .gw {
+      z-index: 1
+    }
+
+    .knob .gw::before {
+      content: "";
+      position: absolute;
+      left: 7%;
+      right: 7%;
+      bottom: 5%;
+      height: 24%;
+      border-radius: 50%;
+      background: radial-gradient(ellipse at 50% 100%, var(--kref), transparent 72%);
+      filter: blur(10px);
+      opacity: .9;
+      pointer-events: none
+    }
+
+    .gw {
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      corner-shape: squircle;
+      overflow: hidden
+    }
+
+    .gw::after {
+      content: "";
+      position: absolute;
+      inset: 1px;
+      border-radius: inherit;
+      pointer-events: none;
+      background: linear-gradient(125deg, rgba(255, 255, 255, .18), transparent 34%, transparent 70%, rgba(90, 115, 160, .08));
+      mix-blend-mode: soft-light
+    }
+
+    .ig {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 280px;
+      height: 280px;
+      margin: -140px 0 0 -140px;
+      border-radius: 50%;
+      background: radial-gradient(circle, var(--glow) 0%, color-mix(in srgb, var(--glow) 28%, transparent) 34%, transparent 68%);
+      will-change: transform
+    }
+
+    .sheen {
+      position: absolute;
+      left: 10px;
+      top: 8px;
+      right: 34%;
+      height: 38%;
+      border-radius: 46px 46px 70px 70px;
+      corner-shape: squircle;
+      background: linear-gradient(180deg, rgba(255, 255, 255, .34), rgba(255, 255, 255, .06) 58%, rgba(255, 255, 255, 0));
+      filter: blur(.2px);
+      pointer-events: none
+    }
+
+    #cv {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 200px;
+      height: 200px;
+      z-index: 2;
+      filter: drop-shadow(0 2px 3px rgba(25, 35, 65, .16))
+    }
+
+    #arcs {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 200px;
+      height: 200px;
+      overflow: visible;
+      z-index: 3;
+      pointer-events: none
+    }
+
+    #arcs path {
+      fill: none;
+      stroke: var(--arc);
+      stroke-linecap: round
+    }
+
+    #arcs path:last-of-type {
+      stroke: var(--arcw)
+    }
+
+    .knob.hit {
+      animation: hit-flash 440ms ease-out 1
+    }
+
+    @keyframes hit-flash {
+      0% {
+        filter: brightness(1.5) saturate(1.25) drop-shadow(0 0 16px var(--arc))
+      }
+
+      100% {
+        filter: brightness(1) saturate(1) drop-shadow(0 0 0 transparent)
+      }
+    }
+
+    .cor {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 0;
+      height: 0;
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      will-change: transform, opacity
+    }
+
+    .cor i {
+      position: absolute;
+      left: -190px;
+      top: -190px;
+      width: 380px;
+      height: 380px;
+      border-radius: 50%;
+      background: repeating-conic-gradient(from 0deg, rgba(255, 205, 120, 0) 0 6deg, rgba(255, 196, 104, .5) 8deg, rgba(255, 205, 120, 0) 11deg 20deg);
+      -webkit-mask: radial-gradient(circle, transparent 0 46%, #000 58%, transparent 74%);
+      mask: radial-gradient(circle, transparent 0 46%, #000 58%, transparent 74%);
+      animation: cor-spin 26s linear infinite
+    }
+
+    .cor b {
+      position: absolute;
+      left: -100px;
+      top: -100px;
+      width: 200px;
+      height: 200px;
+      animation: mote 3.4s ease-out infinite;
+      background: radial-gradient(circle at 20% 80%, #fff0c8 0 1.5px, transparent 2.5px), radial-gradient(circle at 78% 70%, #ffe2a0 0 1.2px, transparent 2.2px), radial-gradient(circle at 46% 92%, #fff6dc 0 1.8px, transparent 2.8px), radial-gradient(circle at 62% 84%, #ffd890 0 1.2px, transparent 2.2px), radial-gradient(circle at 32% 60%, #fff 0 1px, transparent 2px)
+    }
+
+    @keyframes cor-spin {
+      to {
+        transform: rotate(360deg)
+      }
+    }
+
+    @keyframes mote {
+      0% {
+        transform: translateY(14px);
+        opacity: 0
+      }
+
+      25% {
+        opacity: 1
+      }
+
+      100% {
+        transform: translateY(-52px);
+        opacity: 0
+      }
+    }
+
+    .swp {
+      position: absolute;
+      top: -20%;
+      bottom: -20%;
+      left: 0;
+      width: 34%;
+      opacity: 0;
+      pointer-events: none;
+      will-change: transform;
+      background: linear-gradient(100deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, .8), rgba(255, 255, 255, 0));
+      animation: swp 5.2s ease-in-out infinite
+    }
+
+    @keyframes swp {
+
+      0%,
+      55% {
+        transform: translateX(-170%) skewX(-18deg)
+      }
+
+      100% {
+        transform: translateX(420%) skewX(-18deg)
+      }
+    }
+
+    @media(min-width:761px) {
+      .sd {
+        padding-top: 8px
+      }
+
+      .gr {
+        gap: 12px;
+        margin-top: 20px
+      }
+    }
+
+    @media(prefers-reduced-motion:reduce) {
+
+      .nv,
+      .cd,
+      .se,
+      .cb span {
+        transition: none !important
+      }
+
+      .cd,
+      .bars i,
+      .sp,
+      .nv.on::before {
+        animation: none !important
+      }
+
+      .knob,
+      .halo,
+      .ig {
+        will-change: auto
+      }
+
+      .knob.settle-breath,
+      .knob.hit,
+      .cor i,
+      .cor b,
+      .swp {
+        animation: none !important
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-home" viewBox="0 0 24 24">
+      <path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z" />
+    </symbol>
+    <symbol id="i-dir" viewBox="0 0 24 24">
+      <path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    </symbol>
+    <symbol id="i-star" viewBox="0 0 24 24">
+      <path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z" />
+    </symbol>
+    <symbol id="i-clk" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </symbol>
+    <symbol id="i-set" viewBox="0 0 24 24">
+      <path d="M4 7h9M19 7h1M4 17h1M11 17h9" />
+      <circle cx="16" cy="7" r="2.5" />
+      <circle cx="8" cy="17" r="2.5" />
+    </symbol>
+    <symbol id="i-sea" viewBox="0 0 24 24">
+      <circle cx="11" cy="11" r="7" />
+      <path d="M16.5 16.5L21 21" />
+    </symbol>
+  </svg>
+  <div class="root" id="root">
+    <div class="app" id="appD" data-theme="dark">
+      <div class="tb">
+        <div class="ti"><span class="lg"></span>Aurora</div>
+        <div class="cb"><span data-cmd="min" title="最小化"><svg class="cp" viewBox="0 0 10 10">
+              <path d="M0 5h10" />
+            </svg></span><span data-cmd="max" title="最大化"><svg class="cp" viewBox="0 0 10 10">
+              <rect x=".5" y=".5" width="9" height="9" rx="1.5" />
+            </svg></span><span data-cmd="close" title="关闭"><svg class="cp" viewBox="0 0 10 10">
+              <path d="M0 0l10 10M10 0L0 10" />
+            </svg></span></div>
+      </div>
+      <div class="bd">
+        <div class="sd">
+          <div class="nv on"><svg class="ic">
+              <use href="#i-home" />
+            </svg>主页</div>
+          <div class="nv"><svg class="ic">
+              <use href="#i-dir" />
+            </svg>项目</div>
+          <div class="nv"><svg class="ic">
+              <use href="#i-star" />
+            </svg>收藏</div>
+          <div class="nv"><svg class="ic">
+              <use href="#i-clk" />
+            </svg>最近</div>
+          <div class="nv"><svg class="ic">
+              <use href="#i-set" />
+            </svg>设置</div>
+          <div class="sl"></div>
+        </div>
+        <div class="mn">
+          <div class="hd">
+            <div>
+              <h1>下午好，林夕</h1>
+              <p>今天有 3 个任务即将到期</p>
+            </div>
+            <div class="se"><svg class="ic">
+                <use href="#i-sea" />
+              </svg>搜索文件与项目</div>
+          </div>
+          <div class="gr">
+            <div class="cd">
+              <div class="k">活跃项目</div>
+              <div class="v">12</div>
+              <div class="dl">较上周 +2<svg class="sp" viewBox="0 0 64 20">
+                  <polyline points="1,16 11,12 22,14 33,7 44,9 54,3 63,5" />
+                </svg></div>
+            </div>
+            <div class="cd">
+              <div class="k">本周完成</div>
+              <div class="v">48</div>
+              <div class="dl">增长 16%<svg class="sp" viewBox="0 0 64 20">
+                  <polyline points="1,14 11,15 22,9 33,11 44,5 54,7 63,2" />
+                </svg></div>
+            </div>
+            <div class="cd">
+              <div class="k">待审阅</div>
+              <div class="v">5</div>
+              <div class="dl">2 项今日截止<svg class="sp" viewBox="0 0 64 20">
+                  <polyline points="1,6 11,9 22,5 33,12 44,10 54,15 63,13" />
+                </svg></div>
+            </div>
+            <div class="cd w2">
+              <div class="k">本周活跃度</div>
+              <div class="bars"><i style="height:42%"></i><i style="height:64%"></i><i style="height:52%"></i><i
+                  style="height:86%"></i><i class="on" style="height:100%"></i><i style="height:38%"></i><i
+                  style="height:24%"></i></div>
+              <div class="dy">
+                <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+              </div>
+            </div>
+            <div class="cd">
+              <div class="k" style="margin-bottom:6px">最近文件</div>
+              <div class="fl"><b></b><span>品牌手册 v3</span><em>2 分钟前</em></div>
+              <div class="fl"><b style="opacity:.7"></b><span>季度复盘</span><em>昨天</em></div>
+              <div class="fl"><b style="opacity:.5"></b><span>用户访谈记录</span><em>周二</em></div>
+              <div class="fl"><b style="opacity:.3"></b><span>定价模型</span><em>周一</em></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="app" id="appL" data-theme="light"></div>
+    <div class="dock" id="dock" style="visibility:hidden">
+      <button class="sw" id="sw" role="switch" aria-checked="false" aria-label="切换亮色或暗色主题">
+        <span class="track"></span><span class="halo" id="halo"></span><span class="cor" id="cor"><i></i><b></b></span>
+        <span class="knob" id="knob"><span class="gw"><span class="ig" id="ig"></span><span class="swp"
+              id="swp"></span></span><span class="sheen"></span><canvas id="cv"></canvas>
+          <svg id="arcs" viewBox="0 0 200 200" aria-hidden="true"></svg><span class="gl" id="gl"></span></span>
+      </button>
+    </div>
+    <div class="band" id="band"></div>
+    <canvas id="fx"></canvas>
+  </div>
+  <script>
+    (function () {
+      var $ = function (i) { return document.getElementById(i) }, appD = $('appD'), appL = $('appL'), dock = $('dock'), sw = $('sw'), knob = $('knob'), halo = $('halo'), cv = $('cv'), band = $('band'), arcsEl = $('arcs'),
+        slot = appD.querySelector('.sl'), reduce = matchMedia('(prefers-reduced-motion: reduce)').matches,
+        mem = navigator.deviceMemory || 4, cores = navigator.hardwareConcurrency || 4, lowPower = mem <= 4 || cores <= 4,
+        fxLimit = lowPower ? 28 : 96, fxDpr = lowPower ? 1 : 2;
+      appL.innerHTML = appD.innerHTML;
+
+      /* Vanilla HTML/CSS/JS + Canvas 2D；高性能设备档。v6：精修玻璃陶瓷材质、紫色轮廓光与粒子短光尾。 */
+      var P = {
+        t1: [[10, 14, 24], [249, 251, 255]], t2: [[19, 25, 39], [231, 238, 249]],
+        tsa: [[0, 0, 0, .72], [112, 132, 166, .26]], tsb: [[190, 207, 255, .12], [255, 255, 255, .92]], drop: [[0, 0, 0, .46], [90, 112, 150, .24]],
+        k1: [[151, 165, 202], [255, 255, 255]], k2: [[54, 65, 91], [225, 234, 247]],
+        kh: [[255, 255, 255, .34], [255, 255, 255, 1]], kd: [[0, 0, 0, .55], [110, 95, 75, .4]], kb: [[228, 221, 255, .8], [255, 255, 255, .98]], kb2: [[190, 176, 255, .3], [255, 224, 168, .7]], kref: [[172, 146, 255, .22], [255, 196, 120, .52]], kouter: [[165, 142, 255, .22], [255, 186, 96, .58]],
+        arc: [[212, 204, 255], [255, 204, 126], [224, 239, 255]],
+        arcw: [[246, 244, 255], [255, 246, 225], [255, 255, 255]],
+        glow: [[184, 162, 255, .52], [255, 190, 100, .9], [188, 216, 255, .38]],
+        halo: [[160, 138, 255, .44], [255, 186, 108, .78], [176, 207, 255, .20]],
+        pg: [[255, 255, 255, .4], [255, 255, 255, 0]]
+      };
+      function mx(a, b, t) { var r = []; for (var i = 0; i < 4; i++) { var x = a[i] == null ? 1 : a[i], y = b[i] == null ? 1 : b[i]; r.push(x + (y - x) * t) } return r }
+      function cm(k, t) { var p = P[k]; return p[2] ? (t < .5 ? mx(p[0], p[2], t * 2) : mx(p[2], p[1], (t - .5) * 2)) : mx(p[0], p[1], t) }
+      function rgba(c, a) { return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + (a == null ? c[3] : a).toFixed(3) + ')' }
+      function cl(x) { return x < 0 ? 0 : x > 1 ? 1 : x }
+      function ss(a, b, x) { var t = cl((x - a) / (b - a)); return t * t * (3 - 2 * t) }
+      function lerp(a, b, t) { return a + (b - a) * t }
+      function ease(u) { return u < .5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2 }
+
+      /* 像素月亮与太阳（15x15 网格） */
+      var N = 15, S = 8, O = (200 - N * S) / 2; function px(i) { return O + i * S + S / 2 }
+      var moon = [], sun = [], x, y, i;
+      for (y = 0; y < N; y++)for (x = 0; x < N; x++) {
+        var dx = x - 7, dy = y - 7; if (dx * dx + dy * dy > 36) continue;
+        var d = Math.hypot(x - 9.5, y - 5.5);
+        if (d > 5.2) moon.push([x, y, 1]); else if (d > 3.9 && (x + y) % 2 === 0) moon.push([x, y, .5]);
+      }
+      [[11, 3], [13, 5], [12, 1]].forEach(function (s) { moon.push([s[0], s[1], .7]) });
+      for (y = 5; y <= 9; y++)for (x = 5; x <= 9; x++)sun.push([x, y]);
+      [[7, 2], [7, 3], [7, 11], [7, 12], [2, 7], [3, 7], [11, 7], [12, 7], [2, 2], [3, 3], [12, 2], [11, 3], [2, 12], [3, 11], [12, 12], [11, 11]].forEach(function (s) { sun.push(s) });
+      var seed = 7; function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647 }
+      for (i = sun.length - 1; i > 0; i--) { var j = (rnd() * (i + 1)) | 0, t = sun[i]; sun[i] = sun[j]; sun[j] = t }
+      var parts = [], K = Math.max(moon.length, sun.length);
+      for (i = 0; i < K; i++) {
+        var ang = rnd() * 6.283, rad = 16 + rnd() * 34, sx = 100 + Math.cos(ang) * rad, sy = 100 + Math.sin(ang) * rad, m = moon[i], s = sun[i];
+        parts.push({ fx: m ? px(m[0]) : sx, fy: m ? px(m[1]) : sy, fa: m ? m[2] : 0, tx: s ? px(s[0]) : sx, ty: s ? px(s[1]) : sy, ta: s ? 1 : 0, sx: sx, sy: sy, a: .1 + rnd() * .12, b: .5 + rnd() * .15, w: rnd() * 6.28 });
+      }
+      var ctx = cv.getContext('2d'), dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+      cv.width = cv.height = 200 * dpr; ctx.scale(dpr, dpr);
+      function draw(u, tt) {
+        ctx.clearRect(0, 0, 200, 200);
+        ctx.fillStyle = 'rgb(' + ((9 + 225 * (1 - tt)) | 0) + ',' + ((17 + 166 * (1 - tt)) | 0) + ',' + ((48 + 88 * (1 - tt)) | 0) + ')';
+        for (var n = 0; n < parts.length; n++) {
+          var p = parts[n], e1 = ss(p.a, p.a + .3, u), c1 = ss(p.b, p.b + .3, u), w = Math.sin(u * 9 + p.w) * 4 * e1 * (1 - c1), a = lerp(lerp(p.fa, .9, e1), p.ta, c1);
+          if (a < .02) continue;
+          var X = lerp(lerp(p.fx, p.sx, e1) + w, p.tx, c1), Y = lerp(lerp(p.fy, p.sy, e1) + w * .7, p.ty, c1), z = (S - 1.2) * (1 - .5 * e1 * (1 - c1));
+          if (tt < .97) { ctx.globalAlpha = a * .16 * (1 - tt); ctx.fillRect(X - z * .95, Y - z * .95, z * 1.9, z * 1.9) } ctx.globalAlpha = a; ctx.fillRect(X - z / 2, Y - z / 2, z, z);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      /* 光弧：沿旋钮边缘从底部滑到右上角 */
+      var D = 'M0 100V56A56 56 0 0 1 56 0H144A56 56 0 0 1 200 56V144A56 56 0 0 1 144 200H56A56 56 0 0 1 0 144V100',
+        cfg = [[300, 22, .07, ''], [290, 14, .1, ''], [280, 8, .16, ''], [260, 2.4, .35, ''], [190, 3, .65, ''], [110, 3.4, 1, '']];
+      arcsEl.innerHTML = '<defs><filter id="bl" filterUnits="userSpaceOnUse" x="-50" y="-50" width="300" height="300"><feGaussianBlur stdDeviation="8"/></filter></defs>' +
+        cfg.map(function (c) { return '<path pathLength="1000" d="' + D + '" stroke-width="' + c[1] + '" opacity="' + c[2] + '"' + c[3] + '/>' }).join('');
+      var arcs = [].slice.call(arcsEl.querySelectorAll('path')), ref = arcs[1], tot = ref.getTotalLength();
+
+      /* 全屏光波：以滑块中心为光源，圆形波前向整个界面扩散 */
+      function waveClip(progress, cx, cy) {
+        var maxR = Math.hypot(W, H) + 120;
+        var e = progress * progress * (3 - 2 * progress);
+        return 'circle(' + (Math.max(0, maxR * e)).toFixed(1) + 'px at ' + cx.toFixed(1) + 'px ' + cy.toFixed(1) + 'px)';
+      }
+
+      var lastTT = -1, lastUp = 0, ig = $('ig'), cor = $('cor'), swp = $('swp'), fill = $('fill'), sheen = knob.querySelector('.sheen'), tu = .3, lastPE = -1, lastClipS = '', userSet = false, moving = false, fl = [], hitS = 0, hitSide = 0, lastHit = 0, gl = $('gl'), dT = .9, sc = 1, W = innerWidth, H = innerHeight, dl = 0, dtp = 0, fx = $('fx'), fc = fx.getContext('2d'), pts = [], rip = null, lastF = null, side = null, fxOn = false, lastClipK = NaN, lastBandA = -1, lastBandF = NaN, lastDrawU = -1, lastDrawT = -1, lastArcF = NaN;
+      function fxSize() { var d = Math.min(devicePixelRatio || 1, fxDpr); fx.width = W * d; fx.height = H * d; fc.setTransform(d, 0, 0, d, 0, 0) }
+      function fT(v) { return 890 - 500 * cl(v) }
+      /* 光波前沿：与圆形裁剪同心同半径的亮环 */
+      function ringCss(c, A, x, y, R) {
+        function s(a) { return rgba(c, a * A) }
+        return 'radial-gradient(circle at ' + x.toFixed(1) + 'px ' + y.toFixed(1) + 'px,transparent ' + Math.max(0, R - 70).toFixed(1) + 'px,' + s(.2) + ' ' + Math.max(0, R - 12).toFixed(1) + 'px,rgba(255,255,255,' + (.85 * A).toFixed(3) + ') ' + R.toFixed(1) + 'px,' + s(.26) + ' ' + (R + 10).toFixed(1) + 'px,transparent ' + (R + 64).toFixed(1) + 'px)';
+      }
+      function bandCss(c, A, p) {
+        function s(a) { return rgba(c, a * A) }
+        return 'radial-gradient(ellipse 28% 34% at ' + p + '% ' + (100 - p) + '%,rgba(190,205,255,' + (.18 * A).toFixed(3) + '),transparent 72%),' +
+          'linear-gradient(to bottom left,transparent ' + (p - 3) + '%,rgba(255,255,255,' + (.8 * A).toFixed(3) + ') ' + p + '%,transparent ' + (p + .8) + '%),' +
+          'linear-gradient(to bottom left,transparent ' + (p - 9) + '%,' + s(.34) + ' ' + (p - 1) + '%,' + s(.3) + ' ' + (p + 1.5) + '%,transparent ' + (p + 14) + '%),' +
+          'linear-gradient(to bottom left,transparent ' + (p - 30) + '%,' + s(.1) + ' ' + p + '%,transparent ' + (p + 34) + '%)';
+      }
+      /* 光屑：从滑块边缘沿光波法线发射，随后阻尼消散 */
+      function spawnWave(cx, cy, radius, delta, c) {
+        if (reduce || Math.abs(delta) < .0001) return;
+        var count = Math.min(24, Math.floor(Math.abs(delta) * Math.max(.5, Math.min(W, H)) * .23 + Math.random()));
+        var dir = delta >= 0 ? 1 : -1;
+        while (count > 0 && pts.length < fxLimit) {
+          count--;
+          var a = Math.random() * Math.PI * 2, cs = Math.cos(a), sn = Math.sin(a), jitter = (Math.random() - .5) * 15;
+          var speed = (54 + Math.random() * 92) * dir;
+          pts.push({
+            x: cx + cs * (radius + jitter), y: cy + sn * (radius + jitter), px: cx + cs * (radius + jitter), py: cy + sn * (radius + jitter),
+            vx: cs * speed + (Math.random() - .5) * 18, vy: sn * speed + (Math.random() - .5) * 18,
+            l: 0, life: .48 + Math.random() * .62, r: .55 + Math.random() * 1.35, tail: 5 + Math.random() * 13, tw: Math.random() * 6.283, c: c
+          });
+        }
+      }
+      function ripple(ix, iy, c) { if (!reduce && !lowPower) rip = { t: performance.now(), x: dl + ix * sc, y: dtp + iy * sc, c: c } }
+      function drawFx(dt) {
+        if (!pts.length && !rip && !fl.length) { if (fxOn) { fc.clearRect(0, 0, W, H); fxOn = false } return }
+        fxOn = true; fc.clearRect(0, 0, W, H);
+        var now = performance.now();
+        for (var j = fl.length - 1; j >= 0; j--) {
+          var f = fl[j], q = (now - f.t) / [340, 900, 700, 460, 620][f.k];
+          if (q < 0) continue; if (q >= 1) { fl.splice(j, 1); continue }
+          if (f.k >= 3) {
+            var a3 = (1 - q) * (1 - q);
+            if (f.k === 3) {
+              var hh = (120 + 60 * f.s) * sc, ww = (26 + 34 * f.s) * sc * (.6 + .8 * q);
+              fc.save(); fc.translate(f.x, f.y); fc.scale(ww / hh, 1);
+              var g3 = fc.createRadialGradient(0, 0, 0, 0, 0, hh); g3.addColorStop(0, 'rgba(255,255,255,' + (.8 * a3).toFixed(3) + ')'); g3.addColorStop(.3, rgba(f.c, .42 * a3)); g3.addColorStop(1, rgba(f.c, 0));
+              fc.fillStyle = g3; fc.beginPath(); fc.arc(0, 0, hh, 0, 6.283); fc.fill(); fc.restore()
+            }
+            else {
+              var rr = (24 + 120 * f.s) * sc * (.25 + q * 1.1);
+              fc.save(); fc.translate(f.x + (f.side ? -1 : 1) * rr * .35, f.y); fc.scale(.55, 1); fc.lineWidth = Math.max(1, (6 - 5 * q) * sc * 1.6); fc.strokeStyle = rgba(f.c, .55 * a3); fc.beginPath(); fc.arc(0, 0, rr, 0, 6.283); fc.stroke(); fc.restore()
+            }
+            continue
+          }
+          var al = (1 - q) * (1 - q), Rr = f.k === 0 ? (60 + 110 * f.s) * sc * (.55 + q * .9) : (70 + 40 * q) * sc * 1.8, gr = fc.createRadialGradient(f.x, f.y, 0, f.x, f.y, Rr);
+          gr.addColorStop(0, 'rgba(255,255,255,' + (.85 * al).toFixed(3) + ')'); gr.addColorStop(.35, rgba(f.c, .3 * al)); gr.addColorStop(1, rgba(f.c, 0));
+          fc.fillStyle = gr; fc.beginPath(); fc.arc(f.x, f.y, Rr, 0, 6.283); fc.fill(); fc.lineCap = 'round';
+          if (f.k === 0) {
+            var h = (92 + 30 * f.s) * sc, sd = f.side ? Math.PI - 1.35 : -1.35;
+            fc.lineWidth = Math.max(1.6, 10 * sc * (1 - q)); fc.strokeStyle = 'rgba(255,255,255,' + (.85 * al).toFixed(3) + ')'; fc.beginPath(); fc.moveTo(f.x, f.y - h); fc.lineTo(f.x, f.y + h); fc.stroke();
+            fc.lineWidth = 1.5; fc.strokeStyle = rgba(f.c, .55 * al); fc.beginPath(); fc.arc(f.x, f.y, (14 + 110 * f.s) * sc * q + 6 * sc, sd, sd + 2.7); fc.stroke()
+          }
+          else if (f.k === 1) {
+            for (var r = 0; r < 12; r++) {
+              var an = r * .5236 + q * .5, r0 = Rr * .4, r1 = Rr * (.75 + .3 * (r % 2));
+              fc.lineWidth = (r % 2 ? 1.2 : 2.2) * Math.max(.7, sc * 2); fc.strokeStyle = rgba(f.c, .55 * al); fc.beginPath(); fc.moveTo(f.x + Math.cos(an) * r0, f.y + Math.sin(an) * r0); fc.lineTo(f.x + Math.cos(an) * r1, f.y + Math.sin(an) * r1); fc.stroke()
+            }
+          }
+          else { fc.lineWidth = 1.5; fc.strokeStyle = rgba(f.c, .45 * al); fc.beginPath(); fc.arc(f.x, f.y, Rr * (.5 + q * .7), 0, 6.283); fc.stroke() }
+        }
+        for (var i = pts.length - 1; i >= 0; i--) {
+          var p = pts[i]; p.l += dt;
+          if (p.l >= p.life) { pts.splice(i, 1); continue }
+          var f = 1 - p.l / p.life, dm = Math.exp(-1.35 * dt), tw = .72 + .28 * Math.sin(p.l * 18 + p.tw), a = f * f * ss(0, .12, p.l) * tw;
+          p.px = p.x; p.py = p.y; p.vx *= dm; p.vy *= dm; p.vy += (p.g || 0) * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+          var dx = p.x - p.px, dy = p.y - p.py, mag = Math.hypot(dx, dy) || 1, tx = p.x - dx / mag * p.tail, ty = p.y - dy / mag * p.tail;
+          fc.lineCap = 'round'; fc.lineWidth = Math.max(.45, p.r * .9); fc.strokeStyle = rgba(p.c, .26 * a);
+          fc.beginPath(); fc.moveTo(tx, ty); fc.lineTo(p.x, p.y); fc.stroke();
+          fc.fillStyle = rgba(p.c, .20 * a); fc.beginPath(); fc.arc(p.x, p.y, p.r * 3.8, 0, 6.283); fc.fill();
+          fc.fillStyle = 'rgba(255,255,255,' + (.86 * a).toFixed(3) + ')'; fc.beginPath(); fc.arc(p.x, p.y, p.r * (.62 + .22 * tw), 0, 6.283); fc.fill();
+          if (p.star) { var L = p.r * (5 + 4 * tw) * (f + .3); fc.lineWidth = Math.max(.5, p.r * .45); fc.strokeStyle = 'rgba(255,255,255,' + (.8 * a).toFixed(3) + ')'; fc.beginPath(); fc.moveTo(p.x - L, p.y); fc.lineTo(p.x + L, p.y); fc.moveTo(p.x, p.y - L); fc.lineTo(p.x, p.y + L); fc.stroke() }
+        }
+        if (rip) {
+          var t = (performance.now() - rip.t) / 1100;
+          if (t >= 1) rip = null; else {
+            var R = (1 - Math.pow(1 - t, 3)) * Math.min(Math.max(W, H) * .4, 480), al = Math.pow(1 - t, 1.6);
+            fc.lineWidth = 2 + 10 * (1 - t); fc.strokeStyle = rgba(rip.c, .4 * al * ss(0, .08, t)); fc.beginPath(); fc.arc(rip.x, rip.y, R, 0, 6.283); fc.stroke();
+            fc.lineWidth = 4 + 14 * (1 - t); fc.strokeStyle = rgba(rip.c, .05 * al * ss(0, .08, t)); fc.beginPath(); fc.arc(rip.x, rip.y, R, 0, 6.283); fc.stroke();
+          }
+        }
+      }
+
+      /* 物理状态：旋钮位置 pos 与光弧位置 fa 各有一个弹簧 */
+      var pos = matchMedia('(prefers-color-scheme: light)').matches ? 1 : 0, xv = 0, target = pos, drag = false, down = false, moved = false, onKnob = false,
+        fa = fT(pos), fv = 0, press = 0, pressT = 0, impact = 0, impactV = 0, last = 0, raf = 0, sx0 = 0, p0 = 0, lt = 0, SK = 11.5, SC = 5.1, KF = 130, CF = 10.5;
+
+      function render() {
+        var u = cl(pos), F = -.14 + 1.28 * u, tt = ss(dT - .04, dT + .04, F), k = 2 * F - 1, n, q;
+        var kx = 15 + 210 * u, wcx = kx + 100, wcy = 115, waveR = (Math.hypot(W, H) + 120) * u * u * (3 - 2 * u);
+        var clipNow = waveClip(u, wcx, wcy), pe = u > .998 ? 2 : u < .002 ? 1 : 0; if (pe !== lastPE) { lastPE = pe; appL.style.pointerEvents = pe === 2 ? 'auto' : 'none'; appD.style.pointerEvents = pe === 1 ? 'auto' : 'none' }
+        if (!Number.isFinite(lastClipK) || Math.abs(u - lastClipK) > .0012) { appL.style.clipPath = clipNow; lastClipK = u; }
+        var A = ss(-.1, .03, F) * (1 - ss(.97, 1.12, F)), c = cm('arc', u);
+        if (Math.abs(A - lastBandA) > .018 || Math.abs(F * 100 - lastBandF) > 1.25) { band.style.background = A > .01 ? bandCss(c, A, F * 100) : 'none'; lastBandA = A; lastBandF = F * 100; }
+        if (lastTT < 0 || Math.abs(tt - lastTT) > .004 || ((tt === 0 || tt === 1) && tt !== lastTT)) { lastTT = tt; for (q in P) dock.style.setProperty('--' + q, rgba(cm(q, tt))); cor.style.opacity = swp.style.opacity = (tt * tt).toFixed(3); cor.style.visibility = tt < .01 ? 'hidden' : 'visible' }
+        var spd = Math.min(1, Math.abs(xv) / 1.6), hit = cl(impact), pr = 1 - .025 * press;
+        var sx = (1 + .018 * spd) * (1 - .085 * hit) * pr, sy = (1 - .014 * spd) * (1 + .062 * hit) * pr, tilt = Math.max(-1.15, Math.min(1.15, xv * .22));
+        var atLeft = pos < .002, atRight = pos > .998, origin = atLeft ? '0% 50%' : atRight ? '100% 50%' : '50% 50%';
+        var visualX = kx + (atRight ? 200 * (1 - sx) : 0);
+        knob.style.transformOrigin = origin;
+        knob.style.transform = 'translate3d(' + visualX + 'px,0,0) rotate(' + tilt.toFixed(3) + 'deg) scale(' + sx.toFixed(4) + ',' + sy.toFixed(4) + ')';
+        var st = 1 + Math.min(.6, Math.abs(fv) / 700) + .1 * spd, fm = ((fa % 1000) + 1000) % 1000;
+        if (!Number.isFinite(lastArcF) || Math.abs(fm - lastArcF) > .65) { for (n = 0; n < arcs.length; n++) { var len = Math.min(960, cfg[n][0] * st); arcs[n].setAttribute('stroke-dasharray', len + ' ' + (1000 - len)); arcs[n].setAttribute('stroke-dashoffset', -(fm - len / 2)) } lastArcF = fm; }
+        var pt = ref.getPointAtLength(fm / 1000 * tot);
+        ig.style.transform = 'translate3d(' + pt.x + 'px,' + pt.y + 'px,0)'; gl.style.transform = 'translate3d(' + pt.x + 'px,' + pt.y + 'px,0) scale(' + (.8 + .5 * Math.min(1, Math.abs(fv) / 300)).toFixed(3) + ')'; gl.style.opacity = ((.32 + .34 * tt) * (.7 + .3 * Math.min(1, Math.abs(fv) / 300))).toFixed(3);
+        halo.style.transform = 'translate3d(' + (kx + pt.x) + 'px,' + (15 + pt.y) + 'px,0)'; cor.style.transform = 'translate3d(' + (kx + 100) + 'px,115px,0)';
+        if (Math.abs(u - lastDrawU) > .0025 || Math.abs(tt - lastDrawT) > .0025) { draw(u, tt); lastDrawU = u; lastDrawT = tt; }
+        var sd = tt > .5; if (side !== null && sd !== side) ripple(kx + pt.x, 15 + pt.y, cm('arc', tt)); side = sd;
+        if (lastF !== null && !reduce) spawnWave(dl + wcx * sc, dtp + wcy * sc, (100 + waveR) * sc, (u - lastF), c); lastF = u;
+      }
+      function step(dt) {
+        if (!drag) { xv += (SK * (target - pos) - SC * xv) * dt; pos += xv * dt; if (pos < 0) { if (xv < -.18) { hitS = Math.min(1, -xv / 2.4); hitSide = 0 } pos = 0; xv = Math.max(0, -xv * .24) } if (pos > 1) { if (xv > .18) { hitS = Math.min(1, xv / 2.4); hitSide = 1 } pos = 1; xv = Math.min(0, -xv * .24) } }
+        fv += (KF * (fT(pos) - fa) - CF * fv) * dt; fa += fv * dt;
+        press += (pressT - press) * Math.min(1, dt * 14); impactV += (-105 * impact - 19 * impactV) * dt; impact += impactV * dt; impact = Math.max(0, Math.min(1, impact));
+      }
+      function settled() { return !drag && Math.abs(target - pos) < 5e-4 && Math.abs(xv) < 2e-3 && Math.abs(fT(pos) - fa) < .15 && Math.abs(fv) < .4 && Math.abs(pressT - press) < .01 && impact < .002 && Math.abs(impactV) < .02 }
+      function frame(t) {
+        var dt = Math.min(.05, Math.max(0, (t - last) / 1000)), n = Math.ceil(dt / .008) || 1, i; last = t;
+        for (i = 0; i < n; i++)step(dt / n);
+        if (hitS > 0) { burst(hitSide, hitS); hitS = 0 }
+        if (settled()) { if (moving) { moving = false; arrive() } pos = target; xv = 0; fa = fT(pos); fv = 0; press = pressT; impact = 0; impactV = 0 } else moving = true;
+        render(); drawFx(dt);
+        raf = (!settled() || pts.length || rip || fl.length) ? requestAnimationFrame(frame) : 0;
+      }
+      function kick() { if (!raf) { last = performance.now(); raf = requestAnimationFrame(frame) } }
+      function setTarget(t, sys) { if (!sys) { userSet = true; try { navigator.vibrate && navigator.vibrate(8) } catch (_) { } } target = t; sw.setAttribute('aria-checked', t === 1 ? 'true' : 'false'); if (reduce) { pos = t; xv = 0; fa = fT(pos); fv = 0 } kick() }
+
+      /* 拖拽：旋钮跟手，松手后带着速度惯性弹向最近的一端 */
+      sw.addEventListener('pointerdown', function (e) {
+        down = true; moved = false; onKnob = !!e.target.closest('.knob'); sx0 = e.clientX; p0 = pos; lt = performance.now();
+        if (onKnob) { pressT = 1; try { sw.setPointerCapture(e.pointerId) } catch (_) { } }
+        kick();
+      });
+      sw.addEventListener('pointermove', function (e) {
+        if (!down || !onKnob) return;
+        var dx = e.clientX - sx0;
+        if (!moved && Math.abs(dx) > 4) { moved = true; drag = true }
+        if (drag) {
+          var raw = p0 + dx / (210 * sc), np = Math.max(0, Math.min(1, raw)), now = performance.now(), dm = Math.max(8, now - lt);
+          if (raw >= 0 && raw < .13) { var m = 1 - raw / .13; np = Math.max(0, np - .032 * m * m) } else if (raw <= 1 && raw > .87) { var mr = (raw - .87) / .13; np = Math.min(1, np + .032 * mr * mr) }
+          if ((raw < 0 && dx < 0) || (raw > 1 && dx > 0)) {
+            var strength = Math.max(0, Math.min(1, Math.abs(raw - np) * 2.4 + Math.abs(dx / (210 * sc)) * .08));
+            impactV = Math.max(impactV, 2.2 + strength * 5); impact = Math.min(.85, impact + .22 + strength * .42); if (now - lastHit > 160) { lastHit = now; hitS = Math.min(1, .25 + strength * .9); hitSide = raw < 0 ? 0 : 1 }
+          }
+          xv = xv * .55 + ((np - pos) / dm * 1000) * .45; pos = np; lt = now; kick();
+        }
+      });
+      function up() {
+        if (!down) return; down = false; pressT = 0; lastUp = performance.now();
+        if (drag) { drag = false; setTarget(pos + xv * .16 > .5 ? 1 : 0) }
+        else if (!moved) setTarget(target === 1 ? 0 : 1);
+        else kick();
+      }
+      sw.addEventListener('pointerup', up); sw.addEventListener('pointercancel', up);
+      sw.addEventListener('click', function (e) { if (e.detail === 0 && performance.now() - lastUp > 700) setTarget(target === 1 ? 0 : 1) });
+
+      /* 碰撞：火花沿壁面迸出、闪光、冲击环，并让光弧受撞摆动 */
+      function pg(lx, ly) { return [dl + lx * sc, dtp + ly * sc] }
+      function burst(side, s) {
+        if (reduce) return;
+        var light = lastTT > .5, p = pg(side ? 425 : 15, 115), tc = cm('arc', cl(lastTT < 0 ? 0 : lastTT)), hot = light ? [255, 150, 60] : [225, 235, 255], dir = side ? -1 : 1, now = performance.now(),
+          n = Math.min(fxLimit - pts.length, Math.round((lowPower ? 10 : 18) + s * (lowPower ? 10 : 26))), i;
+        for (i = 0; i < n; i++) {
+          var a = (Math.random() - .5) * 2.4, sp = (110 + Math.random() * 300) * (.5 + s) * (.7 + sc * .6), y = p[1] + (Math.random() - .5) * 110 * sc, shard = !light && Math.random() < .3;
+          pts.push({
+            x: p[0], y: y, px: p[0], py: y, vx: Math.cos(a) * sp * dir, vy: Math.sin(a) * sp - 40, g: 380, l: 0, life: .5 + Math.random() * .6, r: .9 + Math.random() * 1.5,
+            tail: shard ? 26 + Math.random() * 22 : 8 + Math.random() * 16, tw: Math.random() * 6.283, c: Math.random() < .4 ? hot : tc, star: light ? Math.random() < .4 : Math.random() < .15
+          })
+        }
+        fl.push({ k: 0, x: p[0], y: p[1], t: now, s: s, side: side, c: tc });
+        fl.push({ k: 3, x: p[0], y: p[1], t: now, s: s, side: side, c: hot });
+        if (s > .45) fl.push({ k: 4, x: p[0], y: p[1], t: now + 70, s: s, side: side, c: tc });
+        knob.classList.remove('hit'); void knob.offsetWidth; knob.classList.add('hit');
+        fv += (side ? 1 : -1) * (160 + s * 520);
+        try { navigator.vibrate && navigator.vibrate(5 + Math.round(s * 9)) } catch (_) { }
+      }
+      /* 到位：亮色是日冕光芒与暖色光屑上浮，暗色是月晕与冷色星尘 */
+      function arrive() {
+        if (reduce) return;
+        var light = target === 1, p = pg(light ? 325 : 115, 115), tc = cm('arc', light ? 1 : 0), n = Math.min(fxLimit - pts.length, light ? (lowPower ? 10 : 24) : (lowPower ? 6 : 14)), i;
+        fl.push({ k: light ? 1 : 2, x: p[0], y: p[1], t: performance.now(), s: 1, c: tc });
+        for (i = 0; i < n; i++) {
+          var a = Math.random() * 6.283, sp = (30 + Math.random() * 70) * (.7 + sc), x0 = p[0] + Math.cos(a) * 30 * sc, y0 = p[1] + Math.sin(a) * 30 * sc;
+          pts.push({ x: x0, y: y0, px: x0, py: y0, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - (light ? 26 : 10), g: light ? -40 : 0, l: 0, life: 1 + Math.random() * .9, r: .7 + Math.random() * 1.4, tail: 3 + Math.random() * 7, tw: Math.random() * 6.283, c: tc, star: light && Math.random() < .4 })
+        }
+      }
+      /* 键盘与系统集成：方向键切换；跟随 Windows 系统主题；标题栏按钮对接宿主 */
+      sw.addEventListener('keydown', function (e) { if (e.key === 'ArrowRight' || e.key === 'End') { e.preventDefault(); setTarget(1) } else if (e.key === 'ArrowLeft' || e.key === 'Home') { e.preventDefault(); setTarget(0) } });
+      var mq = matchMedia('(prefers-color-scheme: light)');
+      if (mq.addEventListener) mq.addEventListener('change', function (e) { if (!userSet) setTarget(e.matches ? 1 : 0, true) });
+      function hostCmd(c) {
+        try {
+          if (window.chrome && chrome.webview) chrome.webview.postMessage({ type: 'window', cmd: c });
+          else if (window.electronAPI && electronAPI.windowControl) electronAPI.windowControl(c);
+          else if (window.pywebview && pywebview.api && pywebview.api.window_control) pywebview.api.window_control(c);
+          else if (c === 'max') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen && document.documentElement.requestFullscreen() }
+        } catch (_) { }
+      }
+      document.addEventListener('click', function (e) { var b = e.target.closest && e.target.closest('[data-cmd]'); if (b) hostCmd(b.getAttribute('data-cmd')) });
+      document.addEventListener('dblclick', function (e) { var t = e.target.closest && e.target; if (t && t.closest('.tb') && !t.closest('.cb')) hostCmd('max') });
+      function place() {
+        var r = slot.getBoundingClientRect(); W = innerWidth; H = innerHeight; sc = r.width / 440; dl = r.left; dtp = r.top;
+        dock.style.transform = 'translate(' + r.left + 'px,' + r.top + 'px) scale(' + sc + ')';
+        dT = ((W - (r.left + r.width / 2)) / W + (r.top + r.height / 2) / H) / 2;
+        var cs = Math.round(200 * Math.max(.4, sc) * dpr); cv.width = cv.height = cs; ctx.setTransform(cs / 200, 0, 0, cs / 200, 0, 0); lastDrawU = -1; lastDrawT = -1; dock.style.visibility = 'visible'; fxSize(); render();
+      }
+      sw.setAttribute('aria-checked', pos === 1 ? 'true' : 'false');
+      addEventListener('resize', place); place();
+    })();
+  </script>
+</body>
+
+</html>

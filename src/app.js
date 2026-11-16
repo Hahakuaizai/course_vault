@@ -1,0 +1,6318 @@
+/* ============================================================
+   资料库 · 渲染层
+   ============================================================ */
+
+const api = window.vault;
+
+import {
+  ENABLE_FOLDER_COVER, applyCovers, openCoverPanel,
+} from './folder-cover.js';
+
+import {
+  USE_NEW_THEME_SWITCH, THEME_ANIM_MS, THEME_EASE, mountThemeSwitch,
+} from './theme-switch.js';
+
+/* ============================================================
+   主题过渡动画 · 常量
+   ------------------------------------------------------------
+   从窗口左下角向右上角的 45° 对角线揭幕（没有独立的光带图层，
+   理由见下面 applyThemeWithTransition 上方的说明）。
+   时长与缓动是 THEME_ANIM_MS / THEME_EASE（定义在 theme-switch.js）。
+   ============================================================ */
+const ENABLE_THEME_TRANSITION = true;
+const THEME_SWEEP_F = 60;          // 圆形揭幕半径在「最远角」之外多留的余量（px）
+const THEME_EVENT_START = 'cv:theme-transition-start';
+const THEME_EVENT_END = 'cv:theme-transition-end';
+/* 拍快照前的一次同步通知：View Transition 期间实时 DOM 被快照盖住，
+   开关靠它把自己提到 top layer，好在揭幕期间照常显示（见 theme-switch.js） */
+const THEME_EVENT_PREPARE = 'cv:theme-transition-prepare';
+
+/* ---------- 状态 ---------- */
+const S = {
+  courses: [],
+  files: [],
+  trash: [],
+  settings: {},
+  /** 程序版本号，由主进程在每次 snapshot 里带上 */
+  version: '',
+  view: { type: 'all', courseId: null },
+  kindFilter: 'all',
+  /** 选「文档」后的细分：all | pdf | word | excel | ppt | text | markdown */
+  docKind: 'all',
+  /** 选「代码」后的细分：all | python | cpp | java | js | web | go | rust | shell | data | other */
+  codeKind: 'all',
+  /** 多选模式：开启后单击是选择，双击才打开 */
+  selectMode: false,
+  search: '',
+  importPaths: [],
+  /** 折叠起来的目录 id */
+  collapsed: new Set(),
+  /** 选中目录时是否连子目录文件一起显示 */
+  deepView: true,
+  /** 搜索作用域：name=只搜文件名 / content=连文件内容一起搜 */
+  searchScope: 'name',
+  /** 全文搜索结果缓存 */
+  searchHits: null,
+  courseModal: { mode: 'create', id: null, color: '#5b8def', parentId: null },
+  previewFileId: null,
+  /** 多选中的文件 id */
+  selected: new Set(),
+  /** 多选中的文件夹（目录）id */
+  selectedDirs: new Set(),
+  /** 最近一次单击的卡片 id 和它所在列表，用于 Shift 连选 */
+  anchor: { id: null, list: null },
+  /** 当前主区展示的卡片顺序（文件夹在前、文件在后），供 Shift 连选取区间 */
+  shownIds: [],
+  /** 软件内复制的条目：{ keys: ['f:xx','d:yy'] } */
+  clipboard: { keys: [] },
+};
+
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => [...document.querySelectorAll(sel)];
+
+/** 顶部类型筛选 → 具体文件类型 */
+const KIND_MAP = {
+  doc: ['pdf', 'word', 'excel', 'ppt', 'markdown', 'text'],
+  image: ['image'],
+  media: ['video', 'audio'],
+  code: ['code'],
+  other: ['other'],
+};
+
+/** 「文档」下的细分类：PDF / Word / Excel / PPT / 文本 / Markdown */
+const DOC_KINDS = [
+  { kind: 'pdf', label: 'PDF' },
+  { kind: 'word', label: 'DOCX' },
+  { kind: 'excel', label: 'Excel' },
+  { kind: 'ppt', label: 'PPT' },
+  { kind: 'text', label: 'TXT' },
+  { kind: 'markdown', label: 'Markdown' },
+];
+
+/**
+ * 「代码」下的细分类。
+ *
+ * 注意这里分的是**语言/生态**，不是文件格式 —— 用户在「代码」里找东西
+ * 时脑子里想的是「我那个 Python 脚本」，而不是「.py 文件」。
+ * 所以 html/css/js 这类前端文件合成「前端」一组，json/yaml/sql 这类
+ * 配置数据合成「数据配置」，而不是每个扩展名一个按钮（那会挤成一条
+ * 三十个按钮的横条，反而找不到）。
+ *
+ * 归不进任何一组的落到「其他」—— 覆盖面靠 CODE_LANG_MAP 兜，
+ * 新增扩展名只改那张表就行。
+ */
+const CODE_KINDS = [
+  { kind: 'all', label: '全部代码' },
+  { kind: 'python', label: 'Python' },
+  { kind: 'cpp', label: 'C / C++' },
+  { kind: 'java', label: 'Java / Kotlin' },
+  { kind: 'web', label: '前端' },
+  { kind: 'go', label: 'Go' },
+  { kind: 'rust', label: 'Rust' },
+  { kind: 'shell', label: '脚本' },
+  { kind: 'data', label: '数据配置' },
+  { kind: 'other', label: '其他' },
+];
+
+/**
+ * 扩展名 → 代码细分类。
+ *
+ * 和主进程的 EXT_KIND 是两回事：那张表只回答「是不是代码」，
+ * 这张表回答「是哪门语言的代码」。两边都要加扩展名，但别指望同步 ——
+ * 主进程那张多一个少一个只影响「代码/其他」的分界，
+ * 这里漏了只会让文件掉进「其他」，不会消失。
+ */
+const CODE_LANG_MAP = (() => {
+  const map = new Map();
+  const add = (lang, exts) => exts.forEach((e) => map.set(e, lang));
+
+  add('python', ['.py', '.pyw', '.pyi', '.ipynb']);
+  add('cpp', [
+    '.c', '.h', '.cc', '.cpp', '.cxx', '.c++', '.hpp', '.hxx', '.hh', '.inl',
+    '.m', '.mm', '.asm', '.s',
+  ]);
+  add('java', ['.java', '.kt', '.kts', '.scala', '.groovy', '.gradle', '.cs', '.csx', '.fs', '.fsx']);
+  add('web', [
+    '.js', '.mjs', '.cjs', '.jsx', '.ts', '.mts', '.cts', '.tsx', '.vue', '.svelte',
+    '.html', '.htm', '.xhtml', '.css', '.scss', '.sass', '.less', '.styl', '.mdx',
+  ]);
+  add('go', ['.go']);
+  add('rust', ['.rs', '.toml']);
+  add('shell', ['.sh', '.bash', '.zsh', '.fish', '.bat', '.cmd', '.ps1', '.psm1', '.vbs', '.vb']);
+  add('data', [
+    '.json', '.jsonc', '.json5', '.xml', '.xsd', '.xsl', '.plist', '.yaml', '.yml',
+    '.ini', '.cfg', '.conf', '.properties', '.env', '.gitignore', '.dockerignore',
+    '.editorconfig', '.gitattributes', '.csv', '.tsv', '.sql', '.proto', '.graphql', '.gql',
+    '.tex', '.sty', '.cls', '.bib',
+  ]);
+  add('other', [
+    '.r', '.rmd', '.jl', '.pl', '.pm', '.tcl', '.awk', '.zig', '.nim', '.d', '.v', '.sv',
+    '.vhd', '.vhdl', '.php', '.rb', '.lua', '.dart', '.swift', '.ex', '.exs', '.erl', '.hrl',
+    '.hs', '.lhs', '.ml', '.mli', '.clj', '.cljs', '.elm', '.cr', '.rkt', '.sol',
+    'dockerfile', 'makefile', 'cmakelists.txt', '.cmake', '.mk', '.tf', '.hcl',
+  ]);
+
+  return map;
+})();
+
+/** 一个代码文件的细分类。不是代码、或者没登记的扩展名都算 other。 */
+function codeLangOf(file) {
+  const ext = String(file?.ext || '').toLowerCase();
+  return CODE_LANG_MAP.get(ext) || 'other';
+}
+
+/* ---------- 工具 ---------- */
+function fmtSize(bytes) {
+  if (!bytes && bytes !== 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function fmtDate(ms) {
+  if (!ms) return '—';
+  const d = new Date(ms);
+  const now = new Date();
+  const sameYear = d.getFullYear() === now.getFullYear();
+  const pad = (n) => String(n).padStart(2, '0');
+  return sameYear
+    ? `${d.getMonth() + 1}月${d.getDate()}日`
+    : `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+const KIND_LABEL = {
+  pdf: 'PDF', word: 'DOCX', excel: 'EXCEL', ppt: 'PPT',
+  image: 'IMG', video: 'VID', audio: 'AUD',
+  markdown: 'MD', text: 'TXT', code: 'CODE', other: 'FILE', folder: '文件夹',
+};
+
+const ICONS = {
+  pdf: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 12h4M10 15h4"/>',
+  word: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 12h4M10 15h4"/>',
+  excel: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 12l4 4M14 12l-4 4"/>',
+  ppt: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><circle cx="12" cy="14" r="3"/>',
+  image: '<rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M5 17l4.5-4.5L13 16l2.5-2.5L20 18"/>',
+  video: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3z"/>',
+  audio: '<path d="M9 17V7l8-2v10"/><circle cx="7" cy="17" r="2.4"/><circle cx="17" cy="15" r="2.4"/>',
+  markdown: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M9.5 12v4M9.5 12l2 2.5 2-2.5v4"/>',
+  text: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 11h5M10 14h5M10 17h3"/>',
+  code: '<path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/>',
+  other: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/>',
+};
+
+/* ---------- Toast ---------- */
+function toast(msg, type = '') {
+  const el = document.createElement('div');
+  el.className = `toast ${type ? `is-${type}` : ''}`;
+  el.textContent = msg;
+  $('#toasts').appendChild(el);
+  setTimeout(() => {
+    el.classList.add('is-out');
+    setTimeout(() => el.remove(), 220);
+  }, type === 'error' ? 4200 : 2600);
+}
+
+/* ============================================================
+   更新内容公告
+   ============================================================
+   每次「应用并重启」更新之后，版本号会自增补丁位。启动时比对
+   「当前版本」和「上次看过的版本」，不一致就弹一次。
+
+   公告正文写在前端而不是从更新包里读：更新只同步代码文件，
+   没有独立的发布说明文件；而且写在这里能保证「点开就有内容」，
+   不会因为开发目录里缺个 md 就弹空白。
+
+   版本号是自动递增的，没法预先写死成 1.0.1 / 1.0.2，
+   所以这里维护的是「最近一次更新的说明」，版本一变就展示它。
+   ------------------------------------------------------------ */
+/* 按版本分组，新的在最前面。
+ * 为什么不写死版本号：版本是自动递增的（1.0.0 → 1.0.1 → 1.0.2…），
+ * 代码里没法预先知道这次会被打成哪个号。所以这里只维护「每一批改动」，
+ * 展示时按顺序从新到旧排列，最新那批就对应当前版本。
+ *
+ * 弹窗只显示最新一批（用户刚更新，只关心这次改了什么）；
+ * 设置 → 关于里显示全部历史（想看以前改过什么）。
+ *
+ * ⚠️ 每做完一轮改动就**新开一批放到最前面**，绝不和上一批合并。
+ * 曾经为了「怕用户漏看上一轮」把两轮合成一批，结果用户更新后
+ * 看到的全是上次已经读过的东西 —— 用户明确说过只想要这次的。
+ * 旧的批留在数组里当历史，反正弹窗只取 slice(0, 1)。 */
+const RELEASE_NOTES = [
+  {
+    date: '2026-11-15',
+    items: [
+      { type: 'new', text: '右键文件 →「打开方式」里，能打开项目的编辑器现在有二级菜单：除了「打开整个项目」，还能选「单独打开这个文件」，不想把整个项目拖进编辑器时用它' },
+      { type: 'new', text: '重复文件里名字不同但内容一样的（比如 pr.png 和 roc.png），列表里会标「名字不同」，删除前再把名字列出来确认一次；「文件 (1).png」这种自动编号副本不啰嗦，照旧直接处理' },
+      { type: 'fix', text: '修复用记事本、VS Code 等程序打开文件后「提示已打开、窗口却不出现」：程序其实已经启动，只是窗口被以隐藏方式创建了。现在只有需要藏控制台黑窗的启动方式才隐藏窗口' },
+    ],
+  },
+  {
+    date: '2026-11-15',
+    items: [
+      { type: 'new', text: '文件夹右键菜单新增「剪切 / 复制 / 移动到…」，和文件那套完全对称，粘贴时连整棵子树一起处理' },
+      { type: 'new', text: '空白处右键的「新建文件夹」改成「新建」，可以选新建文件或新建文件夹' },
+      { type: 'new', text: '删除弹窗明确告知不会删除电脑里的原文件，只在「复制入库」时才清理软件自己存的副本' },
+      { type: 'fix', text: '修复切换主题时闪一下白屏/黑屏的问题' },
+      { type: 'fix', text: '修复 PDF 预览里按 Esc 关不掉的问题' },
+      { type: 'fix', text: '修复批量剪切 / 复制 / 移动（含 Ctrl+C、Ctrl+X）点了没反应的问题' },
+      { type: 'improve', text: '文件夹右键菜单去掉和导入按钮重复的「导入文件 / 导入文件夹」，菜单更短更清楚' },
+      { type: 'improve', text: '删除按钮移到最后，不再夹在「新建」「刷新」中间' },
+    ],
+  },
+  {
+    date: '2026-11-15',
+    items: [
+      { type: 'fix', text: '修复更新完启动软件后看不到「更新内容」弹窗：以前是先把版本记成「看过了」再弹，万一那次没弹出来，这次的更新说明就永远错过了；现在只有真的弹出来才算看过' },
+      { type: 'improve', text: '启动时的卡顿：文件列表先按记录里的信息立刻显示，文件大小和修改时间随后在后台慢慢核对，不再让整个界面陪着等磁盘' },
+      { type: 'fix', text: '修复用 VS Code / 记事本等程序打开代码文件时打不开：上一版会把「项目文件夹」一起塞给程序，记事本这类只认一个参数的直接失败，VS Code 收到目录后会去加载整个工作区、几秒后自己退出。现在只传文件，VS Code 系改用自带的「复用窗口」开关，已经开着项目也会切过去' },
+      { type: 'improve', text: '主题切换的揭幕方向：亮变暗仍然是从左下角向右上角揭开，暗变亮改成从右上角向左下角揭开；两个方向现在速度一致，都是 800ms' },
+      { type: 'new', text: '设置 → 关于新增「自动检测更新」：可以选每次启动、每 1 小时、每 6 小时或每天检测一次；发现代码有变化时，在更新区块下方提醒，不会自动安装，也不会弹窗打断' },
+    ],
+  },
+  {
+    date: '2026-11-15',
+    items: [
+      { type: 'fix', text: '修复用 VS Code 等编辑器打开 Python 文件时点了没反应：文件所在目录被判定为项目时，现在会把项目文件夹和文件一起交给编辑器，即使这个项目早就开着，也会切到那个文件上' },
+      { type: 'fix', text: '修复「用其他程序打开」其它几种点了没反应的情况：目标程序起不来时会自动改用系统默认程序，仍然失败会直接提示原因，不再静默失败' },
+    ],
+  },
+  {
+    date: '2026-11-15',
+    items: [
+      { type: 'new', text: '全新的主题开关：玻璃质感旋钮，暗态是月亮、亮态是太阳，点阵图标从月亮解体成粒子再聚成太阳，底部 / 右上角各有一道彩色弧光' },
+      { type: 'improve', text: '切换主题的过渡改成从窗口左下角沿 45° 斜线向右上揭幕' },
+      { type: 'fix', text: '主题开关和页面揭幕现在同步开始，不再出现「页面切换完了、开关才慢半拍动起来」' },
+      { type: 'improve', text: '过渡只动画 transform 和 opacity，并加了预热与分帧清理，切换过程和结束后都不再掉帧' },
+      { type: 'fix', text: '修复切换主题后偶尔要点两次才生效、以及动画结束后短暂点不动的问题' },
+      { type: 'improve', text: '尊重系统「减少动画」设置：开启后切换主题直接生效，不再播揭幕动画' },
+    ],
+  },
+  {
+    date: '2026-11-15',
+    items: [
+      { type: 'new', text: '文件夹右键菜单新增「更改封面」：可以把文件夹图标换成 9 种预设颜色，也可以选一张电脑里的图片铺满整个封面区' },
+      { type: 'new', text: '图片封面自动转成缩略图存在软件数据目录里，原图删掉也不影响；只取静态首帧，按 EXIF 方向转正' },
+      { type: 'new', text: '封面数据单独存放在 folder-covers.json，不改动原有的目录数据；配置损坏时自动另存为 .bak 并当作空数据继续用' },
+      { type: 'improve', text: '封面缩略图懒加载，卡片很多时只加载看得见的那几张，滚动依然流畅' },
+      { type: 'improve', text: '亮色 / 暗色主题各有一套图标配色，切换主题时自动跟随，不影响原有的圆形扩散动画' },
+    ],
+  },
+  {
+    date: '2026-11-15',
+    items: [
+      { type: 'new', text: '新增「更新内容」公告：更新重启后自动弹出，按 Esc 或点「知道了」关闭' },
+      { type: 'new', text: '设置里内置完整的使用教程，按主题分节，顶部可以快速跳转' },
+      { type: 'new', text: '文件夹右键菜单新增「在电脑上显示文件夹」「用其他软件打开」，自动筛掉压缩软件这类打不开项目的程序' },
+      { type: 'new', text: '带项目标志的文件（package.json、.git、pom.xml 等）用编辑器打开时，会打开整个项目根目录，依赖才能正确解析' },
+      { type: 'new', text: '「代码」类型新增二级筛选：Python、C/C++、Java、Web、Go、Rust、Shell、数据、其他' },
+      { type: 'improve', text: '主题开关重做：轨道更扁，滑块边缘改成一道锐利的彩色光环，更贴近参考视频' },
+      { type: 'improve', text: '主题开关现在可以拖动 —— 按住滑块推到另一边就切换，推不到一半会弹回' },
+      { type: 'improve', text: '主题切换时的边缘光效提前到和扩散动画同时开始，不再等切换完才出现' },
+      { type: 'fix', text: '「移动到…」改成多级展开的目录树，不再是一列几十项的长菜单；选完目标后菜单会正常消失' },
+      { type: 'fix', text: '右键菜单（含子菜单）点外面或切换程序时会整串关掉，不再残留' },
+    ],
+  },
+];
+
+const RELEASE_TAG = { new: '新增', improve: '改进', fix: '修复' };
+
+/** 渲染一批改动为一个版本块 */
+function releaseBlock(batch, ver, isLatest) {
+  return `
+    <section class="cl-batch">
+      <div class="cl-head">
+        <span class="cl-ver">${escapeHtml(isLatest ? ver : '更早')}</span>
+        ${isLatest ? '<span class="cl-latest">本次更新</span>' : ''}
+        <span class="cl-date">${escapeHtml(batch.date)}</span>
+      </div>
+      <ul class="cl-list">
+        ${batch.items.map((it) => `
+          <li class="cl-item is-${it.type}">
+            <span class="cl-tag">${escapeHtml(RELEASE_TAG[it.type] || '')}</span>
+            <span class="cl-text">${escapeHtml(it.text)}</span>
+          </li>`).join('')}
+      </ul>
+    </section>`;
+}
+
+/**
+ * 渲染更新内容。
+ * @param {'latest'|'all'} mode latest = 只显示最新一批（弹窗用），
+ *        all = 显示全部历史（设置 → 关于用）
+ */
+function renderReleaseNotes(mode = 'latest') {
+  const body = $('#changelogBody');
+  if (!body) return;
+  const cur = S.version ? `v${S.version}` : '当前版本';
+  const list = mode === 'all' ? RELEASE_NOTES : RELEASE_NOTES.slice(0, 1);
+  body.innerHTML = list.map((b, i) => releaseBlock(b, cur, i === 0)).join('');
+}
+
+/**
+ * 打开更新内容。
+ * @param {'latest'|'all'} mode 启动自动弹用 latest（只看这次改了什么）；
+ *        设置 → 关于里点「查看」用 all（想看历史也能翻）
+ */
+function openChangelog(mode = 'latest') {
+  renderReleaseNotes(mode);
+  $('#changelogModal').hidden = false;
+}
+
+function closeChangelog() {
+  const m = $('#changelogModal');
+  if (!m || m.hidden) return;
+  m.hidden = true;
+  // 兜底再记一次：防止 ESC 关闭等路径漏记（设置里手动查看时也走这里）
+  if (S.version) saveSetting('seenChangelogVersion', S.version);
+}
+
+/**
+ * 启动时判断要不要弹公告。
+ *
+ * 规则：
+ *  - 没有「上次看过的版本」→ 当作首次安装，只记录不弹
+ *    （新用户不需要看一份他从未经历过变化的更新说明）
+ *  - 版本和上次不同 → 弹（说明刚更新过）
+ *  - 相同 → 不弹
+ *
+ * 「已经弹过」在**弹窗真正打开之后**记下来，不是等用户点关闭才记
+ * （否则看到公告后直接关软件，下次启动会再弹一遍 —— 变成「每次启动都弹」），
+ * 也不是在弹之前就记（那样一旦这次弹窗没成功显示，版本号已经被扣掉，
+ * 这次的更新说明就永远看不到了 —— 正是「更新后没有弹窗」的原因）。
+ */
+function maybeShowChangelog() {
+  const ver = S.version;
+  if (!ver) return;
+  const seen = S.settings?.seenChangelogVersion;
+  if (!seen) {
+    saveSetting('seenChangelogVersion', ver);
+    return;
+  }
+  if (seen === ver) return;
+  /* 弹出来之后再记账。
+     以前是「先记账再弹」：万一那次弹窗因为窗口还没画好、或者启动太忙
+     没真正显示出来，版本号已经被记成「看过了」——这次的更新说明就再也
+     不会出现。现在只有真的打开了才算看过。 */
+  const show = () => {
+    try {
+      openChangelog('latest');
+    } catch {
+      return;
+    }
+    saveSetting('seenChangelogVersion', ver);
+  };
+  /* 等首屏稳定再弹：启动时主进程还在读库、核对文件，这时弹窗容易糊在
+     正在加载的界面上。空闲回调最多等 3 秒，保证不会被无限推迟。 */
+  setTimeout(() => {
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(show, { timeout: 3000 });
+    } else {
+      show();
+    }
+  }, 800);
+}
+
+/* ============================================================
+   使用教程（设置 → 使用教程）
+   ============================================================
+   写在前端而不是外部文档：软件是单机离线用的，用户机器上不会有
+   一份 README；写死在界面里才能保证「点开就能看」，也不会随更新丢失。
+
+   每节都是 { id, title, body }，body 是一段 HTML（只来自这个文件，
+   不含任何用户输入，所以不用转义）。小节之间用标题跳转。 */
+const GUIDE_SECTIONS = [
+  {
+    id: 'what',
+    title: '这是什么',
+    body: `
+      <p>「资料库」是一个本地文件索引工具。它把散在各个盘、各个文件夹里的课程资料
+      登记到一处，让你能按目录归档、按名字或内容搜索、直接在软件里预览。</p>
+      <p class="guide-key">最重要的一条：<b>导入只登记，不移动、不复制你的文件。</b>
+      文件始终待在它原来的位置，软件只记住「它在哪」。</p>
+      <p>因此，从库里删除、删除目录、甚至卸载软件，都不会动到磁盘上的原文件。
+      反过来说，如果你在资源管理器里把文件挪走了，库里那条记录就会变成
+      「文件已丢失」—— 这时用「重新定位」指回去即可。</p>`,
+  },
+  {
+    id: 'import',
+    title: '导入文件',
+    body: `
+      <p>三种方式，效果一样：</p>
+      <ul>
+        <li>把文件或文件夹直接<b>拖进窗口</b>任意位置；</li>
+        <li>点右上角 <b>导入</b> 按钮，选文件或选文件夹；</li>
+        <li>快捷键 <kbd>Ctrl</kbd>+<kbd>I</kbd> 选文件，<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> 选文件夹。</li>
+      </ul>
+      <p>导入文件夹时默认<b>保留目录层级</b>，也就是说磁盘上的
+      <code>课程/第三章/笔记.md</code> 会变成同名的三层目录。
+      如果只想把里面的文件平铺到当前目录，在导入窗口里关掉「保留目录结构」。</p>
+      <p>同一个文件重复导入时的行为，可以在「设置 → 导入」里选：
+      <b>跳过</b>（默认）、<b>允许重复</b>、<b>替换</b>。</p>`,
+  },
+  {
+    id: 'dirs',
+    title: '目录与整理',
+    body: `
+      <p>左侧「目录」是任意层级的树，没有深度限制。</p>
+      <ul>
+        <li>侧栏右上角的 <b>+</b> 新建目录；右键目录行有「新建子目录」「重命名」「移到顶层」。</li>
+        <li>目录可以<b>直接拖进另一个目录</b>，整棵子树跟着走。</li>
+        <li>拖到侧栏的「全部文件」= 移到顶层；拖到「回收站」= 删除。</li>
+        <li>文件也可以拖到目录卡片上，或者右键 →「移动到…」，在弹出的目录树里选目标。</li>
+      </ul>
+      <p>多选模式下（<kbd>Ctrl</kbd>+<kbd>M</kbd>）可以框选一片卡片，
+      底部会出现批量操作条，支持批量移动、移除。</p>`,
+  },
+  {
+    id: 'search',
+    title: '搜索',
+    body: `
+      <p>搜索框在右上角，默认<b>只搜当前目录及其子目录</b>；点搜索框下面的范围按钮可以切到「全部」。</p>
+      <p>两种搜法：</p>
+      <ul>
+        <li><b>按名称</b> —— 匹配目录名和文件名，最快。</li>
+        <li><b>按内容</b> —— 进到文件里找关键词，支持纯文本、代码、Word、PDF、Excel 等格式。
+        文件多时第一次会慢一些，之后有缓存。</li>
+      </ul>
+      <p><kbd>Ctrl</kbd>+<kbd>F</kbd> 把光标送到搜索框，再按一次收起。</p>`,
+  },
+  {
+    id: 'filter',
+    title: '类型筛选',
+    body: `
+      <p>工具栏那一排是类型筛选：文档、代码、图片、音视频等。选中某类后，
+      <b>「文档」和「代码」还会再展开一行二级筛选</b>：</p>
+      <ul>
+        <li>文档按 Word / PDF / 表格 / 幻灯片 / 文本 等细分；</li>
+        <li>代码按语言生态细分（Python、C/C++、Java、Web、Go、Rust、Shell、数据、其他）。</li>
+      </ul>
+      <p>筛选是跨子目录生效的：在顶层选「代码 → Python」，会把所有子目录里的 .py 都列出来。</p>`,
+  },
+  {
+    id: 'preview',
+    title: '预览与编辑',
+    body: `
+      <p>单击卡片打开预览。支持文本 / 代码（带语法高亮）、Markdown、图片、PDF、
+      Word、Excel、以及常见音视频。</p>
+      <p>纯文本和代码可以直接在软件里改：按 <kbd>Ctrl</kbd>+<kbd>E</kbd> 进入编辑，
+      <kbd>Ctrl</kbd>+<kbd>S</kbd> 保存。保存前会把旧版本复制一份到「编辑备份」，
+      误改可以找回来。</p>
+      <p>右上角「打开」会用默认编辑器打开文件（在「设置 → 导入」里换）；
+      展开它可以选其他已安装的程序。如果这个文件属于某个项目
+      （目录里有 <code>package.json</code>、<code>.git</code>、<code>pom.xml</code> 之类的标志），
+      编辑器那一项会有二级菜单：<b>打开整个项目</b>（整个工作区都载入，依赖、跳转才正常）
+      或 <b>单独打开这个文件</b>（最快，只想看一眼代码时用）。直接点编辑器名字是前者。</p>`,
+  },
+  {
+    id: 'theme',
+    title: '主题切换',
+    body: `
+      <p>左下角那个开关可以<b>点，也可以拖</b>：按住滑块往另一边推，松手就切过去；
+      推不到一半会自己弹回来。切到哪边由滑块位置决定，浅色在左、深色在右。</p>
+      <p>切换时整个窗口会从点击处向外扩散变色，四边同时亮起一圈彩光再淡掉。
+      浅色用暖橙、深色用蓝紫。</p>
+      <p>也可以在「设置 → 外观」里选「跟随系统」，让软件跟着 Windows 的深色模式走。
+      不想看动画的话，同一页有「减少动画」开关。</p>`,
+  },
+  {
+    id: 'trash',
+    title: '回收站与重复文件',
+    body: `
+      <p><b>回收站</b>里放的是从库里移除的记录，不是磁盘文件。可以随时还原，
+      或者「清空」彻底删掉这些记录。无论哪种，磁盘上的原文件都不受影响。</p>
+      <p><b>查找重复</b>按文件内容（不是名字）比对，找出内容完全一样的副本，
+      并列出来让你挑一个保留。适合清理反复下载的资料。</p>`,
+  },
+  {
+    id: 'update',
+    title: '更新软件',
+    body: `
+      <p>更新走「设置 → 关于 → 检查更新」，比对开发目录里的代码，把有变化的文件
+      同步过来，然后自动重启。同步前会把旧文件备份到数据目录的
+      <code>update-backup</code> 里。</p>
+      <p>不想每次都手动点，可以打开同一处的<b>自动检测更新</b>，选「每次启动」或
+      按小时/按天定时比对。检测到变化时只在「软件更新」下面提醒，不会自己装，
+      也不会弹窗打断。</p>
+      <p>每次更新重启后，如果版本号变了，启动时会弹一次「更新内容」公告。
+      关掉之后可以在「设置 → 关于 → 更新内容」里重新查看。</p>
+      <p class="guide-key">更新只同步程序代码，不会碰你的文件，也不会碰数据库。</p>`,
+  },
+  {
+    id: 'faq',
+    title: '常见问题',
+    body: `
+      <p><b>文件显示「已丢失」？</b><br>
+      多半是在资源管理器里挪走或改名了。右键 →「重新定位」，指到新位置即可，
+      库里的目录归属、备注都会保留。</p>
+      <p><b>导入后磁盘上多出文件了吗？</b><br>
+      没有。默认是「链接」方式，只在库里登记路径。早期版本导入过的副本会在卡片上
+      标一个「副本」角标，右键可以「改回链接方式」，副本会被清理。</p>
+      <p><b>搜索搜不到内容？</b><br>
+      检查搜索范围是不是「当前目录」。另外扫描版 PDF、图片里的文字没有文字层，
+      内容搜索找不到它们。</p>
+      <p><b>软件换了电脑怎么迁移？</b><br>
+      拷走整个程序目录即可；数据库在程序目录旁边（「设置 → 数据」里有路径）。
+      文件本身还在原来那些盘上，换电脑后可能需要「重新定位」。</p>`,
+  },
+];
+
+/** 渲染教程：顶部是目录跳转，下面是正文 */
+function renderGuide() {
+  const toc = $('#guideToc');
+  const body = $('#guideBody');
+  if (!toc || !body) return;
+
+  toc.innerHTML = GUIDE_SECTIONS
+    .map((s) => `<button class="guide-chip" data-goto="${s.id}">${escapeHtml(s.title)}</button>`)
+    .join('');
+
+  body.innerHTML = GUIDE_SECTIONS.map((s) => `
+    <section class="guide-sec" id="guide-${s.id}">
+      <h4>${escapeHtml(s.title)}</h4>
+      ${s.body}
+    </section>`).join('');
+}
+
+/* ============================================================
+   快捷键一览
+   ============================================================ */
+const SHORTCUT_GROUPS = [
+  {
+    name: '文件与目录',
+    items: [
+      { keys: ['Ctrl', 'N'], desc: '新建文件（再按关闭）' },
+      { keys: ['Ctrl', 'Shift', 'N'], desc: '新建文件夹（再按关闭）' },
+      { keys: ['Ctrl', 'I'], desc: '导入文件（再按关闭）' },
+      { keys: ['Ctrl', 'Shift', 'I'], desc: '导入文件夹' },
+      { keys: ['F2'], desc: '重命名选中项' },
+      { keys: ['Delete'], desc: '移除选中项' },
+      { keys: ['Ctrl', 'C'], desc: '复制' },
+      { keys: ['Ctrl', 'X'], desc: '剪切' },
+      { keys: ['Ctrl', 'V'], desc: '粘贴' },
+    ],
+  },
+  {
+    name: '浏览',
+    items: [
+      { keys: ['Alt', '←'], desc: '返回上级目录' },
+      { keys: ['Alt', '↑'], desc: '回到全部文件' },
+      { keys: ['Ctrl', 'F'], desc: '搜索（再按收起）' },
+      { keys: ['Ctrl', 'R'], desc: '刷新' },
+      { keys: ['Ctrl', 'M'], desc: '多选模式开关' },
+      { keys: ['Ctrl', ','], desc: '设置（再按关闭）' },
+      { keys: ['Ctrl', '/'], desc: '快捷键面板（再按关闭）' },
+    ],
+  },
+  {
+    name: '预览与编辑',
+    items: [
+      { keys: ['Ctrl', 'E'], desc: '编辑开关（再按退出）' },
+      { keys: ['Ctrl', 'S'], desc: '保存' },
+      { keys: ['Ctrl', 'Shift', 'E'], desc: '用外部编辑器打开' },
+      { keys: ['Ctrl', 'O'], desc: '用系统默认程序打开' },
+      { keys: ['Ctrl', 'Shift', 'R'], desc: '在文件夹中显示' },
+      { keys: ['Esc'], desc: '关闭预览 / 弹窗' },
+    ],
+  },
+  {
+    name: '编辑器内',
+    items: [
+      { keys: ['Tab'], desc: '缩进（多行同时缩进）' },
+      { keys: ['Shift', 'Tab'], desc: '取消缩进' },
+      { keys: ['Ctrl', '/'], desc: '注释 / 取消注释当前行' },
+      { keys: ['Enter'], desc: '保持缩进，括号内自动展开' },
+    ],
+  },
+];
+
+function renderShortcuts() {
+  $('#scGroups').innerHTML = SHORTCUT_GROUPS.map((g) => `
+    <section class="sc-group">
+      <h4>${escapeHtml(g.name)}</h4>
+      <div class="sc-rows">
+        ${g.items.map((it) => `
+          <div class="sc-row">
+            <span class="sc-desc">${escapeHtml(it.desc)}</span>
+            <span class="sc-keys">${it.keys.map((k) => `<kbd>${escapeHtml(k)}</kbd>`).join('<i>+</i>')}</span>
+          </div>`).join('')}
+      </div>
+    </section>`).join('');
+}
+
+function openShortcuts() {
+  renderShortcuts();
+  $('#shortcutsModal').hidden = false;
+}
+
+/** Ctrl+/ 是开关：面板开着就关掉，关着就打开 */
+function toggleShortcuts() {
+  const m = $('#shortcutsModal');
+  if (!m.hidden) {
+    m.hidden = true;
+    return;
+  }
+  openShortcuts();
+}
+
+/**
+ * 通用「弹窗开关」：同一个快捷键再按一次就关掉。
+ * 弹窗开着时直接隐藏（不重新打开），关着才调用 open。
+ */
+function toggleModal(id, open) {
+  const m = $(`#${id}`);
+  if (!m) return;
+  if (!m.hidden) {
+    m.hidden = true;
+    return;
+  }
+  // open 可能是 async（比如 openSettings 要读统计数据），
+  // 这里兜一下异常，免得变成未捕获的 rejection
+  Promise.resolve()
+    .then(open)
+    .catch((err) => toast(err?.message || '打开失败', 'error'));
+}
+
+/** 重新从主进程拉一遍状态并重绘（Ctrl+R、右键「刷新」都用它） */
+async function refreshState(quiet = false) {
+  try {
+    applyState(await api.getState());
+    if (!quiet) toast('已刷新', 'ok');
+  } catch (err) {
+    toast(err.message || '刷新失败', 'error');
+  }
+}
+
+/* ---------- 记住上次视图 ---------- */
+const LAST_VIEW_KEY = 'vault:lastView';
+
+function saveLastView() {
+  try {
+    if (S.view.type === 'course' && S.view.courseId) {
+      localStorage.setItem(LAST_VIEW_KEY, JSON.stringify(S.view));
+    } else {
+      localStorage.setItem(LAST_VIEW_KEY, JSON.stringify({ type: S.view.type, courseId: null }));
+    }
+  } catch {
+    /* 隐私模式等场景忽略 */
+  }
+}
+
+function restoreLastView() {
+  try {
+    const raw = localStorage.getItem(LAST_VIEW_KEY);
+    if (!raw) return;
+    const v = JSON.parse(raw);
+    if (!v || typeof v.type !== 'string') return;
+    if (v.type === 'course') {
+      if (v.courseId && S.courses.some((c) => c.id === v.courseId)) {
+        S.view = { type: 'course', courseId: v.courseId };
+      }
+      return;
+    }
+    if (v.type === 'recent' || v.type === 'all' || v.type === 'trash') {
+      S.view = { type: v.type, courseId: null };
+    }
+  } catch {
+    /* 忽略损坏的记录 */
+  }
+}
+
+/**
+ * 启动时把多级目录全部收起，避免一进来就是一大片展开的树。
+ * 只展开当前视图所在目录的祖先链，否则选中的深层目录在侧栏里会看不见。
+ */
+function collapseTreeOnBoot() {
+  S.collapsed = new Set();
+  // 有子目录的都收起来；childIndex 已经是现成的
+  for (const [parentId, kids] of childIndex) {
+    if (parentId && kids.length) S.collapsed.add(parentId);
+  }
+  // 只展开当前目录的祖先链，否则选中的深层目录在侧栏里会看不见
+  if (S.view.type === 'course' && S.view.courseId) revealInTree(S.view.courseId);
+}
+
+/** 展开侧栏里通往某个目录的整条祖先链，让它在树里露出来 */
+function revealInTree(id) {
+  let cur = courseIndex.get(id);
+  const seen = new Set();
+  while (cur && cur.parentId && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    S.collapsed.delete(cur.parentId);
+    cur = courseIndex.get(cur.parentId);
+  }
+}
+
+/* ---------- 状态应用 ---------- */
+
+/** 目录索引：id → 目录对象、父 id → 子目录数组。
+ *  renderSidebar / renderMain 每帧都要按父级取子目录，原来每次都是
+ *  S.courses.filter(...) 全表扫一遍，目录一多就是 O(n²)。
+ *  索引只在 applyState 里重建（S.courses 只会整体替换，不会被就地改）。 */
+let courseIndex = new Map();
+let childIndex = new Map();
+// 面包屑路径的记忆化缓存。必须声明在 applyState 之前 ——
+// 它会被 applyState 重置，而 let 不提升，放到下面会直接 ReferenceError。
+let pathCache = new Map();
+
+function rebuildCourseIndex() {
+  courseIndex = new Map();
+  childIndex = new Map();
+  for (const c of S.courses) {
+    courseIndex.set(c.id, c);
+    const p = c.parentId || null;
+    if (!childIndex.has(p)) childIndex.set(p, []);
+    childIndex.get(p).push(c);
+  }
+}
+
+function applyState(next) {
+  if (!next) return;
+  // 防御：有些 IPC 返回 { moved, state } 这类包装对象。传错了会把
+  // courses/files 全当成 undefined，界面瞬间刷成空白 —— 看起来像「目录全丢了」。
+  // 真正的 state 一定带 courses 数组，不满足就当没传。
+  if (!Array.isArray(next.courses)) {
+    if (next.state && Array.isArray(next.state.courses)) {
+      next = next.state;
+    } else {
+      console.warn('[state] 收到的不是合法 state，已忽略', next);
+      return;
+    }
+  }
+  S.courses = next.courses || [];
+  S.files = next.files || [];
+  S.trash = next.trash || [];
+  S.settings = next.settings || {};
+  // 程序版本由主进程带过来。老版本主进程没有这个字段，就保留原值，
+  // 免得一次 refresh 把版本号清空、导致更新公告重复弹
+  if (next.version) S.version = next.version;
+  rebuildCourseIndex();
+  pathCache = new Map();
+
+  // 视图可能指向已被删除的目录，回退到「全部文件」，
+  // 否则主区会永远显示空状态。
+  if (S.view.type === 'course') {
+    if (!S.view.courseId || !courseIndex.has(S.view.courseId)) {
+      S.view = { type: 'all', courseId: null };
+    }
+  }
+
+  render();
+}
+
+/* ---------- 渲染：侧栏（多级目录树） ---------- */
+function childrenOf(parentId) {
+  return childIndex.get(parentId || null) || [];
+}
+
+/** 目录自身 + 所有子孙目录的 id。
+ *  走 childIndex 逐层下推，代价只跟这棵子树的大小有关；
+ *  原来是「全表扫一遍看看有没有新增，有就再来一遍」，最坏 O(n²)，
+ *  而 renderSidebar 会对每个目录都调一次。 */
+function subtreeIds(id) {
+  const out = new Set([id]);
+  const stack = [id];
+  while (stack.length) {
+    const cur = stack.pop();
+    for (const kid of childIndex.get(cur) || []) {
+      if (out.has(kid.id)) continue;
+      out.add(kid.id);
+      stack.push(kid.id);
+    }
+  }
+  return out;
+}
+
+function renderSidebar() {
+  $('#countAll').textContent = String(S.files.length);
+  const trashCount = S.trash.reduce((n, t) => n + t.files.length + t.courses.length, 0);
+  $('#countTrash').textContent = String(trashCount);
+  $('#countTrash').hidden = trashCount === 0;
+
+  const missing = S.files.filter((f) => !f.exists).length;
+  $('#libRootLabel').textContent = missing
+    ? `${S.files.length} 个文件 · ${missing} 个已丢失`
+    : `${S.files.length} 个文件已登记`;
+  $('#libRootLabel').title = '文件始终保留在原位置';
+
+  // 顶层视图才高亮；选中具体目录时不应同时高亮「全部文件」
+  $$('.nav-item').forEach((el) => {
+    const v = el.dataset.view;
+    const on = S.view.type === v && (v !== 'all' || !S.view.courseId);
+    el.classList.toggle('is-active', on);
+  });
+
+  const list = $('#courseList');
+  if (!S.courses.length) {
+    list.innerHTML = '<div class="tree-empty">还没有目录，点上方 ＋ 新建</div>';
+    return;
+  }
+
+  // 当前目录的祖先集合，用来高亮「我在这个分支上」。
+  // 原来对每个目录都跑一遍 subtreeIds(c.id) 判断，目录多了是平方级；
+  // 祖先链一次就够，判断变成 Set.has。
+  const curCourseId = S.view.type === 'course' ? S.view.courseId : null;
+  const ancestors = curCourseId
+    ? new Set(pathOf(curCourseId).slice(0, -1).map((x) => x.id))
+    : new Set();
+
+  /* 每层缩进 22px，与 CSS 里 .tree-row 的 --depth 倍数保持一致。
+   * 竖线画在「上一层箭头所在的位置」，也就是缩进起点再往左 10px ——
+   * 这样线正好从父级的折叠箭头底下穿过，横杠再拐到本行箭头。 */
+  const INDENT = 22;
+  const RAIL = 10;
+
+  const html = [];
+  // trail：从顶层到当前父级，每层是不是「最后一个子项」。
+  // 只有「后面还有兄弟」的祖先才需要继续往下画竖线，否则留白。
+  const walk = (parentId, trail) => {
+    const kids = childrenOf(parentId);
+    const depth = trail.length;
+
+    for (let i = 0; i < kids.length; i += 1) {
+      const c = kids[i];
+      const last = i === kids.length - 1;
+      const sub = childrenOf(c.id);
+      const collapsed = S.collapsed.has(c.id);
+      const active = curCourseId === c.id;
+      const inPath = ancestors.has(c.id);
+
+      // 祖先层：只有「后面还有兄弟」的那些才继续画竖线
+      let rails = '';
+      for (let d = 0; d < trail.length - 1; d += 1) {
+        if (trail[d] === 'last') continue;
+        rails += `<i class="tree-rail" style="left:${d * INDENT + RAIL}px"></i>`;
+      }
+
+      // 本层：一条 ├ 或 └ 接到名字上（depth 0 的顶层目录不画）
+      const elbow = depth
+        ? `<i class="tree-elbow ${last ? 'is-last' : ''}"
+              style="left:${(depth - 1) * INDENT + RAIL}px"></i>`
+        : '';
+
+      html.push(`
+        <div class="tree-row ${active ? 'is-active' : ''} ${inPath ? 'in-path' : ''}"
+             data-course="${c.id}" style="--depth:${depth}" draggable="true">
+          ${rails}${elbow}
+          <button class="tree-caret ${sub.length ? '' : 'is-leaf'} ${sub.length && !collapsed ? 'is-open' : ''}"
+                  data-caret="${c.id}" ${sub.length ? '' : 'disabled'}>
+            ${sub.length ? '<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg>' : ''}
+          </button>
+          <i class="course-dot" style="background:${escapeHtml(c.color || '#5b8def')}"></i>
+          <span class="tree-name" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
+          <em>${c.totalCount ?? c.fileCount}</em>
+          <button class="course-more" data-more="${c.id}" title="更多">
+            <svg viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.1"/><circle cx="8" cy="8" r="1.1"/><circle cx="12.5" cy="8" r="1.1"/></svg>
+          </button>
+        </div>`);
+
+      if (!collapsed && sub.length) walk(c.id, [...trail, last ? 'last' : 'more']);
+    }
+  };
+  walk(null, []);
+
+  list.innerHTML = html.join('');
+}
+
+/** 拖拽排序：把 movedId 插到 beforeId 之前 */
+async function reorderBefore(movedId, beforeId) {
+  const node = courseIndex.get(movedId);
+  const anchor = courseIndex.get(beforeId);
+  if (!node || !anchor) return;
+  const parent = node.parentId || null;
+  const siblings = childrenOf(parent).map((c) => c.id).filter((id) => id !== movedId);
+  const at = siblings.indexOf(beforeId);
+  siblings.splice(at < 0 ? siblings.length : at, 0, movedId);
+  try {
+    applyState(await api.courses.reorder(parent, siblings));
+  } catch {
+    /* 排序失败不影响移动本身 */
+  }
+}
+
+/* ---------- 渲染：主区 ---------- */
+function currentCourse() {
+  return courseIndex.get(S.view.courseId) || null;
+}
+
+/**
+ * 一个文件是否命中当前的类型筛选（含「文档」「代码」的二级分类）。
+ *
+ * 抽成函数是因为可见文件、搜索结果、还有别处都要用同一套判断 ——
+ * 抄三遍迟早会有一处忘了加新条件，那种 bug 表现为「筛了但没筛干净」，
+ * 很难看出来。
+ */
+function matchesKindFilter(f) {
+  if (S.kindFilter === 'all') return true;
+  const allowed = KIND_MAP[S.kindFilter] || [];
+  if (!allowed.includes(f.kind)) return false;
+  if (S.kindFilter === 'doc' && S.docKind !== 'all') {
+    return f.kind === S.docKind;
+  }
+  if (S.kindFilter === 'code' && S.codeKind !== 'all') {
+    return codeLangOf(f) === S.codeKind;
+  }
+  return true;
+}
+
+function visibleFiles() {
+  let list = [...S.files];
+
+  // 用了类型筛选时，范围要扩到整棵子树 —— 用户在一级目录点「PDF」
+  // 是想找这个目录下所有的 PDF，包括藏在子文件夹里的那些。
+  // 不筛选时仍然只显示本目录自己的文件，否则文件会重复出现在每一级。
+  const filtering = S.kindFilter !== 'all';
+
+  if (S.view.type === 'course' && S.view.courseId) {
+    if (filtering) {
+      const ids = subtreeIds(S.view.courseId);
+      list = list.filter((f) => ids.has(f.courseId));
+    } else {
+      // 只显示这个目录自己的文件。子目录里的文件属于子目录，
+      // 混在同一级会让人以为文件也在这个目录下（子目录点进去才看得到）。
+      list = list.filter((f) => f.courseId === S.view.courseId);
+    }
+  } else if (S.view.type === 'recent') {
+    list.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    list = list.slice(0, 40);
+  }
+
+  list = list.filter(matchesKindFilter);
+
+  // 名称搜索也是全库范围：搜索时应跳出当前目录
+  if (S.search.trim()) {
+    const q = S.search.trim().toLowerCase();
+    list = S.files.filter((f) => f.name.toLowerCase().includes(q));
+    list = list.filter(matchesKindFilter);
+  }
+
+  if (S.view.type !== 'recent') {
+    list.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  }
+  return list;
+}
+
+function courseOf(id) {
+  return courseIndex.get(id) || null;
+}
+
+/** 从根到该目录的路径，用于面包屑。
+ *  搜索结果里每个目录都要算一次层级，走索引 + 记忆化，避免重复上溯。 */
+function pathOf(id) {
+  const cached = pathCache.get(id);
+  if (cached) return cached;
+
+  const out = [];
+  let cur = id;
+  const seen = new Set();
+  while (cur && !seen.has(cur)) {
+    const hit = pathCache.get(cur);
+    if (hit) { out.unshift(...hit); break; }
+    seen.add(cur);
+    const node = courseIndex.get(cur);
+    if (!node) break;
+    out.unshift(node);
+    cur = node.parentId || null;
+  }
+  pathCache.set(id, out);
+  return out;
+}
+
+function renderBreadcrumb() {
+  const bar = $('#crumbs');
+  if (S.view.type !== 'course' || !S.view.courseId) {
+    bar.hidden = true;
+    bar.innerHTML = '';
+    return;
+  }
+  const trail = pathOf(S.view.courseId);
+  if (trail.length < 2) {
+    bar.hidden = true;
+    bar.innerHTML = '';
+    return;
+  }
+  bar.hidden = false;
+  bar.innerHTML = [
+    '<button class="crumb" data-crumb="root">全部</button>',
+    ...trail.map((c, i) => (
+      `${i ? '<span class="crumb-sep">/</span>' : '<span class="crumb-sep">/</span>'}
+       <button class="crumb ${i === trail.length - 1 ? 'is-current' : ''}"
+               data-crumb="${c.id}">${escapeHtml(c.name)}</button>`
+    )),
+  ].join('');
+}
+
+/**
+ * 执行搜索。名称搜索走本地过滤；内容搜索交给主进程读文件。
+ * 搜索时结果不受当前目录限制（除非用户正停在某个目录里，则限定在该目录子树）。
+ */
+async function runSearch() {
+  const q = S.search.trim();
+  if (!q) {
+    S.searchHits = null;
+    renderMain();
+    return;
+  }
+  if (S.searchScope === 'name') {
+    S.searchHits = null;
+    renderMain();
+    return;
+  }
+
+  // 内容搜索：异步，先标记加载态
+  const token = (S.searchToken = (S.searchToken || 0) + 1);
+  $('#grid').innerHTML = '<div class="searching">正在搜索文件内容…</div>';
+  try {
+    const kinds = S.kindFilter === 'all' ? null : KIND_MAP[S.kindFilter];
+    // 搜索默认全库进行，不受当前所在目录限制——找不到东西时才是真找不到
+    const res = await api.files.search({
+      query: q,
+      scope: 'content',
+      kinds,
+      courseId: null,
+      deep: true,
+    });
+    if (token !== S.searchToken) return; // 有更新的搜索，丢弃旧结果
+    S.searchHits = res.files;
+    renderMain();
+  } catch (err) {
+    if (token !== S.searchToken) return;
+    S.searchHits = [];
+    toast(err.message || '搜索失败', 'error');
+    renderMain();
+  }
+}
+
+function renderMain() {
+  // 回收站是独立视图，走自己的渲染
+  document.body.classList.toggle('trash-view', S.view.type === 'trash');
+  if (S.view.type === 'trash') {
+    renderTrash();
+    updateSelBar();
+    return;
+  }
+
+  // 回到普通视图，恢复工具栏
+  $('#btnEmptyTrash').hidden = true;
+  $('#searchWrap').hidden = false;
+  $('#kindFilter').hidden = false;
+  $('#btnImport').hidden = false;
+  $('#btnNewFile').hidden = false;
+  $('#searchScope').hidden = false;
+
+  const course = currentCourse();
+  const title =
+    S.view.type === 'course' && course ? course.name
+      : S.view.type === 'recent' ? '最近导入'
+        : '全部文件';
+  $('#viewTitle').textContent = title;
+  renderBreadcrumb();
+
+  const searching = !!S.search.trim();
+  const contentHits = S.searchScope === 'content' && Array.isArray(S.searchHits);
+
+  let files = visibleFiles();
+  // 内容搜索的结果直接来自主进程，覆盖本地过滤。
+  // 但类型筛选仍然要生效 —— 用户点了「代码」再搜内容，
+  // 结果里混进 PDF 和图片是说不通的。
+  if (contentHits) files = S.searchHits.filter(matchesKindFilter);
+
+  // 文件夹始终显示：
+  //  - 名称搜索时全库按文件夹名找（内容搜索只搜文件内部，不掺文件夹）
+  //  - 在某个目录里 → 它的子目录
+  //  - 「全部文件」→ 顶层目录（最高一级的文件夹优先排在最前面）
+  let subDirs;
+  if (searching && S.searchScope === 'name') {
+    const q = S.search.trim().toLowerCase();
+    subDirs = S.courses.filter((c) => c.name.toLowerCase().includes(q));
+    // 层级浅的排前面：顶层目录 → 一级子目录 → 二级…
+    const depthOf = (id) => pathOf(id).length;
+    subDirs.sort((a, b) => depthOf(a.id) - depthOf(b.id));
+  } else if (searching) {
+    // 内容搜索：只出文件结果
+    subDirs = [];
+  } else if (S.view.type === 'course' && S.view.courseId) {
+    subDirs = childrenOf(S.view.courseId);
+  } else if (S.view.type === 'recent') {
+    subDirs = [];
+  } else {
+    // 「全部文件」：只列顶层目录，最高一级的文件夹排在最前面
+    subDirs = childrenOf(null);
+  }
+
+  // 「全部文件」只列第一级文件夹，不铺开各目录里的文件 —— 点进去才看。
+  // 但用户明确点了「文档/图片/代码」这类筛选项时，是想跨目录找这类文件，照常显示。
+  //
+  // 例外：不属于任何目录的文件（courseId 为 null）必须在这里显示出来。
+  // 它们不在任何目录里，除了「全部文件」没有别的地方能看到；而把它们
+  // 拖到侧栏「全部文件」正是「移出所在目录、放到顶层」这个操作。
+  const plainAllView = S.view.type === 'all' && S.kindFilter === 'all' && !searching;
+  if (plainAllView) files = files.filter((f) => !f.courseId);
+
+  // 选了「文件夹」就只显示文件夹，不显示文件
+  const onlyFolders = S.kindFilter === 'folder';
+  if (onlyFolders) files = [];
+
+  // 选了具体文件类型（文档/图片/代码…）时，文件夹不属于该类型，先让位
+  const fileTypePicked = S.kindFilter !== 'all' && S.kindFilter !== 'folder';
+  if (fileTypePicked) subDirs = [];
+
+  // 搜索时目录和文件都算结果
+  const count = files.length + subDirs.length;
+  const noun = searching ? '个结果'
+    : onlyFolders ? '个文件夹'
+      : (files.length ? '项' : '个文件夹');
+  $('#viewCount').textContent = count ? `${count} ${noun}` : '';
+
+  // 二级筛选条：选「文档」或「代码」时各出现一条
+  const docBar = $('#docSubFilter');
+  docBar.hidden = S.kindFilter !== 'doc';
+  $$('#docSubFilter .subfilter-btn').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.dockey === S.docKind);
+  });
+
+  const codeBar = $('#codeSubFilter');
+  if (codeBar) {
+    codeBar.hidden = S.kindFilter !== 'code';
+    $$('#codeSubFilter .subfilter-btn').forEach((b) => {
+      b.classList.toggle('is-active', b.dataset.codekey === S.codeKind);
+    });
+  }
+
+  // 返回上级：有父目录才能回；顶层目录回到「全部文件」
+  const backBtn = $('#btnBack');
+  if (S.view.type === 'course' && S.view.courseId) {
+    const cur = courseOf(S.view.courseId);
+    backBtn.hidden = false;
+    backBtn.title = cur && cur.parentId
+      ? `返回上级目录（Alt+←）`
+      : '返回全部文件（Alt+←）';
+  } else {
+    backBtn.hidden = true;
+  }
+
+  const grid = $('#grid');
+  const empty = $('#emptyState');
+
+  // 完全没有目录 → 引导新建。
+  // 例外：顶层可能有不属于任何目录的文件（拖到「全部文件」移出来的），
+  // 那种情况要照常显示文件，不能用一个「还没有目录」的空态把它们盖掉。
+  if (!S.courses.length && !files.length) {
+    grid.innerHTML = '';
+    empty.hidden = false;
+    empty.querySelector('h2').textContent = '还没有目录';
+    empty.querySelector('p').textContent = '先建一个目录（课程、项目、收藏夹都行），再把文件导进来。';
+    empty.querySelector('button').hidden = false;
+    empty.querySelector('button').textContent = '新建目录';
+    empty.querySelector('button').dataset.action = 'create-course';
+    return;
+  }
+
+  // 本层有子目录时，即便没有文件也要把子目录显示出来
+  if (!files.length && !subDirs.length) {
+    grid.innerHTML = '';
+    empty.hidden = false;
+    empty.querySelector('h2').textContent = S.search ? '没有匹配的结果' : '这里还是空的';
+    empty.querySelector('p').textContent = S.search
+      ? '文件名和目录名都没找到，切到「内容」还能搜文件内部的文字。'
+      : S.kindFilter !== 'all'
+        // 二级筛选也选中了的时候，提示要具体到那一类，否则用户不知道
+        // 是「整个代码分类都空」还是「只是没有 Python」
+        ? (S.kindFilter === 'code' && S.codeKind !== 'all'
+          ? `「${CODE_KINDS.find((k) => k.kind === S.codeKind)?.label || S.codeKind}」分类下还没有文件，换成「全部代码」看看。`
+          : S.kindFilter === 'doc' && S.docKind !== 'all'
+            ? '这个文档分类下还没有文件，换成「全部文档」看看。'
+            : '这个分类下还没有文件，换个筛选看看。')
+        : '点击右上角「导入」，把文件加进来，也可以新建子目录。';
+    // 搜索无结果时不显示「导入文件」，容易误导
+    empty.querySelector('button').hidden = !!S.search;
+    if (!S.search) {
+      empty.querySelector('button').textContent = '导入文件';
+      empty.querySelector('button').dataset.action = 'import';
+    }
+    return;
+  }
+
+  empty.hidden = true;
+
+  // 子目录卡片排在文件前面
+  const dirCards = subDirs
+    .map((c, i) => `
+      <article class="card dir-card" data-dir="${c.id}" tabindex="0" draggable="true" style="--i:${i}">
+        <div class="card-thumb dir-thumb">
+          <div class="dir-icon" style="--dc:${escapeHtml(c.color || '#5b8def')}">
+            <svg viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9.4l1.7 2.2H18.5A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5v-10z"/></svg>
+          </div>
+        </div>
+        <div class="card-info">
+          <div class="card-name" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</div>
+          <div class="card-sub"><span class="card-course"><i style="background:${escapeHtml(c.color || '#5b8def')}"></i>${searching
+    ? escapeHtml(pathOf(c.id).slice(0, -1).map((x) => x.name).join(' / ') || '顶层目录')
+    : (c.totalCount
+      ? (c.childCount
+        ? `${c.childCount} 个子目录 · ${c.totalCount} 个文件`
+        : `${c.totalCount} 个文件`)
+      : (c.childCount ? `${c.childCount} 个子目录` : '空文件夹'))}</span></div>
+        </div>
+      </article>`)
+    .join('');
+
+  const fileCards = files
+    .map((f, i) => {
+      const c = courseOf(f.courseId);
+      const isImage = f.kind === 'image';
+      const thumb = isImage && f.url
+        ? `<img src="${f.url}" alt="" loading="lazy" />`
+        : `<div class="card-icon" data-kind="${f.kind}">
+             <svg viewBox="0 0 24 24">${ICONS[f.kind] || ICONS.other}</svg>
+           </div>`;
+
+      // 只给前 8 张加错峰延迟，再多就一起出现，避免等太久
+      const delay = Math.min(i, 8);
+      const snippet = f.snippet
+        ? `<div class="card-snippet">${f.snippet}</div>`
+        : '';
+
+      const sel = S.selected.has(f.id);
+      return `
+        <article class="card ${f.exists ? '' : 'is-missing'} ${sel ? 'is-selected' : ''}"
+                 data-file="${f.id}" tabindex="0" draggable="true" style="--i:${delay}">
+          <div class="card-thumb">
+            ${thumb}
+            <span class="card-badge">${KIND_LABEL[f.kind] || 'FILE'}</span>
+            ${f.storage === 'copy'
+              ? `<span class="card-store" data-store="copy" title="旧版本入库的副本，存在软件数据目录里">
+                   <svg viewBox="0 0 24 24"><rect x="4" y="4" width="12" height="12" rx="2"/><path d="M8 20h10a2 2 0 0 0 2-2V8"/></svg>
+                   旧入库
+                 </span>`
+              : ''}
+            <button class="card-info-btn" data-detail="${f.id}" title="查看详情">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><circle cx="12" cy="8.2" r="0.9" fill="currentColor" stroke="none"/></svg>
+            </button>
+          </div>
+          <div class="card-info">
+            <div class="card-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</div>
+            ${snippet}
+            <div class="card-sub">
+              <span class="card-course">
+                ${c ? `<i style="background:${escapeHtml(c.color || '#5b8def')}"></i>${escapeHtml(c.name)}` : '未分类'}
+              </span>
+              <i class="dot"></i>
+              <span class="card-size">${fmtSize(f.size)}</span>
+            </div>
+          </div>
+        </article>`;
+    })
+    .join('');
+
+  grid.innerHTML = dirCards + fileCards;
+
+  // 文件夹封面：给有自定义封面的卡片补上封面区（没有封面的卡片不受影响）
+  applyCovers(grid);
+
+  // 记录本次展示的卡片顺序（文件夹在前、文件在后），Shift 连选按这个顺序取区间
+  S.shownIds = [...subDirs.map((c) => `d:${c.id}`), ...files.map((f) => `f:${f.id}`)];
+
+  // 清掉已经不在视图里的选中项
+  const aliveDir = new Set(subDirs.map((c) => c.id));
+  const aliveFile = new Set(files.map((f) => f.id));
+  for (const id of [...S.selectedDirs]) if (!aliveDir.has(id)) S.selectedDirs.delete(id);
+  for (const id of [...S.selected]) if (!aliveFile.has(id)) S.selected.delete(id);
+
+  syncSelectedClass();
+  updateSelBar();
+}
+
+/* ---------- 原文件丢失后重新定位 ---------- */
+let relocFileId = null;
+let relocCandidates = [];
+
+async function openRelocate(fileId) {
+  relocFileId = fileId;
+  relocCandidates = [];
+  const f = S.files.find((x) => x.id === fileId);
+  $('#relocLead').textContent = f
+    ? `「${f.name}」原来的位置已经找不到这个文件了，正在电脑里搜索…`
+    : '正在电脑里搜索…';
+  $('#relocList').innerHTML = '<div class="reloc-empty">搜索中…</div>';
+  $('#relocNote').textContent = '';
+  $('#btnRelocSearch').disabled = true;
+  $('#relocateModal').hidden = false;
+  await runRelocateSearch();
+}
+
+async function runRelocateSearch() {
+  if (!relocFileId) return;
+  $('#btnRelocSearch').disabled = true;
+  try {
+    const res = await api.files.relocate(relocFileId, false);
+
+    if (res.already) {
+      // 预览期间文件又回来了（比如插回了 U 盘）
+      applyState(res.state);
+      $('#relocateModal').hidden = true;
+      toast('文件已经回来了，无需重新定位', 'ok');
+      if (S.previewFileId) openPreview(S.previewFileId);
+      return;
+    }
+
+    relocCandidates = res.found || [];
+    renderRelocateList();
+  } catch (err) {
+    $('#relocList').innerHTML = `<div class="reloc-empty">搜索失败：${escapeHtml(err.message)}</div>`;
+    $('#relocNote').textContent = '';
+  } finally {
+    $('#btnRelocSearch').disabled = false;
+  }
+}
+
+function renderRelocateList() {
+  const f = S.files.find((x) => x.id === relocFileId);
+  const name = f ? f.name : '文件';
+
+  if (!relocCandidates.length) {
+    $('#relocLead').textContent = `在常见位置（桌面、文档、下载等）没有找到「${name}」。`;
+    $('#relocList').innerHTML = `
+      <div class="reloc-empty">
+        文件可能被删除了，或者在别的盘里。<br />
+        可以点「手动选择…」直接指定它的新位置。
+      </div>`;
+    $('#relocNote').textContent = '找不到这个文件';
+    return;
+  }
+
+  $('#relocLead').textContent = `找到 ${relocCandidates.length} 个同名文件，选一个确认：`;
+  $('#relocList').innerHTML = relocCandidates
+    .map((p) => `
+      <button class="reloc-item" data-path="${escapeHtml(p)}" title="${escapeHtml(p)}">
+        <svg viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/></svg>
+        <span>${escapeHtml(p)}</span>
+      </button>`)
+    .join('');
+  $('#relocNote').textContent = '';
+}
+
+async function bindRelocate(target) {
+  try {
+    const state = await api.files.relocateTo(relocFileId, target);
+    applyState(state);
+    $('#relocateModal').hidden = true;
+    toast('已重新定位', 'ok');
+    if (S.previewFileId) openPreview(S.previewFileId);
+  } catch (err) {
+    toast(err.message || '重新定位失败', 'error');
+  }
+}
+
+/* ---------- 新建文件 ---------- */
+const newFileState = { courseId: null, mode: 'link', dir: null };
+
+/**
+ * 把目录层级渲染成一棵可点选的结构树。
+ * 用真实的缩进和连线，而不是原生 select 的扁平列表 —— 子目录一多就看不出归属关系。
+ * 树里默认展开全部层级，点哪一项就选中哪一项。
+ */
+function renderDirTree(box, selectedId, onPick, { allowRoot = false } = {}) {
+  if (!box) return;
+
+  const rows = [];
+  // 每层缩进多少像素，和 CSS 里的 .dir-tree-row padding 保持一致
+  const INDENT = 16;
+  const RAIL = 9; // 竖线距该层缩进起点的横向偏移
+
+  // 「全部文件」这一层：导入文件夹时可以直接把文件夹作为顶层目录
+  if (allowRoot) {
+    rows.push(`
+      <button type="button" class="dir-tree-row dir-tree-root ${selectedId == null ? 'is-active' : ''}"
+              data-course-id="" role="treeitem" style="--depth:0"
+              title="放在最外层，选中的文件夹会变成顶层目录">
+        <i class="dir-tree-dot is-root"></i>
+        <span class="dir-tree-name">全部文件（顶层）</span>
+        <svg class="dir-tree-check" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-6"/></svg>
+      </button>`);
+  }
+
+  // ancestors：从顶层到当前父级的「是否最后一个」标记，
+  // 用来决定每一层竖线是画到底还是留白。
+  const walk = (parentId, ancestors) => {
+    const kids = childrenOf(parentId);
+    const depth = ancestors.length;
+
+    for (let i = 0; i < kids.length; i += 1) {
+      const c = kids[i];
+      const last = i === kids.length - 1;
+      const childCount = childrenOf(c.id).length;
+      const active = c.id === selectedId;
+
+      // 祖先层：只有「后面还有兄弟」的祖先才继续往下画竖线
+      let rails = '';
+      for (let d = 0; d < ancestors.length - 1; d += 1) {
+        if (ancestors[d] === 'last') continue;
+        rails += `<i class="dir-tree-rail" style="left:${d * INDENT + RAIL}px"></i>`;
+      }
+
+      // 本层：画一条 ├ 或 └ 接到名字上
+      const elbow = depth
+        ? `<i class="dir-tree-elbow ${last ? 'is-last' : ''}"
+              style="left:${(depth - 1) * INDENT + RAIL}px"></i>`
+        : '';
+
+      rows.push(`
+        <button type="button" class="dir-tree-row ${active ? 'is-active' : ''}"
+                data-course-id="${c.id}" role="treeitem" style="--depth:${depth}"
+                title="${escapeHtml(c.name)}">
+          ${rails}${elbow}
+          <i class="dir-tree-dot" style="background:${escapeHtml(c.color || '#5b8def')}"></i>
+          <span class="dir-tree-name">${escapeHtml(c.name)}</span>
+          ${childCount ? `<span class="dir-tree-count">${childCount}</span>` : ''}
+          <svg class="dir-tree-check" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-6"/></svg>
+        </button>`);
+
+      walk(c.id, [...ancestors, last ? 'last' : 'more']);
+    }
+  };
+  walk(null, []);
+
+  box.innerHTML = rows.join('');
+  // 始终从顶部开始显示，让用户先看到整体层级；选中项用高亮标出来即可
+  box.scrollTop = 0;
+
+  box.onclick = (e) => {
+    const row = e.target.closest('[data-course-id]');
+    if (!row) return;
+    box.querySelectorAll('.dir-tree-row').forEach((r) => {
+      r.classList.toggle('is-active', r === row);
+    });
+    // 空字符串代表「全部文件」这一层
+    onPick?.(row.dataset.courseId || null);
+  };
+}
+
+/** 兼容旧调用名 */
+function fillCourseSelect(box, selectedId, onPick) {
+  renderDirTree(box, selectedId, onPick);
+}
+
+/**
+ * 打开「新建文件」弹窗。
+ * @param {string|null} [targetCourseId] 指定落到哪个目录。
+ *   不传就按当前视图推断（在某个目录里就落那儿，否则第一个目录）。
+ *   从右键菜单的「新建 → 新建文件」进来时会传右键处的目录。
+ */
+function openNewFileModal(targetCourseId) {
+  if (!S.courses.length) {
+    toast('先新建一个目录');
+    return;
+  }
+
+  // 默认落到当前所在目录，否则第一个
+  const cur = S.view.type === 'course' && S.view.courseId ? S.view.courseId : null;
+  // toggleModal 会把触发事件原样透传进来，别把事件对象当目录 id 用
+  const want = typeof targetCourseId === 'string' ? targetCourseId : null;
+  newFileState.courseId = want || cur || S.courses[0].id;
+  newFileState.mode = 'link';
+  newFileState.dir = null;
+
+  fillCourseSelect($('#newFileCourse'), newFileState.courseId, (id) => {
+    newFileState.courseId = id;
+  });
+  $('#newFileName').value = '';
+  $('#newFileDirPath').textContent = '桌面（默认）';
+  $('#newFileModal').hidden = false;
+  setTimeout(() => $('#newFileName').focus(), 50);
+}
+
+async function createFile() {
+  const name = $('#newFileName').value.trim();
+  if (!name) {
+    toast('请输入文件名');
+    $('#newFileName').focus();
+    return;
+  }
+
+  const btn = $('#btnNewFileConfirm');
+  btn.disabled = true;
+  try {
+    const res = await api.files.create({
+      courseId: newFileState.courseId,
+      name,
+      mode: newFileState.mode,
+      saveDir: newFileState.dir,
+    });
+    applyState(res.state);
+    $('#newFileModal').hidden = true;
+    toast(`已创建「${res.file.name}」`, 'ok');
+    // 创建完直接打开，方便马上写内容
+    openPreview(res.file.id);
+  } catch (err) {
+    toast(err.message || '创建失败', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---------- 文件详情 ---------- */
+let detailFileId = null;
+
+async function openDetail(fileId) {
+  detailFileId = fileId;
+  $('#detailModal').hidden = false;
+  $('#detailName').textContent = '载入中…';
+  $('#detailRows').innerHTML = '';
+  $('#detailPath').textContent = '';
+
+  try {
+    const info = await api.files.info(fileId);
+    renderDetail(info);
+  } catch (err) {
+    $('#detailName').textContent = '读取失败';
+    toast(err.message || '读取详情失败', 'error');
+  }
+}
+
+function renderDetail(info) {
+  $('#detailName').textContent = info.name;
+
+  const rows = [
+    ['类型', KIND_LABEL[info.kind] || 'FILE'],
+    ['大小', fmtSize(info.size)],
+    ['所在目录', info.dirPath],
+    ['修改时间', fmtDateTime(info.mtime)],
+    ['添加时间', fmtDateTime(info.addedAt)],
+  ];
+  if (info.storage === 'copy') {
+    rows.push(['保存方式', '旧版本入库的副本']);
+    if (info.origin) rows.push(['原始位置', info.origin]);
+  }
+  if (!info.exists) {
+    rows.push(['状态', '文件已丢失']);
+  }
+
+  $('#detailRows').innerHTML = rows
+    .map(([k, v]) => `<div class="detail-row">
+        <span class="detail-key">${escapeHtml(k)}</span>
+      <span class="detail-val ${k === '状态' ? 'is-warn' : ''}">${escapeHtml(String(v))}</span>
+    </div>`)
+    .join('');
+
+  $('#detailPath').textContent = info.path;
+  $('#detailPath').title = info.path;
+}
+
+function fmtDateTime(ms) {
+  if (!ms) return '—';
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} `
+    + `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function copyPath() {
+  const text = $('#detailPath').textContent;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('路径已复制', 'ok');
+  } catch {
+    // 剪贴板被拒时退回到选中文本，让用户自己 Ctrl+C
+    const range = document.createRange();
+    range.selectNodeContents($('#detailPath'));
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    toast('已选中路径，按 Ctrl+C 复制');
+  }
+}
+
+/* ---------- 多选 ---------- */
+/** 框选刚松开时浏览器还会补一个 click，用它吞掉，避免选择被清空 */
+let marqueeEndedAt = 0;
+function updateSelBar() {
+  const bar = $('#selBar');
+  const nFiles = S.selected.size;
+  const nDirs = S.selectedDirs.size;
+  const n = nFiles + nDirs;
+  bar.hidden = n === 0 || S.view.type === 'trash';
+  $('#btnSelectMode').classList.toggle('is-active', S.selectMode);
+  if (!n) return;
+
+  const parts = [];
+  if (nDirs) parts.push(`${nDirs} 个文件夹`);
+  if (nFiles) parts.push(`${nFiles} 个文件`);
+  const sizes = S.files
+    .filter((f) => S.selected.has(f.id))
+    .reduce((sum, f) => sum + (f.size || 0), 0);
+  $('#selCount').textContent = `已选 ${parts.join(' + ')}`
+    + (nFiles ? ` · ${fmtSize(sizes)}` : '');
+}
+
+/** 进入某个目录 */
+function enterDir(dirId) {
+  if (!dirId) return;
+  S.view = { type: 'course', courseId: dirId };
+  S.searchHits = null;
+  clearSelection();
+  revealInTree(dirId);
+  saveLastView();
+  render();
+}
+
+function clearSelection() {
+  S.selected.clear();
+  S.selectedDirs.clear();
+  S.anchor = { id: null, list: null };
+  $$('.card.is-selected').forEach((c) => c.classList.remove('is-selected'));
+  updateSelBar();
+}
+
+/**
+ * 把若干条目放进软件内剪贴板。
+ * cut=true 表示剪切（粘贴后从原位置移走），false 表示复制。
+ * 只改 S.clipboard，不动磁盘 —— 真正的移动发生在粘贴时。
+ */
+function putInClipboard(keys, cut) {
+  if (!keys.length) return;
+  S.clipboard.keys = keys;
+  S.clipboard.cut = !!cut;
+  const n = keys.length;
+  toast(cut ? `已剪切 ${n} 项，粘贴后原位置会移除` : `已复制 ${n} 项`, 'ok');
+}
+
+/**
+ * 当前选中的条目 key 列表（文件 + 目录）。
+ *
+ * **必须带 f: / d: 前缀**。S.selected 和 S.selectedDirs 里存的是裸 id，
+ * 而下游（putInClipboard / showMoveTargets / pasteInto）全都按前缀解析
+ * 类型。以前这里直接返回裸 id，导致批量剪切/复制/移动全都解析不出任何
+ * 条目 —— 表现为「点了没反应」或者只生效一半，而且不报错，很难发现。
+ */
+function selectedKeys() {
+  return [
+    ...[...S.selected].map((id) => `f:${id}`),
+    ...[...S.selectedDirs].map((id) => `d:${id}`),
+  ];
+}
+
+/**
+ * 「移动到其他目录」的菜单，按目录树多级展开。
+ *
+ * 以前是把整棵树平铺成一个长长的列表（用空格缩进模拟层级）——
+ * 目录一多就变成一列几十项、超出屏幕的巨长菜单，既难找又难看。
+ * 现在改成真正的树：一级目录列出来，鼠标停上去从右边展开下一级。
+ *
+ * 排除规则：
+ *  - 被移动的目录自己及子孙不能当目标（否则会塞进自己里面形成环）
+ *  - 条目当前所在的目录不列（移过去等于没动）
+ */
+function showMoveTargets(keys, x, y) {
+  const movingFiles = keys.filter((k) => k.startsWith('f:')).map((k) => k.slice(2));
+  const movingDirs = keys.filter((k) => k.startsWith('d:')).map((k) => k.slice(2));
+
+  // 被移动目录的整棵子树都不能当目标
+  const banned = new Set();
+  for (const id of movingDirs) {
+    banned.add(id);
+    for (const sub of subtreeIds(id)) banned.add(sub);
+  }
+
+  // 当前所在位置：移到这里等于没动，不列出来
+  const samePlace = new Set(
+    movingFiles.map((id) => S.files.find((f) => f.id === id)?.courseId || null),
+  );
+  // 目录自己的父级也算「原地」
+  for (const id of movingDirs) {
+    const node = S.courses.find((c) => c.id === id);
+    if (node) samePlace.add(node.parentId || null);
+  }
+
+  const DIR_ICON = '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9.4l1.7 2.2H18.5A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5v-10z"/>';
+
+  /** 某一层下的可选目录，渲染成菜单项 */
+  const itemsUnder = (parentId) => {
+    const out = [];
+    for (const c of childrenOf(parentId)) {
+      if (banned.has(c.id)) continue;
+      const kids = itemsUnder(c.id);
+      // 「原地」这一级灰着列出来，保持树的层级不乱（子目录还要能展开），
+      // 但不能点 —— 移过去等于没动
+      const here = samePlace.has(c.id);
+      out.push({
+        label: here ? `${c.name}（当前位置）` : c.name,
+        icon: DIR_ICON,
+        disabled: here,
+        action: here ? null : () => moveKeysTo(keys, c.id),
+        children: kids.length ? kids : null,
+      });
+    }
+    return out;
+  };
+
+  const topItems = itemsUnder(null);
+  const menu = [];
+
+  // 顶层（不属于任何目录）也是一个合法目标
+  if (!samePlace.has(null)) {
+    menu.push({
+      label: '全部文件（顶层）',
+      icon: DIR_ICON,
+      action: () => moveKeysTo(keys, null),
+    });
+  }
+
+  if (topItems.length) {
+    if (menu.length) menu.push({ sep: true });
+    menu.push(...topItems);
+  }
+
+  if (!menu.length) {
+    toast('没有可以移动到的目录');
+    return;
+  }
+  showCtx(x, y, menu);
+}
+
+/** 把一批条目复制到目标目录（库里新增记录，磁盘文件不动） */
+async function duplicateInto(fileIds, dirIds, destId) {
+  const res = await api.files.copyMany(fileIds, dirIds, destId);
+  return res?.state || null;
+}
+
+/** 把一批条目移动到目标目录（文件改 courseId，目录改 parentId） */
+async function moveKeysTo(keys, destId) {
+  const fileIds = keys.filter((k) => k.startsWith('f:')).map((k) => k.slice(2));
+  const dirIds = keys.filter((k) => k.startsWith('d:')).map((k) => k.slice(2));
+  try {
+    // 注意：files.moveMany 返回的是 { moved, state }，不是 state 本身；
+    // courses.move 返回的才是 state。混着用会把整个界面刷成空白。
+    let st = null;
+    if (fileIds.length) {
+      const res = await api.files.moveMany(fileIds, destId);
+      st = res?.state || res || null;
+    }
+    for (const id of dirIds) {
+      if (id === destId) continue;
+      st = await api.courses.move(id, destId);
+    }
+    if (st) applyState(st);
+    clearSelection();
+    const name = destId ? (S.courses.find((c) => c.id === destId)?.name || '目标目录') : '全部文件';
+    toast(`已移动到「${name}」`, 'ok');
+  } catch (err) {
+    toast(err.message || '移动失败', 'error');
+  }
+}
+
+/** 把卡片上的 data-* 换算成 shownIds 里用的 key */
+function cardKey(el) {
+  if (el.dataset.file) return `f:${el.dataset.file}`;
+  if (el.dataset.dir) return `d:${el.dataset.dir}`;
+  return null;
+}
+
+/** 按 key 把选中项加进对应的集合 */
+function addKey(key) {
+  if (!key) return;
+  const [type, id] = key.split(':');
+  if (type === 'd') S.selectedDirs.add(id);
+  else S.selected.add(id);
+}
+
+function removeKey(key) {
+  if (!key) return;
+  const [type, id] = key.split(':');
+  if (type === 'd') S.selectedDirs.delete(id);
+  else S.selected.delete(id);
+}
+
+function hasKey(key) {
+  if (!key) return false;
+  const [type, id] = key.split(':');
+  return type === 'd' ? S.selectedDirs.has(id) : S.selected.has(id);
+}
+
+function selectRange(toKey) {
+  const from = S.shownIds.indexOf(S.anchor.id);
+  const to = S.shownIds.indexOf(toKey);
+  if (from < 0 || to < 0) return;
+  const [a, b] = from <= to ? [from, to] : [to, from];
+  for (let i = a; i <= b; i += 1) addKey(S.shownIds[i]);
+  syncSelectedClass();
+  updateSelBar();
+}
+
+function syncSelectedClass() {
+  $$('.card[data-file], .card[data-dir]').forEach((card) => {
+    card.classList.toggle('is-selected', hasKey(cardKey(card)));
+  });
+}
+
+async function removeSelected() {
+  const ids = [...S.selected];
+  const dirIds = [...S.selectedDirs];
+  if (!ids.length && !dirIds.length) return;
+
+  const lead = ids.length + dirIds.length === 1
+    ? (dirIds.length
+      ? `文件夹「${S.courses.find((c) => c.id === dirIds[0])?.name || ''}」会连同里面的记录一起移除。`
+      : `「${S.files.find((f) => f.id === ids[0])?.name || '文件'}」将从库中移除。`)
+    : `${dirIds.length ? `${dirIds.length} 个文件夹` : ''}${dirIds.length && ids.length ? '和' : ''}`
+      + `${ids.length ? `${ids.length} 个文件` : ''}将从库中移除。`;
+
+  // 选中的文件（含目录里的）有没有「复制入库」的 —— 有才提示副本会被清理
+  const scope = new Set(ids);
+  for (const dId of dirIds) for (const s of subtreeIds(dId)) scope.add(s);
+  const hasCopies = S.files.some((x) => scope.has(x.courseId) && x.storage === 'copy');
+
+  const choice = await askDelete({ title: '移除', lead, hasCopies });
+  if (!choice) return;
+  try {
+    let state = null;
+    if (ids.length) state = await api.files.removeMany(ids, choice === 'trash');
+    // 目录逐个删（级联），最后一个的 state 用于刷新界面
+    for (const id of dirIds) {
+      state = await api.courses.remove(id, choice === 'trash');
+    }
+    if (state) applyState(state);
+    clearSelection();
+
+    const what = [
+      dirIds.length ? `${dirIds.length} 个文件夹` : '',
+      ids.length ? `${ids.length} 个文件` : '',
+    ].filter(Boolean).join('和');
+    toast(choice === 'trash' ? `已把 ${what}放进回收站` : `已移除 ${what}`, 'ok');
+  } catch (err) {
+    toast(err.message || '移除失败', 'error');
+  }
+}
+
+async function moveSelected() {
+  const ids = [...S.selected];
+  const dirIds = [...S.selectedDirs];
+  if (!ids.length && !dirIds.length) return;
+
+  const moveTo = async (destId, destName) => {
+    try {
+      let moved = 0;
+      let state = null;
+      if (ids.length) {
+        const res = await api.files.moveMany(ids, destId);
+        moved += res.moved;
+        state = res.state;
+      }
+      for (const id of dirIds) {
+        if (id === destId) continue;
+        state = await api.courses.move(id, destId);
+        moved += 1;
+      }
+      if (state) applyState(state);
+      clearSelection();
+      toast(`已移动 ${moved} 项到「${destName}」`, 'ok');
+    } catch (err) {
+      toast(err.message || '移动失败', 'error');
+    }
+  };
+
+  // 不能把文件夹移进它自己或它的子孙里
+  const banned = new Set();
+  for (const id of dirIds) {
+    banned.add(id);
+    for (const sub of subtreeIds(id)) banned.add(sub);
+  }
+
+  const DIR_ICON = '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9.4l1.7 2.2H18.5A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5v-10z"/>';
+
+  const itemsUnder = (parentId) => {
+    const out = [];
+    for (const c of childrenOf(parentId)) {
+      if (banned.has(c.id)) continue;
+      const kids = itemsUnder(c.id);
+      out.push({
+        label: c.name,
+        icon: DIR_ICON,
+        action: () => moveTo(c.id, c.name),
+        children: kids.length ? kids : null,
+      });
+    }
+    return out;
+  };
+
+  const menu = [{
+    label: '全部文件（顶层）',
+    icon: DIR_ICON,
+    action: () => moveTo(null, '全部文件'),
+  }];
+  const top = itemsUnder(null);
+  if (top.length) {
+    menu.push({ sep: true });
+    menu.push(...top);
+  }
+
+  if (menu.length === 1) {
+    toast('没有可以移动到的位置');
+    return;
+  }
+  const r = $('#btnSelMove').getBoundingClientRect();
+  // 延到当前这次 click 冒泡完再挂：这次点击的 target 是工具栏按钮，
+  // 不在菜单里，同步挂上去会立刻被 document 的「点外部关闭」关掉。
+  setTimeout(() => showCtx(r.left, r.bottom + 4, menu), 0);
+}
+
+function render() {
+  renderSidebar();
+  renderMain();
+}
+
+/* ---------- 回收站视图 ---------- */
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, '0');
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (sameDay) return `今天 ${hm}`;
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+}
+
+function renderTrash() {
+  $('#viewTitle').textContent = '回收站';
+  $('#crumbs').hidden = true;
+
+  // 回收站里只留「清空」按钮，搜索/筛选/导入都藏起来。
+  // 两条二级筛选条也要一起藏，否则它们靠 hidden 属性以外的逻辑显示时
+  // 会孤零零地留在回收站顶上。
+  $('#btnEmptyTrash').hidden = !S.trash.length;
+  $('#searchWrap').hidden = true;
+  $('#kindFilter').hidden = true;
+  $('#docSubFilter').hidden = true;
+  $('#codeSubFilter').hidden = true;
+  $('#btnImport').hidden = true;
+  $('#btnNewFile').hidden = true;
+  $('#searchScope').hidden = true;
+
+  const grid = $('#grid');
+  const empty = $('#emptyState');
+  const total = S.trash.reduce((n, t) => n + t.files.length + t.courses.length, 0);
+
+  $('#viewCount').textContent = total
+    ? `${S.trash.length} 次删除 · ${total} 项`
+    : '';
+
+  if (!S.trash.length) {
+    grid.innerHTML = '';
+    empty.hidden = false;
+    empty.querySelector('h2').textContent = '回收站是空的';
+    empty.querySelector('p').textContent = '删除的文件和目录会先放在这里，随时可以还原。';
+    empty.querySelector('button').hidden = true;
+    return;
+  }
+
+  empty.hidden = true;
+  empty.querySelector('button').hidden = false;
+
+  grid.innerHTML = S.trash
+    .map((entry, i) => {
+      const items = [
+        ...entry.courses.map((c) => `
+          <span class="trash-item" data-kind="dir">
+            <i style="background:${escapeHtml(c.color || '#5b8def')}"></i>${escapeHtml(c.name)}
+          </span>`),
+        ...entry.files.map((f) => `
+          <span class="trash-item" data-kind="${f.kind}">
+            ${escapeHtml(f.name)}
+          </span>`),
+      ].join('');
+
+      return `
+        <article class="card trash-card" data-trash="${entry.id}" style="--i:${Math.min(i, 8)}">
+          <div class="trash-head">
+            <div class="trash-time">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg>
+              ${fmtTime(entry.deletedAt)}
+            </div>
+            <span class="trash-count">${entry.courses.length + entry.files.length} 项</span>
+          </div>
+          <div class="trash-items">${items}</div>
+          <div class="trash-actions">
+            <button class="ghost-btn" data-restore="${entry.id}">还原</button>
+            <button class="danger-btn" data-purge="${entry.id}">彻底删除</button>
+          </div>
+        </article>`;
+    })
+    .join('');
+}
+
+/* ============================================================
+   预览
+   ============================================================ */
+let currentPreview = null;
+
+async function openPreview(id) {
+  const f = S.files.find((x) => x.id === id);
+  if (!f) return;
+  S.previewFileId = id;
+
+  $('#previewName').textContent = f.name;
+  const c = courseOf(f.courseId);
+  $('#previewMeta').textContent = [
+    KIND_LABEL[f.kind] || 'FILE',
+    fmtSize(f.size),
+    c ? c.name : null,
+    f.exists ? null : '文件已丢失',
+  ].filter(Boolean).join(' · ');
+
+  const body = $('#previewBody');
+  body.innerHTML = '<div class="pv-center" style="color:var(--fg-3);font-size:12.5px;">载入中…</div>';
+  $('#overlay').hidden = false;
+
+  try {
+    const p = await api.files.preview(id);
+    currentPreview = p;
+    body.innerHTML = '';
+
+    // 只有纯文本类才允许内置编辑，其余走系统程序
+    setEditMode(false);
+    $('#btnEdit').hidden = !p.editable;
+
+    // 「用编辑器打开」：代码 / 文本类文件都显示
+    const runBtn = $('#btnRun');
+    runBtn.hidden = !(p.editable || p.runner);
+    const editorName = {
+      vscode: 'VS Code', cursor: 'Cursor', notepad: '记事本',
+      notepadpp: 'Notepad++', sublime: 'Sublime Text',
+    }[p.defaultEditor] || 'VS Code';
+    runBtn.title = `用编辑器打开（默认 ${editorName}）`;
+
+    if (p.type === 'missing') {
+      body.innerHTML = `<div class="pv-center"><div class="pv-fallback">
+        <strong>文件已不在原位置</strong>
+        <span>它可能被移动或删除了。可以让软件到电脑里找一找，或者手动指定位置。</span>
+        <div class="pv-actions">
+          <button class="primary-btn" id="btnRelocate">从本地重新定位</button>
+        </div>
+      </div></div>`;
+      $('#btnRelocate').addEventListener('click', () => openRelocate(id));
+      return;
+    }
+
+    if (p.type === 'image') {
+      const wrap = document.createElement('div');
+      wrap.className = 'pv-center';
+      const img = document.createElement('img');
+      img.src = p.url;
+      img.alt = p.name;
+      wrap.appendChild(img);
+      body.appendChild(wrap);
+      return;
+    }
+
+    if (p.type === 'video') {
+      const wrap = document.createElement('div');
+      wrap.className = 'pv-center';
+      const v = document.createElement('video');
+      v.src = p.url;
+      v.controls = true;
+      v.autoplay = false;
+      wrap.appendChild(v);
+      body.appendChild(wrap);
+      return;
+    }
+
+    if (p.type === 'audio') {
+      const wrap = document.createElement('div');
+      wrap.className = 'pv-center';
+      const a = document.createElement('audio');
+      a.src = p.url;
+      a.controls = true;
+      a.className = 'pv-audio';
+      wrap.appendChild(a);
+      body.appendChild(wrap);
+      return;
+    }
+
+    if (p.type === 'pdf') {
+      const wrap = document.createElement('div');
+      wrap.className = 'pv-center';
+      wrap.style.padding = '0';
+      const iframe = document.createElement('iframe');
+      iframe.src = p.url;
+      /* PDF 用的是 Chromium 内置阅读器，跑在跨源 iframe 里。
+       * 用户点一下 PDF 内容焦点就进了子文档，之后 Esc 全被它吃掉，
+       * 主文档一条也收不到 —— 预览关不掉。
+       * 这里不做任何处理：跨源注入不了脚本，抢焦点又会打断用户在 PDF
+       * 里选文字。改由主进程 before-input-event 代收（见 main.js）。 */
+      wrap.appendChild(iframe);
+      body.appendChild(wrap);
+      return;
+    }
+
+    if (p.type === 'html') {
+      const div = document.createElement('div');
+      div.className = 'pv-doc';
+      div.innerHTML = p.html;
+      body.appendChild(div);
+      return;
+    }
+
+    if (p.type === 'code') {
+      const pre = document.createElement('pre');
+      pre.className = 'pv-pre hljs';
+      const code = document.createElement('code');
+      code.innerHTML = p.html;
+      pre.appendChild(code);
+      body.appendChild(pre);
+      return;
+    }
+
+
+    if (p.type === 'sheets') {
+      const tabs = document.createElement('div');
+      tabs.className = 'sheet-tabs';
+      const wrap = document.createElement('div');
+      wrap.className = 'sheet-wrap';
+
+      const show = (i) => {
+        [...tabs.children].forEach((b, j) => b.classList.toggle('is-active', j === i));
+        wrap.innerHTML = p.sheets[i].html;
+      };
+
+      p.sheets.forEach((s, i) => {
+        const b = document.createElement('button');
+        b.className = 'sheet-tab';
+        b.textContent = s.name;
+        b.addEventListener('click', () => show(i));
+        tabs.appendChild(b);
+      });
+
+      body.appendChild(tabs);
+      body.appendChild(wrap);
+      if (p.sheets.length) show(0);
+      return;
+    }
+
+    if (p.type === 'slides') {
+      if (p.note) {
+        const n = document.createElement('div');
+        n.className = 'pv-note';
+        n.textContent = p.note;
+        body.appendChild(n);
+      }
+      const list = document.createElement('div');
+      list.className = 'slide-list';
+      list.innerHTML = p.slides
+        .map((s) => {
+          const imgs = (s.images || []).map((im) => (im.url
+            ? `<img class="slide-img" src="${im.url}" alt="${escapeHtml(im.name)}" loading="lazy">`
+            : `<div class="slide-img-too-big">图片 ${escapeHtml(im.name)}（${im.kb} KB）太大，未内嵌显示</div>`))
+            .join('');
+          const texts = s.texts.length
+            ? s.texts.map((t) => `<div class="slide-line">${escapeHtml(t)}</div>`).join('')
+            : '<div class="slide-line" style="color:var(--fg-4)">（此页无文字内容）</div>';
+          return `
+          <div class="slide">
+            <div class="slide-no">第 ${s.index} 页${imgs ? ` · ${(s.images || []).length} 张图` : ''}</div>
+            ${imgs ? `<div class="slide-imgs">${imgs}</div>` : ''}
+            ${texts}
+          </div>`;
+        })
+        .join('');
+      body.appendChild(list);
+      return;
+    }
+
+    if (p.type === 'legacyDoc') {
+      const wrap = document.createElement('div');
+      wrap.className = 'pv-legacy-doc';
+      if (p.note) {
+        const n = document.createElement('div');
+        n.className = 'pv-note';
+        n.textContent = p.note;
+        wrap.appendChild(n);
+      }
+      if (p.text) {
+        const pre = document.createElement('pre');
+        pre.className = 'pv-pre';
+        pre.textContent = p.text;
+        wrap.appendChild(pre);
+      }
+      const bar = document.createElement('div');
+      bar.className = 'pv-legacy-actions';
+      bar.innerHTML = '<button class="primary-btn" data-act="open-sys">用系统程序打开</button>';
+      bar.querySelector('[data-act="open-sys"]').addEventListener('click', () => {
+        api.files.openExternal(id).catch((e) => toast(e.message, 'error'));
+      });
+      wrap.appendChild(bar);
+      body.appendChild(wrap);
+      return;
+    }
+
+    // unsupported
+    const wrap = document.createElement('div');
+    wrap.className = 'pv-center';
+    wrap.innerHTML = `
+      <div class="pv-fallback">
+        <strong>${escapeHtml(p.name)}</strong>
+        <span>${escapeHtml(p.reason || '暂不支持内嵌预览')}</span>
+        <button class="primary-btn" data-act="open-sys">用系统程序打开</button>
+      </div>`;
+    wrap.querySelector('[data-act="open-sys"]').addEventListener('click', () => {
+      api.files.openExternal(id).catch((e) => toast(e.message, 'error'));
+    });
+    body.appendChild(wrap);
+  } catch (err) {
+    body.innerHTML = `<div class="pv-center"><div class="pv-fallback">
+      <strong>预览失败</strong><span>${escapeHtml(err.message || String(err))}</span>
+    </div></div>`;
+  }
+}
+
+async function closePreview() {
+  if (isEditing) {
+    // 内容没变过就别烦用户 —— 打开就关、什么都没改时不该弹提示
+    const changed = editorEl && editorEl.value !== (currentPreview?.text || '');
+    if (changed) {
+      const ok = await askConfirm({
+        title: '有未保存的修改',
+        lead: '关闭后这次的改动会丢失。要放弃修改并关闭吗？',
+        okText: '放弃修改',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+  }
+  $('#overlay').hidden = true;
+  $('#previewBody').innerHTML = '';
+  S.previewFileId = null;
+  currentPreview = null;
+  setEditMode(false);
+}
+
+/* ---------- 编辑 ---------- */
+let isEditing = false;
+let editorEl = null;
+
+function setEditMode(on) {
+  isEditing = on;
+  $('#btnEdit').hidden = on || !currentPreview?.editable;
+  $('#btnSaveEdit').hidden = !on;
+  $('#previewBody').classList.toggle('is-editing', on);
+}
+
+/* ---------- 代码编辑增强 ----------
+ * 纯 textarea + 自己处理按键，不引 CodeMirror。
+ * 提供：括号自动配对、选中包裹、回车保持缩进、Tab / Shift+Tab 缩进、
+ *       智能退格（删左括号时连右括号一起删）。
+ */
+const BRACKET_PAIRS = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`' };
+const BRACKET_CLOSERS = new Set(Object.values(BRACKET_PAIRS));
+
+/** 取当前光标所在行开头的空白，作为回车后的缩进 */
+function leadingIndent(text, pos) {
+  const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
+  const line = text.slice(lineStart, pos);
+  return (line.match(/^[ \t]*/) || [''])[0];
+}
+
+/** 在 textarea 上替换选区（保留撤销栈用 execCommand 更好，但 Electron 里
+ *  setRangeText + 手动派发 input 也能让 Ctrl+Z 正常工作） */
+function replaceRange(ta, start, end, insert, selectStart, selectEnd) {
+  ta.setRangeText(insert, start, end, 'end');
+  if (selectStart != null) {
+    ta.selectionStart = selectStart;
+    ta.selectionEnd = selectEnd == null ? selectStart : selectEnd;
+  }
+}
+
+function handleEditorKeydown(e) {
+  const ta = e.currentTarget;
+  const { value } = ta;
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  const hasSel = end > start;
+
+  // ---- Tab / Shift+Tab：整行缩进或取消缩进 ----
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+    const block = value.slice(lineStart, end);
+    const isMultiline = block.includes('\n');
+
+    if (!hasSel && !e.shiftKey) {
+      // 光标处直接插两个空格（比插 \t 好，多数语言的风格都是空格）
+      replaceRange(ta, start, end, '  ');
+      return;
+    }
+
+    if (!isMultiline && !e.shiftKey) {
+      replaceRange(ta, start, end, '  ');
+      return;
+    }
+
+    // 多行：逐行加/减两个空格
+    const lines = block.split('\n');
+    const next = lines.map((ln) => {
+      if (e.shiftKey) return ln.replace(/^ {1,2}|\t/, '');
+      return `  ${ln}`;
+    }).join('\n');
+
+    // 保持整段选中，方便连按
+    const delta = next.length - block.length;
+    replaceRange(ta, lineStart, end, next, lineStart, end + delta);
+    return;
+  }
+
+  // ---- 回车：保持缩进；在 { 后回车自动多缩一级 ----
+  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
+    const indent = leadingIndent(value, start);
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    const prevChar = before.slice(-1);
+    const nextChar = after.slice(0, 1);
+
+    // 光标正好在成对的括号中间 → 展开成三行
+    if (BRACKET_PAIRS[prevChar] === nextChar && BRACKET_PAIRS[prevChar]) {
+      e.preventDefault();
+      const inner = `${indent}  `;
+      const insert = `\n${inner}\n${indent}`;
+      replaceRange(ta, start, end, insert);
+      ta.selectionStart = start + 1 + inner.length;
+      ta.selectionEnd = ta.selectionStart;
+      return;
+    }
+
+    if (prevChar === '{' || prevChar === '[' || prevChar === '(') {
+      e.preventDefault();
+      const insert = `\n${indent}  `;
+      replaceRange(ta, start, end, insert);
+      return;
+    }
+
+    // 普通回车：只补缩进
+    if (indent) {
+      e.preventDefault();
+      replaceRange(ta, start, end, `\n${indent}`);
+      return;
+    }
+    return;
+  }
+
+  // ---- 输入左括号 / 引号：自动补右半边，有选中就包裹 ----
+  if (BRACKET_PAIRS[e.key] && !e.ctrlKey && !e.altKey) {
+    const close = BRACKET_PAIRS[e.key];
+
+    // 引号：如果后面紧跟同样的引号，跳过去而不是再插一个
+    if (e.key === close && !hasSel && value[end] === close) {
+      e.preventDefault();
+      ta.selectionStart = ta.selectionEnd = end + 1;
+      return;
+    }
+
+    e.preventDefault();
+    if (hasSel) {
+      const inner = value.slice(start, end);
+      replaceRange(ta, start, end, e.key + inner + close, start + 1, end + 1);
+    } else {
+      replaceRange(ta, start, end, e.key + close);
+      ta.selectionStart = ta.selectionEnd = start + 1;
+    }
+    return;
+  }
+
+  // ---- 输入右括号：后面正好是它就直接跳过 ----
+  if (BRACKET_CLOSERS.has(e.key) && !hasSel && value[end] === e.key) {
+    e.preventDefault();
+    ta.selectionStart = ta.selectionEnd = end + 1;
+    return;
+  }
+
+  // ---- 退格：删左括号时连右括号一起删 ----
+  if (e.key === 'Backspace' && !hasSel && start > 0) {
+    const left = value[start - 1];
+    if (BRACKET_PAIRS[left] === value[start] && BRACKET_PAIRS[left]) {
+      e.preventDefault();
+      replaceRange(ta, start - 1, start + 1, '');
+      return;
+    }
+  }
+
+  // ---- Ctrl+/ ：切换行注释 ----
+  if (e.key === '/' && e.ctrlKey) {
+    e.preventDefault();
+    const marker = currentPreview?.ext === '.py' ? '# ' : '// ';
+    const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+    const lineEnd = value.indexOf('\n', end);
+    const blockEnd = lineEnd < 0 ? value.length : lineEnd;
+    const block = value.slice(lineStart, blockEnd);
+    const lines = block.split('\n');
+    const allCommented = lines.every((ln) => !ln.trim() || ln.trimStart().startsWith(marker.trim()));
+
+    const next = lines.map((ln) => {
+      if (!ln.trim()) return ln;
+      if (allCommented) return ln.replace(new RegExp(`^(\\s*)${marker.trim()}\\s?`), '$1');
+      return ln.replace(/^(\s*)/, `$1${marker}`);
+    }).join('\n');
+
+    const delta = next.length - block.length;
+    replaceRange(ta, lineStart, blockEnd, next, lineStart + delta, lineStart + delta);
+  }
+}
+
+/**
+ * 编辑器：textarea + 底层高亮镜像。
+ *
+ * 做法是把 textarea 的文字设成透明（只留光标和选区），
+ * 底下垫一个同样排版、同样字体的 <pre> 显示高亮后的 HTML。
+ * 两层必须完全对齐 —— 字号/行高/内边距/换行规则任何一处不一致，
+ * 光标就会和高亮文字错位。
+ *
+ * 好处是不用引 CodeMirror（300KB+），原生输入法、撤销栈、
+ * 系统剪贴板全部照常工作。
+ */
+let highlightTimer = null;
+
+function buildHighlightMirror(ta) {
+  const pre = document.createElement('pre');
+  pre.className = 'editor-highlight hljs';
+  pre.setAttribute('aria-hidden', 'true');
+  return pre;
+}
+
+/** 把高亮结果同步到镜像层，并把滚动位置跟 textarea 对齐 */
+function syncHighlight(ta, pre, html) {
+  // 末尾补一个换行：最后一行是空行时 <pre> 不会撑出高度，光标会跳
+  pre.innerHTML = `${html}\n`;
+  pre.scrollTop = ta.scrollTop;
+  pre.scrollLeft = ta.scrollLeft;
+}
+
+function scheduleHighlight(ta, pre) {
+  if (highlightTimer) clearTimeout(highlightTimer);
+  highlightTimer = setTimeout(async () => {
+    if (!S.previewFileId || editorEl !== ta) return;
+    try {
+      const res = await api.files.highlight(S.previewFileId, ta.value);
+      if (editorEl === ta) syncHighlight(ta, pre, res.html);
+    } catch { /* 高亮失败不影响编辑，保持原样 */ }
+  }, 90);
+}
+
+function enterEditMode() {
+  if (!currentPreview?.editable) return;
+  const body = $('#previewBody');
+  body.innerHTML = '';
+
+  const wrap = document.createElement('div');
+  wrap.className = 'editor-wrap';
+
+  const pre = buildHighlightMirror();
+  const ta = document.createElement('textarea');
+  ta.className = 'editor';
+  ta.value = currentPreview.text || '';
+  ta.spellcheck = false;
+  ta.addEventListener('keydown', handleEditorKeydown);
+
+  // 输入 / 滚动 / 尺寸变化都要重新对齐
+  ta.addEventListener('input', () => scheduleHighlight(ta, pre));
+  ta.addEventListener('scroll', () => {
+    pre.scrollTop = ta.scrollTop;
+    pre.scrollLeft = ta.scrollLeft;
+  });
+
+  wrap.appendChild(pre);
+  wrap.appendChild(ta);
+  body.appendChild(wrap);
+  editorEl = ta;
+
+  // 首次渲染高亮（用预览已经算好的 html，省一次 IPC）
+  if (currentPreview.html) {
+    syncHighlight(ta, pre, currentPreview.html);
+  } else {
+    scheduleHighlight(ta, pre);
+  }
+
+  ta.focus();
+  setEditMode(true);
+}
+
+/**
+ * 退出编辑模式，回到只读预览。
+ * 有未保存的改动时先问一声（和关闭预览的规则一致）。
+ */
+async function exitEditMode() {
+  if (!isEditing) return;
+  const changed = editorEl && editorEl.value !== (currentPreview?.text || '');
+  if (changed) {
+    const ok = await askConfirm({
+      title: '放弃修改？',
+      lead: '退出编辑后，这次没保存的改动会丢失。',
+      okText: '放弃修改',
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  const id = S.previewFileId;
+  isEditing = false;
+  editorEl = null;
+  if (highlightTimer) { clearTimeout(highlightTimer); highlightTimer = null; }
+  if (id) await openPreview(id);
+}
+
+/** Ctrl+E 是开关：只读时进入编辑，编辑中则退出 */
+function toggleEditMode() {
+  if (isEditing) {
+    exitEditMode().catch((err) => toast(err?.message || '退出编辑失败', 'error'));
+  } else if (currentPreview?.editable) {
+    enterEditMode();
+  }
+}
+
+async function saveEdit() {
+  if (!isEditing || !editorEl || !S.previewFileId) return;
+  const btn = $('#btnSaveEdit');
+  btn.disabled = true;
+  try {
+    const res = await api.files.saveText(S.previewFileId, editorEl.value);
+    applyState(res.state);
+    toast('已保存，原文件已更新（旧版有备份）', 'ok');
+
+    // 重新渲染预览，反映最新内容
+    const id = S.previewFileId;
+    isEditing = false;
+    editorEl = null;
+    await openPreview(id);
+  } catch (err) {
+    toast(err.message || '保存失败', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ============================================================
+   右键菜单
+   ============================================================ */
+/** 所有还挂在页面上的菜单：主菜单 + 各级子菜单，按层级排列。
+ *  必须记全部而不是只记最后一个 —— 只记最后一个的话，关掉子菜单后
+ *  主菜单就再也关不掉了（点外面只关得掉最上面那一个）。 */
+const openCtxMenus = [];
+
+/** 关掉某个菜单以及它右边的所有子菜单 */
+function closeCtxFrom(index) {
+  while (openCtxMenus.length > index) {
+    openCtxMenus.pop().el.remove();
+  }
+}
+
+/** 关掉全部菜单（含所有子菜单） */
+function closeAllCtx() {
+  closeCtxFrom(0);
+}
+
+/** 关掉菜单。所有调用点都期望「全关」，所以这里直接转给 closeAllCtx。 */
+function closeCtx() {
+  closeAllCtx();
+}
+
+/* ============================================================
+   悬停信息浮层
+   ============================================================ */
+let hoverTimer = null;
+let hoverTarget = null;
+
+const HOVER_DELAY = 420; // 毫秒。太短会在鼠标划过时乱闪
+
+/** 关掉浮层并取消待显示的计时 */
+function hideHoverTip() {
+  if (hoverTimer) {
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
+  }
+  hoverTarget = null;
+  const el = $('#hoverTip');
+  if (el) el.hidden = true;
+}
+
+/**
+ * 目录的完整层级，如「课程文件 / 计组」。
+ *
+ * 只显示最后一级会分不清：好几个目录都可能叫「计组」，
+ * 光看名字不知道是哪个。pathOf 已经做了记忆化，重复调用不费什么。
+ */
+function dirTrail(id) {
+  if (!id) return '顶层目录';
+  const trail = pathOf(id).map((c) => c.name);
+  return trail.length ? escapeHtml(trail.join(' / ')) : '顶层目录';
+}
+
+/**
+ * 猜一个目录在磁盘上的位置。
+ *
+ * 早期版本的目录记录没存 sourcePath，重启后就不知道它对应哪个磁盘文件夹。
+ * 从这棵子树里找一个文件，取它所在目录 —— 因为导入时是保留层级结构的，
+ * 这个位置通常就是那个文件夹（或者它的子目录），足够用户顺着找过去。
+ */
+function guessDirPath(dirNode) {
+  const ids = subtreeIds(dirNode.id);
+  for (const f of S.files) {
+    if (!ids.has(f.courseId) || !f.path) continue;
+    // 去掉文件名，留下目录部分
+    const at = f.path.lastIndexOf('\\');
+    if (at > 0) return f.path.slice(0, at);
+  }
+  return null;
+}
+
+/** 组装浮层内容 */
+function hoverTipHtml(node, isDir) {
+  const rows = [];
+
+  if (isDir) {
+    // 归属：显示完整层级（课程文件 / 计组），只给最后一级分不清位置
+    rows.push(['归属', dirTrail(node.parentId)]);
+
+    // 统计
+    const parts = [`${node.totalCount ?? 0} 个文件`];
+    if (node.childCount) parts.unshift(`${node.childCount} 个子目录`);
+    if (node.totalSize) parts.push(fmtSize(node.totalSize));
+    rows.push(['内容', parts.join(' · ')]);
+
+    // 磁盘位置。老目录记录没存 sourcePath（早期版本没这个字段），
+    // 这时从子树里随便找一个文件，取它所在目录作为近似值 —— 总比显示
+    // 「虚拟目录」有用，用户能顺着找到地方。
+    const guess = node.sourcePath || guessDirPath(node);
+    if (guess) {
+      rows.push(['位置', `<span class="ht-path">${escapeHtml(guess)}</span>`]);
+    } else {
+      rows.push(['位置', '<span class="ht-path">（虚拟目录，不对应磁盘文件夹）</span>']);
+    }
+  } else {
+    rows.push(['归属', dirTrail(node.courseId)]);
+    rows.push(['大小', fmtSize(node.size)]);
+
+    // 文件路径直接显示完整路径，比只给目录更有用
+    const p = node.path || '';
+    const missing = node.exists === false;
+    rows.push([
+      '位置',
+      `<span class="ht-path ${missing ? 'ht-missing' : ''}">${escapeHtml(p)}${
+        missing ? '（文件已丢失）' : ''
+      }</span>`,
+    ]);
+  }
+
+  return `
+    <div class="ht-name">${escapeHtml(node.name)}</div>
+    ${rows.map(([k, v]) => `
+      <div class="ht-row">
+        <span class="ht-label">${k}</span>
+        <span class="ht-value">${v}</span>
+      </div>`).join('')}`;
+}
+
+/** 把浮层摆到卡片下方（下方放不下就翻到上方），并保证不出屏 */
+function placeHoverTip(tip, cardRect) {
+  const pad = 8;
+  const r = tip.getBoundingClientRect();
+
+  let left = cardRect.left + cardRect.width / 2 - r.width / 2;
+  left = Math.max(pad, Math.min(left, window.innerWidth - r.width - pad));
+
+  let top = cardRect.bottom + 8;
+  // 下方空间不够就放到卡片上方
+  if (top + r.height > window.innerHeight - pad) {
+    top = cardRect.top - r.height - 8;
+  }
+  // 上方也不够就贴顶部
+  if (top < pad) top = pad;
+
+  tip.style.left = `${Math.round(left)}px`;
+  tip.style.top = `${Math.round(top)}px`;
+}
+
+/** 立即显示（计时到点后调用） */
+function showHoverTip(node, isDir, cardEl) {
+  const tip = $('#hoverTip');
+  if (!tip || !cardEl.isConnected) return;
+  tip.innerHTML = hoverTipHtml(node, isDir);
+  tip.hidden = false;
+  placeHoverTip(tip, cardEl.getBoundingClientRect());
+}
+
+/**
+ * 给卡片挂悬停行为。
+ * 用事件委托挂在 #grid 上，卡片重绘后不用重新绑定。
+ */
+function bindHoverTips() {
+  const grid = $('#grid');
+  if (!grid || grid.dataset.hoverBound) return;
+  grid.dataset.hoverBound = '1';
+
+  const resolve = (card) => {
+    if (!card) return null;
+    if (card.dataset.dir) {
+      const c = courseOf(card.dataset.dir);
+      return c ? { node: c, isDir: true } : null;
+    }
+    if (card.dataset.file) {
+      const f = S.files.find((x) => x.id === card.dataset.file);
+      return f ? { node: f, isDir: false } : null;
+    }
+    return null;
+  };
+
+  grid.addEventListener('mouseover', (e) => {
+    const card = e.target.closest('.card[data-dir], .card[data-file]');
+    if (!card || card === hoverTarget) return;
+    // 拖拽中不弹浮层，会挡住落点
+    if (document.body.classList.contains('is-dragging')) return;
+
+    const info = resolve(card);
+    if (!info) return;
+
+    hideHoverTip();
+    hoverTarget = card;
+    hoverTimer = setTimeout(() => {
+      hoverTimer = null;
+      // 计时到点时鼠标可能已经移走了
+      if (hoverTarget === card) showHoverTip(info.node, info.isDir, card);
+    }, HOVER_DELAY);
+  });
+
+  grid.addEventListener('mouseout', (e) => {
+    const card = e.target.closest('.card[data-dir], .card[data-file]');
+    if (!card) return;
+    // 移到卡片内部的子元素不算移出
+    if (e.relatedTarget && card.contains(e.relatedTarget)) return;
+    if (card === hoverTarget) hideHoverTip();
+  });
+
+  // 滚动、离开窗口、打开菜单时一律收起
+  grid.addEventListener('scroll', hideHoverTip, true);
+  window.addEventListener('blur', hideHoverTip);
+  document.addEventListener('scroll', hideHoverTip, true);
+  document.addEventListener('contextmenu', hideHoverTip, true);
+}
+
+function showCtx(x, y, items, depth = 0) {
+  // 同一层级已经有菜单了就先收掉它和它的子孙，避免叠出两份
+  if (openCtxMenus.length > depth) closeCtxFrom(depth);
+  else if (openCtxMenus.length === depth) {
+    // 正常情况：父级菜单还在，往上叠一层子菜单
+  } else {
+    // depth 比现有层数深，说明父级已经没了，不该再开
+    return;
+  }
+
+  // 只给真实条目编号：分隔项不参与索引，否则点「移动到其他目录」会命中 sep
+  const actionable = [];
+  const el = document.createElement('div');
+  el.className = 'ctx-menu';
+  if (depth) el.classList.add('ctx-menu-sub');
+  el.dataset.depth = String(depth);
+
+  /* 先规整分隔符：条目是按条件拼出来的，某个分支不出现时很容易留下
+   * 连续两条分隔线，或者开头/结尾孤零零一条。渲染前统一收一下。 */
+  const tidy = [];
+  for (const it of items.filter(Boolean)) {
+    if (it.sep) {
+      if (!tidy.length || tidy[tidy.length - 1].sep) continue; // 开头和连续的丢掉
+      tidy.push(it);
+    } else {
+      tidy.push(it);
+    }
+  }
+  while (tidy.length && tidy[tidy.length - 1].sep) tidy.pop(); // 结尾的丢掉
+
+  el.innerHTML = tidy
+    .map((it) => {
+      if (it.sep) return '<div class="ctx-sep"></div>';
+      const idx = actionable.push(it) - 1;
+      // 有 children 的条目渲染成可展开项：右边一个箭头，hover 时弹子菜单
+      const arrow = it.children
+        ? '<svg class="ctx-arrow" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>'
+        : '';
+      // 禁用的条目也可能是树上的中间层（比如「当前位置」），
+      // 自己点不动，但下面的子目录还得能展开
+      return `<button class="ctx-item ${it.danger ? 'is-danger' : ''} ${it.disabled ? 'is-disabled' : ''}"
+                      data-i="${idx}" ${it.children ? 'data-sub="1"' : ''}
+                      ${it.disabled ? 'aria-disabled="true"' : ''}>
+        ${it.icon ? `<svg viewBox="0 0 24 24">${it.icon}</svg>` : ''}
+        <span>${escapeHtml(it.label)}</span>
+        ${arrow}
+      </button>`;
+    })
+    .join('');
+
+  document.body.appendChild(el);
+
+  // 定位：根菜单按鼠标位置；子菜单贴在父菜单右边，放不下就翻到左边。
+  // 量尺寸用 offsetWidth/offsetHeight —— 它们不含 transform，
+  // 而子菜单挂载时正在跑 translateX 入场动画，用 rect 会量小。
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  if (depth === 0) {
+    el.style.left = `${Math.min(x, Math.max(8, window.innerWidth - w - 8))}px`;
+    el.style.top = `${Math.min(y, Math.max(8, window.innerHeight - h - 8))}px`;
+  } else {
+    const pr = openCtxMenus[depth - 1].el.getBoundingClientRect();
+    let left = pr.right + 4;
+    if (left + w > window.innerWidth - 8) left = pr.left - w - 4;
+    el.style.left = `${Math.max(8, left)}px`;
+    // 竖直方向对齐触发它的那个条目（y 由 mouseover 传进来），再夹进视口
+    const top = Math.min(y, window.innerHeight - h - 8);
+    el.style.top = `${Math.max(8, top)}px`;
+  }
+
+  const entry = { el, x, y };
+
+  /** 在某一项右边展开它的子菜单 */
+  const openSub = (btn, item) => {
+    closeCtxFrom(depth + 1);
+    el.dataset.openSub = String(btn.dataset.i);
+    el.querySelectorAll('.is-sub-open').forEach((b) => b.classList.remove('is-sub-open'));
+    btn.classList.add('is-sub-open');
+    const br = btn.getBoundingClientRect();
+    showCtx(br.right + 2, br.top - 5, item.children, depth + 1);
+  };
+
+  /** 收起本菜单右边的子菜单 */
+  const closeSub = () => {
+    if (openCtxMenus.length > depth + 1) closeCtxFrom(depth + 1);
+    if (el.dataset.openSub) {
+      delete el.dataset.openSub;
+      el.querySelectorAll('.is-sub-open').forEach((b) => b.classList.remove('is-sub-open'));
+    }
+  };
+
+  el.addEventListener('click', (e) => {
+    // 阻止冒泡到 document 的「点外部关闭」监听：菜单项的动作里可能同步
+    // 再开一个新菜单（比如「移动到其他目录」），不拦住的话新菜单刚挂上
+    // 就会被那次点击当成「点在菜单外面」而立刻关掉。
+    e.stopPropagation();
+    const btn = e.target.closest('.ctx-item');
+    if (!btn) return;
+    const item = actionable[Number(btn.dataset.i)];
+    if (!item) return;
+    // 禁用的条目自己点不动；但如果它是树上的中间层，点一下还能展开子级
+    if (item.disabled || !item.action) {
+      if (item.children) openSub(btn, item);
+      return;
+    }
+    closeAllCtx();
+    item.action();
+  });
+  // 菜单上右键不要弹系统菜单
+  el.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // 悬停展开子菜单
+  el.addEventListener('mouseover', (e) => {
+    const btn = e.target.closest('.ctx-item');
+    if (!btn) return;
+    const item = actionable[Number(btn.dataset.i)];
+    if (!item?.children) {
+      // 移到普通条目上时，把它右边展开的子菜单收掉；
+      // 同时清掉展开标记，否则再划回原来那一项时因为「已经展开过」而不弹了
+      closeSub();
+      return;
+    }
+    if (el.dataset.openSub === String(btn.dataset.i)) return; // 已经展开了
+    openSub(btn, item);
+  });
+
+  openCtxMenus.push(entry);
+}
+
+document.addEventListener('click', (e) => {
+  // 只要点在任何一个菜单外面，就把整串菜单都关掉。
+  // 以前只判断最上面那一个，所以子菜单关掉后主菜单还在。
+  if (!openCtxMenus.length) return;
+  if (openCtxMenus.some((m) => m.el.contains(e.target))) return;
+  closeAllCtx();
+});
+document.addEventListener('scroll', (e) => {
+  if (!openCtxMenus.length) return;
+  // 菜单自己内部滚动（目录特别多时）不该把菜单关掉 ——
+  // 但滚了哪一层，就要把它右边展开的子菜单收掉，否则子菜单停在原处、
+  // 跟父菜单的条目对不上了
+  const idx = openCtxMenus.findIndex((m) => m.el === e.target);
+  if (idx >= 0) {
+    closeCtxFrom(idx + 1);
+    const self = openCtxMenus[idx].el;
+    delete self.dataset.openSub;
+    self.querySelectorAll('.is-sub-open').forEach((b) => b.classList.remove('is-sub-open'));
+    return;
+  }
+  closeAllCtx();
+}, true);
+// 窗口失焦（切到别的程序）时也收掉，免得回来还挂着一串菜单
+window.addEventListener('blur', () => closeAllCtx());
+
+/* ============================================================
+   导入
+   ============================================================ */
+function openImportModal() {
+  // 没有目录也能导入：选「全部文件（顶层）」时，导入的文件夹本身会成为顶层目录
+  S.importPaths = [];
+  $('#pickedList').textContent = '未选择任何文件';
+  $('#pickedList').classList.remove('has-items');
+  $('#btnImportConfirm').disabled = true;
+
+  // 结构树里直接点选归入哪一层；也可以选「全部文件（顶层）」。
+  // 在「全部文件」视图打开时默认就是顶层，其余情况沿用上次/当前目录。
+  const cur = S.view.type === 'course' && S.view.courseId
+    ? S.view.courseId
+    : (S.view.type === 'all' ? null : S.courses[0]?.id ?? null);
+  S.importCourseId = cur;
+  renderDirTree($('#importCourse'), cur, (id) => {
+    S.importCourseId = id;
+  }, { allowRoot: true });
+
+  $('#importModal').hidden = false;
+}
+
+function setPicked(paths) {
+  S.importPaths = paths;
+  const box = $('#pickedList');
+  if (!paths.length) {
+    box.textContent = '未选择任何文件';
+    box.classList.remove('has-items');
+    $('#btnImportConfirm').disabled = true;
+    $('#buildTreeRow').hidden = true;
+    return;
+  }
+  box.classList.add('has-items');
+  box.innerHTML = paths
+    .map((p) => `<div>${escapeHtml(p.split(/[\\/]/).pop())}</div>`)
+    .join('');
+  $('#btnImportConfirm').disabled = false;
+}
+
+async function doImport() {
+  if (!S.importPaths.length) return;
+  const courseId = S.importCourseId;
+  const mode = 'link';
+  const btn = $('#btnImportConfirm');
+
+  btn.disabled = true;
+  btn.textContent = '检查中…';
+
+  try {
+    // 先预检：有重复就弹窗让用户自己决定
+    const scan = await api.files.scan(S.importPaths);
+    // 选了文件夹才显示「保留文件夹结构」，默认打开
+    const hasFolder = Array.isArray(scan.dirs) && scan.dirs.length > 0;
+    $('#buildTreeRow').hidden = !hasFolder;
+    S.buildTree = hasFolder ? $('#swBuildTree').classList.contains('is-on') : false;
+
+    // 跳过了依赖目录要说一声，否则用户会以为文件漏导了。
+    // 这里用 toast 而不是拦一道确认：跳过依赖是正确行为，不需要他决策。
+    if (scan.skippedDirs > 0) {
+      toast(`已跳过 ${scan.skippedDirs} 个依赖目录（node_modules、.venv 之类）`, 'ok');
+    }
+
+    if (scan.duplicates.length) {
+      btn.disabled = false;
+      btn.textContent = '开始导入';
+      const choice = await askDuplicate(scan.duplicates);
+      if (!choice) return; // 用户取消
+      await runImport(courseId, mode, choice);
+      return;
+    }
+    await runImport(courseId, mode, setting('duplicateMode'));
+  } catch (err) {
+    toast(err.message || '导入失败', 'error');
+    btn.disabled = false;
+    btn.textContent = '开始导入';
+  }
+}
+
+async function runImport(courseId, mode, dupMode) {
+  const btn = $('#btnImportConfirm');
+  btn.disabled = true;
+  btn.textContent = '导入中…';
+
+  try {
+    const res = await api.files.import(S.importPaths, courseId, mode, dupMode, !!S.buildTree);
+    if (setting('autoSwitchCourse')) {
+      // 导到顶层时回到「全部文件」，正好能看到刚建出来的目录
+      S.view = courseId ? { type: 'course', courseId } : { type: 'all', courseId: null };
+      saveLastView();
+    }
+    applyState(res.state);
+    $('#importModal').hidden = true;
+
+    const parts = [mode === 'copy' ? `已入库 ${res.count} 个` : `已登记 ${res.count} 个`];
+    if (res.replaced?.length) parts.push(`替换 ${res.replaced.length} 个`);
+    if (res.skipped.length) parts.push(`跳过 ${res.skipped.length} 个重复`);
+    if (res.skippedDirs) parts.push(`跳过 ${res.skippedDirs} 个依赖目录`);
+    if (res.failed?.length) parts.push(`失败 ${res.failed.length} 个`);
+    toast(parts.join('，'), res.failed?.length ? 'error' : 'ok');
+  } catch (err) {
+    toast(err.message || '导入失败', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '开始导入';
+  }
+}
+
+/**
+ * 把外部路径（拖进来 / 粘贴进来的文件或文件夹）直接导入到 destId。
+ * 不走导入弹窗：拖放和粘贴都是「就地完成」的操作，再弹一个框问
+ * 「归到哪个目录」既多余又打断手感。默认平铺（不重建子目录层级），
+ * 想要保留层级还是走「导入」按钮。
+ */
+async function importDroppedPaths(paths, destId) {
+  if (!paths.length) return;
+  try {
+    const scan = await api.files.scan(paths);
+    const found = (scan?.fresh?.length || 0) + (scan?.duplicates?.length || 0);
+    if (!found) {
+      toast('这些位置里没有可导入的文件', 'error');
+      return;
+    }
+
+    // 有重复就照常问一次，别默默覆盖
+    let dupMode = 'skip';
+    if (scan.duplicates?.length) {
+      dupMode = await askDuplicate(scan.duplicates);
+      if (!dupMode) return;
+    }
+
+    const res = await api.files.import(paths, destId, 'link', dupMode, false);
+    applyState(res.state);
+
+    const parts = [`已登记 ${res.count} 个`];
+    if (res.skipped?.length) parts.push(`跳过 ${res.skipped.length} 个重复`);
+    if (res.skippedDirs) parts.push(`跳过 ${res.skippedDirs} 个依赖目录`);
+    if (res.failed?.length) parts.push(`失败 ${res.failed.length} 个`);
+    toast(parts.join('，'), res.failed?.length ? 'error' : 'ok');
+  } catch (err) {
+    toast(err.message || '导入失败', 'error');
+  }
+}
+
+/**
+ * 粘贴到某个目录。
+ *
+ * 两种情况：
+ *   1. 软件内选中了条目（Ctrl+C 复制的库内文件）→ 只改归属，不复制磁盘文件
+ *   2. 剪贴板里是资源管理器复制的文件 → 从磁盘路径登记导入
+ * 先看 1 再看 2：库内复制是更明确的意图。
+ */
+async function pasteInto(destId) {
+  // 1) 软件内复制/剪切
+  //    这个软件只登记路径、不搬磁盘文件，所以「复制」在库里就是一条新记录，
+  //    「剪切」是把原记录改归属 —— 两者对磁盘都零改动，这是设计前提。
+  if (S.clipboard?.keys?.length) {
+    const keys = [...S.clipboard.keys];
+    const isCut = !!S.clipboard.cut;
+    const fileIds = keys.filter((k) => k.startsWith('f:')).map((k) => k.slice(2));
+    const dirIds = keys.filter((k) => k.startsWith('d:')).map((k) => k.slice(2));
+    if (fileIds.length || dirIds.length) {
+      try {
+        let st = null;
+        if (isCut) {
+          // 剪切：直接改归属。moveMany 返回 {moved, state}，要取 .state
+          if (fileIds.length) {
+            const res = await api.files.moveMany(fileIds, destId);
+            st = res?.state || null;
+          }
+          for (const id of dirIds) {
+            if (id === destId) continue;
+            st = await api.courses.move(id, destId);
+          }
+        } else {
+          // 复制：在目标目录下建同名新记录，原记录留着
+          st = await duplicateInto(fileIds, dirIds, destId);
+        }
+        if (st) applyState(st);
+        clearSelection();
+        toast(isCut ? '已移动到此处' : '已复制到此处', 'ok');
+        // 剪切是一次性的，粘完就清空；复制可以反复粘贴
+        if (isCut) S.clipboard.keys = [];
+        return;
+      } catch (err) {
+        toast(err.message || '粘贴失败', 'error');
+        return;
+      }
+    }
+  }
+
+  // 2) 系统剪贴板里的文件
+  let paths = [];
+  try {
+    paths = await api.clipboard.readFiles();
+  } catch { /* 读不到就当没有 */ }
+
+  if (!paths.length) {
+    toast('剪贴板里没有文件。可以选中文件按 Ctrl+C，或在资源管理器里复制文件后重试');
+    return;
+  }
+  await importDroppedPaths(paths, destId);
+}
+
+/**
+ * 哪些程序是「编辑器」—— 它们接受一个文件夹参数，把整个项目打开。
+ *
+ * 只有这类程序才该在检测到项目时收到项目根；把项目文件夹丢给 Word、
+ * Acrobat 那种程序是没有意义的。注册表来的候选拿不到类别信息，
+ * 只能按 exe 文件名认，所以这里列的是各家编辑器的进程名。
+ */
+const EDITOR_EXE_NAMES = [
+  'code', 'cursor', 'windsurf', 'trae', 'zcode', 'fleet', 'zed',
+  'notepad++', 'sublime_text', 'atom', 'brackets', 'hbuilderx', 'qtcreator',
+  'pycharm', 'idea', 'webstorm', 'goland', 'clion', 'rider', 'phpstorm',
+  'rubymine', 'datagrip', 'rustrover', 'aqua', 'devenv', 'androidstudio',
+  'rstudio', 'spyder', 'eclipse', 'emacs', 'vim', 'gvim', 'nvim', 'geany',
+];
+
+/** 内置编辑器里按文件夹工作的那几个（key 形式） */
+const EDITOR_KEYS = new Set(['vscode', 'cursor', 'notepadpp', 'sublime']);
+
+function isEditorProgram(nameOrKey) {
+  const s = String(nameOrKey || '');
+  if (EDITOR_KEYS.has(s.toLowerCase())) return true;
+  const base = s.split(/[\\/]/).pop().replace(/\.exe$/i, '').toLowerCase().trim();
+  // 精确匹配，或者「关键字 + 后缀」——国内版程序常叫「Trae CN」「ZCode」，
+  // 目录里还会出现 pycharm64 / idea64 这种带位数后缀的。
+  return EDITOR_EXE_NAMES.some((k) => (
+    base === k
+    || base.startsWith(`${k} `)
+    || base.startsWith(`${k}-`)
+    || base.startsWith(`${k}_`)
+    || /^\d+$/.test(base.slice(k.length)) && base.startsWith(k)
+  ));
+}
+
+/**
+ * 弹出「打开方式」菜单。
+ *
+ * 文件：先问注册表「这个扩展名有哪些程序能开」（OpenWithList /
+ *   OpenWithProgids / 默认关联），把这些列出来 —— 也就是 Windows
+ *   自己在「打开方式」里显示的那一份，不用让用户去文件夹里翻。
+ *   再补上软件自己支持的编辑器（VS Code 等）。
+ * 目录：没有系统关联，只列编辑器。
+ *
+ * 项目：如果这个文件属于某个项目（往上找得到 package.json / .git /
+ *   requirements.txt 之类），编辑器类程序会改成打开**整个项目文件夹**。
+ *   只丢一个单文件进去，同目录的兄弟模块、venv、node_modules 全在
+ *   作用域外，一跑就报「找不到依赖库」。
+ */
+async function showOpenWith(id, kind, x, y) {
+  const defaultKey = currentPreview?.defaultEditor || setting('defaultEditor');
+
+  const [editorsRes, assocRes, projRes] = await Promise.allSettled([
+    api.files.editors(),
+    kind === 'file' ? api.files.editorsForFile(id) : api.files.editorsForDir(),
+    kind === 'file' ? api.files.project(id) : api.courses.project(id),
+  ]);
+
+  if (editorsRes.status === 'rejected' && assocRes.status === 'rejected') {
+    toast('读取可用程序失败', 'error');
+    return;
+  }
+
+  const editors = editorsRes.status === 'fulfilled' ? editorsRes.value : [];
+  const assoc = assocRes.status === 'fulfilled' ? (assocRes.value || []) : [];
+  /* 只要在项目里就给二级菜单，**包括文件正好在项目根这一层**。
+   * 以前这里排除了 isRoot，理由是「文件本来就在根，还用得着强调项目吗」。
+   * 实际恰恰相反：`edu-warning/app.py` 这种「项目根本身就是一个目录」的
+   * 情况最常见，而 `code app.py` 和 `code edu-warning` 是两个完全不同的
+   * 效果（后者才载入整个工作区）。用户反馈「项目里的文件都没有二级菜单」，
+   * 抓的就是这条。 */
+  const project = projRes.status === 'fulfilled' ? (projRes.value || null) : null;
+
+  const items = [];
+  // 用来去重：同一个程序可能在注册表里和编辑器列表里各出现一次
+  const seenExe = new Set();
+  const seenBase = new Set();
+  const baseName = (p) => String(p || '').split(/[\\/]/).pop().toLowerCase();
+
+  // 内置编辑器认得的那些程序，用它们的名字覆盖注册表里的粗糙名字
+  // （注册表把 notepad.exe 叫 "Notepad.exe"，我们这儿叫「记事本」）。
+  // 同时按文件名记一份：Windows 11 的记事本在注册表里登记的是
+  // WindowsApps 下的 UWP 版，而 C:\Windows\notepad.exe 只是个转发 stub，
+  // 路径不同但其实是同一个程序，只按路径去重会重复列两遍。
+  const prettyNames = new Map();
+  const prettyByBase = new Map();
+  for (const ed of editors) {
+    for (const p of [ed.exe, ed.guiExe]) {
+      if (!p) continue;
+      prettyNames.set(String(p).toLowerCase(), ed.label);
+      prettyByBase.set(baseName(p), ed.label);
+    }
+  }
+
+  /**
+   * 打开一个条目。target 可以是内置编辑器的 key，也可以是完整 exe 路径。
+   * mode 显式给 'project' / 'file'，用来区分「打开整个项目」还是「只开这个文件」；
+   * 不传就按老规矩：编辑器 + 文件在项目里 → 打开整个项目，主进程会换成项目根。
+   * 目录本来就整个交给程序，不需要再换。
+   */
+  const open = (target, label, mode) => async () => {
+    const asProject = mode
+      ? mode === 'project'
+      : (!!project && isEditorProgram(target));
+    try {
+      if (kind === 'dir') {
+        await api.courses.run(id, target, asProject ? 'project' : undefined);
+      } else {
+        await api.files.run(id, target, asProject ? 'project' : undefined);
+      }
+      toast(`已用 ${label} 打开`, 'ok');
+    } catch (err) {
+      toast(err.message || '打开失败', 'error');
+    }
+  };
+
+  /**
+   * 一个编辑器条目。
+   *
+   * 目标在项目里的时候，光给「打开整个项目」不够用：有时候只想看这一个
+   * 文件 / 这一层子目录，把整个项目（含 node_modules / venv）拖进编辑器
+   * 反而慢。所以挂一个二级菜单让用户自己挑：
+   *   - 打开整个项目（点父项本身也是这个，保持少点一次的手感）
+   *   - 单独打开这个文件 / 只打开这个文件夹
+   *
+   * 不在项目里的文件、非编辑器程序（记事本之类）没有这个区别，
+   * 还是一个普通条目。
+   *
+   * baseLabel 是菜单上显示的文字（可能带「默认」标记），plainLabel 是用来
+   * 拼 toast 的干净名字 —— 弹「已用 VS Code（默认）打开」太啰嗦了。
+   */
+  const editorEntry = (target, baseLabel, plainLabel = baseLabel) => {
+    if (!project || !isEditorProgram(target)) {
+      return { label: baseLabel, action: open(target, plainLabel) };
+    }
+    // 目录和文件的第二项措辞要分开，不然「单独打开这个文件」点的是一个文件夹
+    const solo = kind === 'dir'
+      ? { label: '只打开这个文件夹', mode: 'dir' }
+      : { label: '单独打开这个文件', mode: 'file' };
+    return {
+      label: baseLabel,
+      action: open(target, plainLabel, 'project'),
+      children: [
+        { label: '打开整个项目', action: open(target, plainLabel, 'project') },
+        { label: solo.label, action: open(target, plainLabel, solo.mode) },
+      ],
+    };
+  };
+
+  // 1) 系统登记过、能打开这个扩展名的程序
+  for (const app of assoc) {
+    const lower = String(app.exe || '').toLowerCase();
+    if (!lower || seenExe.has(lower)) continue;
+    const base = baseName(app.exe);
+    // 同名程序已经列过了（UWP 版 / 传统版指向同一个软件）
+    if (prettyByBase.has(base) && seenBase.has(base)) continue;
+    seenExe.add(lower);
+    if (prettyByBase.has(base)) seenBase.add(base);
+    const label = prettyNames.get(lower) || prettyByBase.get(base) || app.label;
+    /* 所有注册表项都走同一条路：启动这个 exe 打开文件。
+       和内置编辑器那种「按项目打开整个文件夹」不同 —— 注册表给出的就是
+       一个具体程序，直接给它文件最不容易出岔子。 */
+    items.push(editorEntry(app.exe, label + (app.isDefault ? '（系统默认）' : ''), label));
+  }
+
+  // 2) 软件内置支持的编辑器
+  const editorItems = editors
+    .filter((ed) => ed.available)
+    // 资源管理器打开目录有意义，打开文件就多余了（已有「在文件夹中显示」）
+    .filter((ed) => !(kind === 'file' && ed.key === 'explorer'))
+    .filter((ed) => {
+      // 已经在系统关联列表里的就不重复列了（.CMD 和 .exe 指向同一程序）
+      const exe = String(ed.guiExe || ed.exe || '').toLowerCase();
+      if (!exe) return true;
+      if (seenExe.has(exe)) return false;
+      // 同名但路径不同（UWP 版记事本）也算同一个
+      return !seenBase.has(baseName(exe));
+    })
+    .map((ed) => editorEntry(ed.key, ed.label + (ed.key === defaultKey ? '（默认）' : ''), ed.label));
+
+  if (editorItems.length) {
+    if (items.length) items.push({ sep: true });
+    items.push(...editorItems);
+  }
+
+  if (!items.length) {
+    items.push({ label: '没有找到能打开它的程序', disabled: true });
+  }
+
+  if (kind === 'file') {
+    items.push({ sep: true });
+    items.push({
+      label: project ? '用系统默认程序打开这个文件' : '用系统默认程序打开',
+      icon: '<path d="M14 4h6v6"/><path d="M20 4l-8 8"/>',
+      action: () => api.files.openExternal(id).catch((x) => toast(x.message, 'error')),
+    });
+    // 兜底：系统里实在没登记过，才让用户自己去挑一个 exe
+    if (!assoc.length) {
+      items.push({
+        label: '浏览本机程序…',
+        icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/>',
+        action: async () => {
+          try {
+            const exe = await api.files.pickProgram(id);
+            if (!exe) return;
+            const asProject = !!project && isEditorProgram(exe);
+            await api.files.run(id, exe, asProject ? 'project' : undefined);
+            toast(`已用 ${exe.split(/[\\/]/).pop()} 打开`, 'ok');
+          } catch (err) {
+            toast(err.message || '打开失败', 'error');
+          }
+        },
+      });
+    }
+  }
+
+  showCtx(Math.round(x), Math.round(y), items);
+}
+
+/** 弹出重复文件对话框，返回 'skip' | 'replace' | 'allow'，取消则返回 null */
+function askDuplicate(duplicates) {
+  return new Promise((resolve) => {
+    const modal = $('#dupModal');
+    $('#dupCount').textContent = String(duplicates.length);
+    $('#dupList').innerHTML = duplicates
+      .map((d) => `<div>${escapeHtml(d.name)}</div>`)
+      .join('');
+    modal.hidden = false;
+
+    const done = (val) => {
+      modal.hidden = true;
+      $('#dupChoices').removeEventListener('click', onClick);
+      $('#btnDupClose').removeEventListener('click', onCancel);
+      $('#btnDupCancel').removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onBackdrop);
+      resolve(val);
+    };
+    const onClick = (e) => {
+      const card = e.target.closest('.choice-card');
+      if (card) done(card.dataset.choice);
+    };
+    const onCancel = () => done(null);
+    const onBackdrop = (e) => { if (e.target === modal) done(null); };
+
+    $('#dupChoices').addEventListener('click', onClick);
+    $('#btnDupClose').addEventListener('click', onCancel);
+    $('#btnDupCancel').addEventListener('click', onCancel);
+    modal.addEventListener('click', onBackdrop);
+  });
+}
+
+/* ============================================================
+   目录
+   ============================================================ */
+const SWATCHES = [
+  '#5b8def', '#7b6cf6', '#c06be0', '#e86ba8', '#ef7b6b',
+  '#f0a44f', '#e0c04a', '#6cc08a', '#4fb8b8', '#6b8a9e',
+];
+
+function openCourseModal(mode = 'create', course = null, parentId = null) {
+  S.courseModal.mode = mode;
+  S.courseModal.id = course?.id || null;
+  S.courseModal.color = course?.color || SWATCHES[0];
+  S.courseModal.parentId = course?.parentId ?? parentId ?? null;
+
+  const parent = S.courseModal.parentId
+    ? S.courses.find((c) => c.id === S.courseModal.parentId)
+    : null;
+  const hint = parent ? ` · 在「${parent.name}」下` : '';
+
+  $('#courseModalTitle').textContent =
+    mode === 'create' ? `新建目录${hint}` : '重命名目录';
+  $('#courseNameInput').value = course?.name || '';
+  $('#courseNameInput').placeholder = parent
+    ? `例如：第 ${childrenOf(parent.id).length + 1} 章`
+    : '例如：数据结构';
+  $('#btnCourseSave').textContent = mode === 'create' ? '创建' : '保存';
+
+  $('#swatches').innerHTML = SWATCHES
+    .map(
+      (c) => `<button class="swatch ${c === S.courseModal.color ? 'is-active' : ''}"
+        style="background:${c}" data-color="${c}"></button>`,
+    )
+    .join('');
+
+  $('#courseModal').hidden = false;
+  setTimeout(() => $('#courseNameInput').focus(), 60);
+}
+
+async function saveCourse() {
+  const name = $('#courseNameInput').value.trim();
+  if (!name) {
+    toast('请输入目录名称', 'error');
+    return;
+  }
+  try {
+    let next;
+    if (S.courseModal.mode === 'create') {
+      next = await api.courses.create(name, S.courseModal.color, S.courseModal.parentId);
+      // 新建后自动展开父目录，让新节点可见
+      if (S.courseModal.parentId) S.collapsed.delete(S.courseModal.parentId);
+    } else {
+      next = await api.courses.rename(S.courseModal.id, name);
+      next = await api.courses.setColor(S.courseModal.id, S.courseModal.color);
+    }
+    applyState(next);
+    $('#courseModal').hidden = true;
+    toast(S.courseModal.mode === 'create' ? '目录已创建' : '已更新', 'ok');
+  } catch (err) {
+    toast(err.message || '操作失败', 'error');
+  }
+}
+
+/**
+ * 处理一次 Esc：从最上层的浮层开始，关掉第一个开着的。
+ *
+ * 抽成函数是因为有两个入口：
+ *   1. 主文档的 keydown（正常情况）
+ *   2. 主进程 before-input-event 转发来的（焦点在 PDF iframe 里时，
+ *      主文档收不到键盘事件，只能靠主进程代收）
+ * 两个入口共用同一套优先级，行为才一致。
+ */
+function handleEscape() {
+  closeCtx();
+  // 确认框自己在捕获阶段处理 ESC，这里不要重复处理
+  if (!$('#confirmModal').hidden) return;
+  // 更新公告放最前面：它是启动时弹的，其他弹窗都还没开
+  if (!$('#changelogModal').hidden) { closeChangelog(); return; }
+  if (!$('#overlay').hidden) { closePreview(); return; }
+  // 走取消按钮，确保挂起的 Promise 被正常 resolve
+  if (!$('#delModal').hidden) { $('#btnDelCancel').click(); return; }
+  if (!$('#dupModal').hidden) { $('#btnDupCancel').click(); return; }
+  if (!$('#detailModal').hidden) { $('#detailModal').hidden = true; return; }
+  if (!$('#newFileModal').hidden) { $('#newFileModal').hidden = true; return; }
+  if (!$('#dupeModal').hidden) { $('#dupeModal').hidden = true; return; }
+  if (!$('#relocateModal').hidden) { $('#relocateModal').hidden = true; relocFileId = null; return; }
+  if (!$('#importModal').hidden) { $('#importModal').hidden = true; return; }
+  if (!$('#shortcutsModal').hidden) { $('#shortcutsModal').hidden = true; return; }
+  if (!$('#settingsModal').hidden) { $('#settingsModal').hidden = true; return; }
+  if (!$('#courseModal').hidden) { $('#courseModal').hidden = true; }
+}
+
+/* ============================================================
+   事件绑定
+   ============================================================ */
+function bindEvents() {
+  /* 卡片悬停信息（归属 + 磁盘位置 + 大小） */
+  bindHoverTips();
+
+  /* 窗口控制 */
+  $('#btnMin').addEventListener('click', () => api.win.minimize());
+  $('#btnMax').addEventListener('click', () => api.win.maximize());
+  $('#btnClose').addEventListener('click', () => api.win.close());
+
+  /* 侧栏导航 */
+  $$('.nav-item[data-view]').forEach((el) => {
+    el.addEventListener('click', () => {
+      S.view = { type: el.dataset.view, courseId: null };
+      // 回收站是独立视图，需要换掉主区的 class
+      document.body.classList.toggle('trash-view', S.view.type === 'trash');
+      saveLastView();
+      render();
+    });
+  });
+
+  /* 目录树：展开 / 折叠 */
+  $('#courseList').addEventListener('click', async (e) => {
+    const caret = e.target.closest('[data-caret]');
+    if (caret) {
+      e.stopPropagation();
+      const id = caret.dataset.caret;
+      if (S.collapsed.has(id)) S.collapsed.delete(id);
+      else S.collapsed.add(id);
+      renderSidebar();
+      return;
+    }
+
+    const more = e.target.closest('[data-more]');
+    if (more) {
+      e.stopPropagation();
+      const id = more.dataset.more;
+      const node = S.courses.find((c) => c.id === id);
+      if (!node) return;
+      const r = more.getBoundingClientRect();
+      const hasKids = childrenOf(node.id).length > 0;
+
+      // 磁盘位置：导入来的有 sourcePath，手工建的从下面的文件往上推
+      let dirOnDisk = null;
+      try {
+        dirOnDisk = (await api.courses.dir(node.id))?.dir || null;
+      } catch { /* 推不出来就不显示相关条目 */ }
+
+      const items = [
+        {
+          label: '新建子目录',
+          icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/><path d="M12 11v5M9.5 13.5h5"/>',
+          action: () => openCourseModal('create', null, node.id),
+        },
+        {
+          label: '重命名',
+          icon: '<path d="M4 20h4l10-10-4-4L4 16v4z"/>',
+          action: () => openCourseModal('rename', node),
+        },
+        {
+          label: '移到顶层',
+          icon: '<path d="M12 20V6M7 11l5-5 5 5"/>',
+          action: () => (node.parentId
+            ? api.courses.move(node.id, null)
+              .then(applyState)
+              .then(() => toast('已移到顶层', 'ok'))
+              .catch((x) => toast(x.message, 'error'))
+            : toast('已经在顶层了')),
+        },
+        dirOnDisk
+          ? {
+              label: '在电脑上显示文件夹',
+              icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/>',
+              action: () => api.courses.reveal(node.id).catch((x) => toast(x.message, 'error')),
+            }
+          : null,
+        dirOnDisk
+          ? {
+              label: '用其他软件打开',
+              icon: '<path d="M8 5l11 7-11 7V5z"/>',
+              action: () => showOpenWith(node.id, 'dir', r.left, r.bottom + 4),
+            }
+          : null,
+        { sep: true },
+        {
+          label: hasKids ? '删除目录及子目录' : '删除目录',
+          danger: true,
+          icon: '<path d="M5 7h14M9 7V5h6v2M7 7l1 12h8l1-12"/>',
+          action: () => confirmDeleteCourse(node),
+        },
+      ];
+      showCtx(r.left - 150, r.bottom + 4, items);
+      return;
+    }
+
+    const row = e.target.closest('[data-course]');
+    if (!row) return;
+    S.view = { type: 'course', courseId: row.dataset.course };
+    S.searchHits = null;
+    saveLastView();
+    render();
+  });
+
+  /* 回收站卡片按钮 */
+  $('#grid').addEventListener('click', async (e) => {
+    const restore = e.target.closest('[data-restore]');
+    if (restore) {
+      e.stopPropagation();
+      try {
+        applyState(await api.trash.restore(restore.dataset.restore));
+        toast('已还原', 'ok');
+      } catch (err) {
+        toast(err.message || '还原失败', 'error');
+      }
+      return;
+    }
+
+    const purge = e.target.closest('[data-purge]');
+    if (purge) {
+      e.stopPropagation();
+      if (!await askConfirm({
+        title: '彻底删除',
+        lead: '这个文件会从库里彻底清掉，无法恢复。确定吗？',
+        okText: '彻底删除',
+        danger: true,
+      })) return;
+      try {
+        applyState(await api.trash.purge(purge.dataset.purge));
+        toast('已彻底删除', 'ok');
+      } catch (err) {
+        toast(err.message || '删除失败', 'error');
+      }
+    }
+  });
+
+  /* 清空回收站 */
+  $('#btnEmptyTrash').addEventListener('click', async () => {
+    if (!S.trash.length) return;
+    if (!await askConfirm({
+      title: '清空回收站',
+      lead: `回收站里的 ${S.trash.length} 项会被全部清掉，无法恢复。确定吗？`,
+      okText: '清空',
+      danger: true,
+    })) return;
+    try {
+      applyState(await api.trash.empty());
+      toast('回收站已清空', 'ok');
+    } catch (err) {
+      toast(err.message || '清空失败', 'error');
+    }
+  });
+
+  /* 重复文件检测 */
+  $('#btnFindDupes').addEventListener('click', () => findDuplicates(false));
+  $('#navDupes').addEventListener('click', () => findDuplicates(true));
+
+  $('#dupeGroups').addEventListener('change', (e) => {
+    const input = e.target.closest('input[type="radio"]');
+    if (!input) return;
+    const gi = Number(input.name.replace('keep-', ''));
+    dupeKeep.set(gi, input.value);
+    // 刷新该组的保留/删除标记
+    const group = $(`.dupe-group[data-group="${gi}"]`);
+    group.querySelectorAll('.dupe-file').forEach((row) => {
+      const isKeep = row.dataset.file === input.value;
+      row.classList.toggle('is-keep', isKeep);
+      row.querySelector('.dupe-tag').textContent = isKeep ? '保留' : '删除';
+    });
+    updateDupeFooter();
+  });
+
+  const closeDupe = () => { $('#dupeModal').hidden = true; };
+  $('#btnDupeClose').addEventListener('click', closeDupe);
+  $('#btnDupeCancel').addEventListener('click', closeDupe);
+  $('#btnDupeRemove').addEventListener('click', removeDuplicates);
+
+  /* 目录拖拽：拖到某个目录上 = 成为它的子目录；拖到空白 = 移到顶层
+   *
+   * 这里同时要接住两种来源：
+   *   1. 侧栏内部拖目录（dragId）
+   *   2. 从右边网格拖文件/文件夹过来（gridDrag）
+   * 第二种是「把文件拖到左边目标目录里」这个交互，两个变量都在
+   * bindEvents 的作用域里，所以能直接读。 */
+  let dragId = null;
+
+  /* 网格里的拖拽状态。声明放在这里是因为侧栏的处理器要用它判断
+   * 「这次拖拽是从右边网格来的吗」，比网格自己的事件绑定早。 */
+  let gridDrag = null; // { kind: 'file'|'dir', id }
+
+  const clearDropMarks = () => {
+    $$('.tree-row').forEach((r) => {
+      r.classList.remove('drop-into', 'drop-before', 'drop-after');
+    });
+    $('#courseList').classList.remove('drop-root');
+  };
+
+  /** 当前拖拽是不是从网格来的（拖文件/文件夹到侧栏） */
+  const isGridDrag = () => !!gridDrag;
+
+  $('#courseList').addEventListener('dragstart', (e) => {
+    const row = e.target.closest('[data-course]');
+    if (!row) return;
+    // 从「更多」按钮或折叠箭头上按下时不启动拖拽
+    if (e.target.closest('[data-more]') || e.target.closest('[data-caret]')) {
+      e.preventDefault();
+      return;
+    }
+    dragId = row.dataset.course;
+    row.classList.add('is-dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dragId);
+  });
+
+  $('#courseList').addEventListener('dragend', () => {
+    dragId = null;
+    $$('.tree-row').forEach((r) => r.classList.remove('is-dragging'));
+    clearDropMarks();
+  });
+
+  $('#courseList').addEventListener('dragover', (e) => {
+    const fromGrid = !!gridDrag;
+    if (!dragId && !fromGrid) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+
+    const row = e.target.closest('[data-course]');
+    clearDropMarks();
+
+    if (!row) {
+      // 空白区域 → 顶层。从网格拖过来时也可以落到顶层。
+      $('#courseList').classList.add('drop-root');
+      return;
+    }
+
+    const id = row.dataset.course;
+
+    if (fromGrid) {
+      /* 从网格拖文件/文件夹过来：只有「放进这个目录」一种语义，
+       * 不做上下插入（文件没有「插到某个目录前面」的概念）。
+       * 拖的是目录本身时，不能放进它自己或它的子孙里。 */
+      if (gridDrag.kind === 'dir') {
+        if (id === gridDrag.id) return;
+        if (subtreeIds(gridDrag.id).has(id)) return;
+      }
+      row.classList.add('drop-into');
+      return;
+    }
+
+    // 侧栏内部拖目录：保留「插到前面/后面/放进里面」三种
+    if (id === dragId) return;
+    if (subtreeIds(dragId).has(id)) return;
+
+    const r = row.getBoundingClientRect();
+    const ratio = (e.clientY - r.top) / r.height;
+
+    if (ratio < 0.28) {
+      row.classList.add('drop-before');
+    } else if (ratio > 0.72) {
+      row.classList.add('drop-after');
+    } else {
+      row.classList.add('drop-into');
+    }
+  });
+
+  $('#courseList').addEventListener('dragleave', (e) => {
+    if (e.target === $('#courseList')) clearDropMarks();
+  });
+
+  $('#courseList').addEventListener('drop', async (e) => {
+    e.preventDefault();
+
+    /* ---- 从右边网格拖过来的文件/文件夹 ---- */
+    if (gridDrag) {
+      const row = e.target.closest('[data-course]');
+      /* 落在目录树的空白处 = 移到顶层（和「全部文件」导航项同义）。
+       * 以前这里直接返回、什么都不做，是因为那时文件必须有归属目录；
+       * 现在顶层是合法归属，空白处自然就该接住。 */
+      const destId = row ? row.dataset.course : null;
+      const { kind, id } = gridDrag;
+      const keys = draggedKeys();
+      gridDrag = null;
+      clearDropMarks();
+
+      if (kind === 'dir' && (destId === id || subtreeIds(id).has(destId))) {
+        toast('不能把文件夹移进它自己里面', 'error');
+        return;
+      }
+
+      try {
+        const fileIds = keys.filter((k) => k.startsWith('f:')).map((k) => k.slice(2));
+        const dirIds = keys.filter((k) => k.startsWith('d:')).map((k) => k.slice(2));
+        let st = null;
+        if (fileIds.length) {
+          const res = await api.files.moveMany(fileIds, destId);
+          st = res?.state || null;
+        }
+        for (const dirId of dirIds) {
+          if (dirId === destId) continue;
+          st = await api.courses.move(dirId, destId);
+        }
+        if (st) applyState(st);
+        // 展开目标目录，让用户看到东西确实进去了
+        if (destId) S.collapsed.delete(destId);
+        renderSidebar();
+        clearSelection();
+
+        const n = fileIds.length + dirIds.length;
+        toast(destId
+          ? `已移动 ${n} 项到「${courseOf(destId)?.name || '目标目录'}」`
+          : `已把 ${n} 项移到顶层`, 'ok');
+      } catch (err) {
+        toast(err.message || '移动失败', 'error');
+      }
+      return;
+    }
+
+    /* ---- 侧栏内部拖目录 ---- */
+    if (!dragId) return;
+    const movedId = dragId;
+    dragId = null;
+
+    const row = e.target.closest('[data-course]');
+    let targetParent = null;
+    let beforeId = null;
+
+    if (row) {
+      const overId = row.dataset.course;
+      if (overId === movedId) { clearDropMarks(); return; }
+      if (subtreeIds(movedId).has(overId)) { clearDropMarks(); return; }
+
+      if (row.classList.contains('drop-into')) {
+        targetParent = overId;
+      } else if (row.classList.contains('drop-before')) {
+        const over = S.courses.find((c) => c.id === overId);
+        targetParent = over?.parentId || null;
+        beforeId = overId;
+      } else if (row.classList.contains('drop-after')) {
+        const over = S.courses.find((c) => c.id === overId);
+        targetParent = over?.parentId || null;
+      } else {
+        // 落在行中间区域以外的安全兜底：当作放入
+        targetParent = overId;
+      }
+    }
+
+    clearDropMarks();
+
+    try {
+      const next = await api.courses.move(movedId, targetParent);
+      applyState(next);
+      if (targetParent) S.collapsed.delete(targetParent);
+      if (beforeId) reorderBefore(movedId, beforeId);
+      toast('已移动目录', 'ok');
+    } catch (err) {
+      toast(err.message || '移动失败', 'error');
+    }
+  });
+
+  /* 侧栏空白处右键：新建顶层目录 */
+  $('#courseList').addEventListener('contextmenu', (e) => {
+    if (e.target.closest('[data-course]')) return;
+    e.preventDefault();
+    showCtx(e.clientX, e.clientY, [
+      {
+        label: '新建顶层目录',
+        icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/><path d="M12 11v5M9.5 13.5h5"/>',
+        action: () => openCourseModal('create', null, null),
+      },
+    ]);
+  });
+
+  /* 面包屑导航 */
+  $('#crumbs').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-crumb]');
+    if (!btn) return;
+    const id = btn.dataset.crumb;
+    if (id === 'root') S.view = { type: 'all', courseId: null };
+    else S.view = { type: 'course', courseId: id };
+    S.searchHits = null;
+    saveLastView();
+    render();
+  });
+
+  /* 进入目录（子目录卡片双击 / 普通模式单击） */
+
+  /* 新建目录 */
+  $('#btnAddCourse').addEventListener('click', () => openCourseModal('create'));
+  $('#btnEmptyCreate').addEventListener('click', () => {
+    const act = $('#btnEmptyCreate').dataset.action;
+    if (act === 'import') openImportModal();
+    else openCourseModal('create');
+  });
+
+  /* 新建文件 */
+  $('#btnNewFile').addEventListener('click', openNewFileModal);
+  $('#btnNewFileClose').addEventListener('click', () => { $('#newFileModal').hidden = true; });
+  $('#btnNewFileCancel').addEventListener('click', () => { $('#newFileModal').hidden = true; });
+  $('#btnNewFileConfirm').addEventListener('click', createFile);
+  $('#newFileName').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') createFile();
+  });
+  $('#btnNewFileDir').addEventListener('click', async () => {
+    try {
+      const dir = await api.files.pickSaveDir();
+      if (!dir) return;
+      newFileState.dir = dir;
+      $('#newFileDirPath').textContent = dir;
+    } catch (err) {
+      toast(err.message || '选择失败', 'error');
+    }
+  });
+
+  /* 文件详情 */
+  $('#btnDetailClose').addEventListener('click', () => { $('#detailModal').hidden = true; });
+  $('#btnDetailDone').addEventListener('click', () => { $('#detailModal').hidden = true; });
+  $('#btnCopyPath').addEventListener('click', copyPath);
+  $('#btnDetailReveal').addEventListener('click', () => {
+    if (detailFileId) api.files.reveal(detailFileId).catch((e) => toast(e.message, 'error'));
+  });
+  $('#btnDetailOpen').addEventListener('click', () => {
+    if (detailFileId) api.files.openExternal(detailFileId).catch((e) => toast(e.message, 'error'));
+  });
+
+  /* 卡片上的详情按钮 */
+  $('#grid').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-detail]');
+    if (!btn) return;
+    e.stopPropagation();
+    e.preventDefault();
+    openDetail(btn.dataset.detail);
+  }, true);
+
+  /* 导入 */
+  $('#btnImport').addEventListener('click', openImportModal);
+  $('#btnImportClose').addEventListener('click', () => { $('#importModal').hidden = true; });
+  $('#btnImportCancel').addEventListener('click', () => { $('#importModal').hidden = true; });
+  $('#btnPickFiles').addEventListener('click', async () => {
+    setPicked(await api.files.pickFiles());
+  });
+  $('#btnPickFolder').addEventListener('click', async () => {
+    setPicked(await api.files.pickFolder());
+    // 选了文件夹，「保留文件夹结构」默认打开
+    $('#buildTreeRow').hidden = !S.importPaths.length;
+    $('#swBuildTree').classList.add('is-on');
+  });
+  $('#swBuildTree').addEventListener('click', (e) => {
+    e.currentTarget.classList.toggle('is-on');
+  });
+  $('#btnImportConfirm').addEventListener('click', doImport);
+
+  /* 搜索 */
+  let searchTimer = null;
+  $('#searchInput').addEventListener('input', (e) => {
+    clearTimeout(searchTimer);
+    const v = e.target.value;
+    searchTimer = setTimeout(() => {
+      S.search = v;
+      runSearch();
+    }, 160);
+  });
+
+  // 搜索范围：名称 / 内容
+  $('#searchScope').addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn');
+    if (!btn) return;
+    $$('#searchScope .seg-btn').forEach((b) => b.classList.toggle('is-active', b === btn));
+    S.searchScope = btn.dataset.scope;
+    $('#searchInput').placeholder = S.searchScope === 'content'
+      ? '搜索文件内部的文字…'
+      : '搜索文件夹名、文件名…';
+    // 换了模式旧结果就不能用了
+    S.searchHits = null;
+    runSearch();
+  });
+
+  /* 类型筛选 */
+  $('#kindFilter').addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn');
+    if (!btn) return;
+    $$('.seg-btn').forEach((b) => b.classList.remove('is-active'));
+    btn.classList.add('is-active');
+    S.kindFilter = btn.dataset.kind;
+    // 切走时把二级分类归零，免得下次切回来还停在「Python」上
+    if (S.kindFilter !== 'doc') S.docKind = 'all';
+    if (S.kindFilter !== 'code') S.codeKind = 'all';
+    clearSelection();
+    renderMain();
+  });
+
+  /* 文档子分类 */
+  $('#docSubFilter').addEventListener('click', (e) => {
+    const btn = e.target.closest('.subfilter-btn');
+    if (!btn) return;
+    S.docKind = btn.dataset.dockey;
+    clearSelection();
+    renderMain();
+  });
+
+  /* 代码子分类 */
+  const codeBar = $('#codeSubFilter');
+  if (codeBar) {
+    codeBar.addEventListener('click', (e) => {
+      const btn = e.target.closest('.subfilter-btn');
+      if (!btn) return;
+      S.codeKind = btn.dataset.codekey;
+      clearSelection();
+      renderMain();
+    });
+  }
+
+  /* 返回上级 */
+  const goUp = () => {
+    if (S.view.type !== 'course' || !S.view.courseId) return;
+    const cur = courseOf(S.view.courseId);
+    S.view = cur && cur.parentId
+      ? { type: 'course', courseId: cur.parentId }
+      : { type: 'all', courseId: null };
+    S.searchHits = null;
+    clearSelection();
+    saveLastView();
+    render();
+  };
+  $('#btnBack').addEventListener('click', goUp);
+
+  /* 多选模式开关 */
+  const setSelectMode = (on) => {
+    S.selectMode = on;
+    $('#btnSelectMode').classList.toggle('is-active', on);
+    document.body.classList.toggle('select-mode', on);
+    if (!on) clearSelection();
+    renderMain();
+  };
+  $('#btnSelectMode').addEventListener('click', () => setSelectMode(!S.selectMode));
+
+  /* 卡片（文件夹和文件都算）：普通模式单击进入/打开；多选模式单击选择 */
+  $('#grid').addEventListener('click', (e) => {
+    // 框选刚结束时浏览器补发的那个 click 不要清空选择
+    if (Date.now() - marqueeEndedAt < 120) {
+      marqueeEndedAt = 0;
+      return;
+    }
+
+    const card = e.target.closest('[data-file], [data-dir]');
+    if (!card) {
+      // 点空白处取消选择
+      if (S.selectMode) clearSelection();
+      return;
+    }
+    const key = cardKey(card);
+
+    // 普通模式且没按修饰键：文件打开预览，文件夹进入
+    const plain = !e.shiftKey && !e.ctrlKey && !e.metaKey;
+    if (plain && !S.selectMode) {
+      if (card.dataset.file) openPreview(card.dataset.file);
+      else enterDir(card.dataset.dir);
+      return;
+    }
+
+    if (e.shiftKey && S.anchor.id) {
+      selectRange(key);
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      if (hasKey(key)) removeKey(key);
+      else addKey(key);
+      S.anchor = { id: key, list: 'grid' };
+      syncSelectedClass();
+      updateSelBar();
+      return;
+    }
+    // 多选模式下的普通单击：只选这一个
+    S.selected.clear();
+    S.selectedDirs.clear();
+    addKey(key);
+    S.anchor = { id: key, list: 'grid' };
+    syncSelectedClass();
+    updateSelBar();
+  });
+
+  $('#grid').addEventListener('dblclick', (e) => {
+    const card = e.target.closest('[data-file], [data-dir]');
+    if (!card) return;
+    if (card.dataset.file) openPreview(card.dataset.file);
+    else enterDir(card.dataset.dir);
+  });
+
+  $('#grid').addEventListener('keydown', (e) => {
+    const card = e.target.closest('[data-file], [data-dir]');
+    if (!card) return;
+    if (e.key === 'Enter') {
+      if (card.dataset.file) openPreview(card.dataset.file);
+      else enterDir(card.dataset.dir);
+      return;
+    }
+    if (e.key === 'a' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      S.shownIds.forEach((k) => addKey(k));
+      syncSelectedClass();
+      updateSelBar();
+      return;
+    }
+    if (e.key === 'F2') {
+      // 和资源管理器一致：选中一个文件按 F2 改名
+      e.preventDefault();
+      const id = card.dataset.file;
+      if (id) {
+        const f = S.files.find((x) => x.id === id);
+        if (f) openRenameModal(f);
+      } else {
+        const node = S.courses.find((c) => c.id === card.dataset.dir);
+        if (node) openCourseModal('rename', node);
+      }
+      return;
+    }
+    if (e.key === 'Escape') {
+      clearSelection();
+    }
+  });
+
+  /* 重新定位弹窗 */
+  const closeReloc = () => { $('#relocateModal').hidden = true; relocFileId = null; };
+  $('#btnRelocClose').addEventListener('click', closeReloc);
+  $('#btnRelocSearch').addEventListener('click', runRelocateSearch);
+  $('#relocList').addEventListener('click', (e) => {
+    const item = e.target.closest('[data-path]');
+    if (item) bindRelocate(item.dataset.path);
+  });
+  $('#btnRelocPick').addEventListener('click', async () => {
+    if (!relocFileId) return;
+    try {
+      const state = await api.files.pickRelocate(relocFileId);
+      if (!state) return;
+      applyState(state);
+      $('#relocateModal').hidden = true;
+      toast('已重新定位', 'ok');
+      if (S.previewFileId) openPreview(S.previewFileId);
+    } catch (err) {
+      toast(err.message || '重新定位失败', 'error');
+    }
+  });
+
+  /* 多选操作条 */
+  $('#btnSelClear').addEventListener('click', clearSelection);
+  $('#btnSelRemove').addEventListener('click', removeSelected);
+  $('#btnSelMove').addEventListener('click', moveSelected);
+
+  /* 鼠标框选：在空白处按下拖出一个矩形，划过的卡片被选中 */
+  const content = $('#content');
+  const marquee = $('#marquee');
+  let mq = null; // { x0, y0, base:Set, moved }
+
+  content.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (S.view.type === 'trash') return;
+    // 从卡片、按钮上按下不启动框选
+    if (e.target.closest('.card') || e.target.closest('button')) return;
+    if (e.target.closest('.empty')) return;
+
+    const rect = content.getBoundingClientRect();
+    const addMode = e.ctrlKey || e.metaKey;
+    mq = {
+      x0: e.clientX - rect.left + content.scrollLeft,
+      y0: e.clientY - rect.top + content.scrollTop,
+      baseFiles: new Set(addMode ? S.selected : []),
+      baseDirs: new Set(addMode ? S.selectedDirs : []),
+      moved: false,
+      rect,
+    };
+  });
+
+  content.addEventListener('mousemove', (e) => {
+    if (!mq) return;
+    const { rect } = mq;
+    const x1 = e.clientX - rect.left + content.scrollLeft;
+    const y1 = e.clientY - rect.top + content.scrollTop;
+
+    if (!mq.moved) {
+      if (Math.abs(x1 - mq.x0) < 4 && Math.abs(y1 - mq.y0) < 4) return;
+      mq.moved = true;
+      marquee.hidden = false;
+      document.body.classList.add('is-marquee');
+    }
+
+    const left = Math.min(mq.x0, x1);
+    const top = Math.min(mq.y0, y1);
+    const w = Math.abs(x1 - mq.x0);
+    const h = Math.abs(y1 - mq.y0);
+    marquee.style.transform = `translate(${left}px, ${top}px)`;
+    marquee.style.width = `${w}px`;
+    marquee.style.height = `${h}px`;
+
+    // 命中检测：卡片与矩形有交集即算选中
+    const box = { left: rect.left + left - content.scrollLeft, top: rect.top + top - content.scrollTop, right: 0, bottom: 0 };
+    box.right = box.left + w;
+    box.bottom = box.top + h;
+
+    S.selected = new Set(mq.baseFiles);
+    S.selectedDirs = new Set(mq.baseDirs);
+    for (const card of $$('.card[data-file], .card[data-dir]')) {
+      const r = card.getBoundingClientRect();
+      if (r.right > box.left && r.left < box.right && r.bottom > box.top && r.top < box.bottom) {
+        addKey(cardKey(card));
+      }
+    }
+    syncSelectedClass();
+    updateSelBar();
+  });
+
+  const endMarquee = () => {
+    if (!mq) return;
+    const moved = mq.moved;
+    mq = null;
+    marquee.hidden = true;
+    document.body.classList.remove('is-marquee');
+    if (moved) {
+      const keys = [...S.shownIds].filter((k) => hasKey(k));
+      S.anchor = { id: keys[keys.length - 1] || null, list: 'grid' };
+      marqueeEndedAt = Date.now();
+    }
+  };
+  window.addEventListener('mouseup', endMarquee);
+  window.addEventListener('blur', endMarquee);
+
+  /* 网格内拖拽：把文件/文件夹拖到文件夹卡片上 = 移进去；
+     拖到空白处 = 移到「全部文件」顶层。 */
+  let gridDropTarget = null; // 高亮的文件夹卡片
+
+  /** 拖拽是否正悬在回收站导航项上 */
+  let overTrash = false;
+  /** 拖拽是否正悬在「全部文件」导航项上（= 移到顶层） */
+  let overAll = false;
+
+  const clearGridDrop = () => {
+    if (gridDropTarget) gridDropTarget.classList.remove('drop-into');
+    gridDropTarget = null;
+    overTrash = false;
+    overAll = false;
+    $('#content')?.classList.remove('drop-root');
+    $('#grid')?.classList.remove('drop-root');
+    $('#navTrash')?.classList.remove('drop-trash');
+    $('#navAll')?.classList.remove('drop-top');
+  };
+
+  /** 当前拖拽带上了哪些条目：多选时拖一个就带上整批 */
+  const draggedKeys = () => {
+    if (!gridDrag) return [];
+    const key = `${gridDrag.kind === 'dir' ? 'd' : 'f'}:${gridDrag.id}`;
+    if (hasKey(key)) {
+      return [...S.shownIds].filter((k) => hasKey(k));
+    }
+    return [key];
+  };
+
+  $('#grid').addEventListener('dragstart', (e) => {
+    const card = e.target.closest('[data-file], [data-dir]');
+    if (!card) return;
+    if (e.target.closest('.card-info-btn')) {
+      e.preventDefault();
+      return;
+    }
+    gridDrag = card.dataset.file
+      ? { kind: 'file', id: card.dataset.file }
+      : { kind: 'dir', id: card.dataset.dir };
+    card.classList.add('is-dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', gridDrag.id);
+  });
+
+  $('#grid').addEventListener('dragend', () => {
+    $$('#grid .card').forEach((c) => c.classList.remove('is-dragging'));
+    clearGridDrop();
+    gridDrag = null;
+    overTrash = false;
+    overAll = false;
+  });
+
+  /* ---- 拖到侧栏「回收站」= 删进回收站 ---- */
+  const trashNav = $('#navTrash');
+  if (trashNav) {
+    trashNav.addEventListener('dragover', (e) => {
+      if (!gridDrag) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'move';
+      if (!overTrash) {
+        clearGridDrop();
+        overTrash = true;
+        trashNav.classList.add('drop-trash');
+      }
+    });
+
+    trashNav.addEventListener('dragleave', () => {
+      if (!overTrash) return;
+      overTrash = false;
+      trashNav.classList.remove('drop-trash');
+    });
+
+    trashNav.addEventListener('drop', async (e) => {
+      if (!gridDrag) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const keys = draggedKeys();
+      trashNav.classList.remove('drop-trash');
+      overTrash = false;
+      gridDrag = null;
+
+      const fileIds = keys.filter((k) => k.startsWith('f:')).map((k) => k.slice(2));
+      const dirIds = keys.filter((k) => k.startsWith('d:')).map((k) => k.slice(2));
+      if (!fileIds.length && !dirIds.length) return;
+
+      // 拖进回收站 = 放进回收站（可恢复），不是彻底删除，所以不再二次确认
+      try {
+        let st = null;
+        if (fileIds.length) st = await api.files.removeMany(fileIds, true);
+        for (const id of dirIds) {
+          st = await api.courses.remove(id, true);
+        }
+        if (st) applyState(st);
+        clearSelection();
+        const what = [
+          dirIds.length ? `${dirIds.length} 个文件夹` : '',
+          fileIds.length ? `${fileIds.length} 个文件` : '',
+        ].filter(Boolean).join('和');
+        toast(`已把 ${what}放进回收站`, 'ok');
+      } catch (err) {
+        toast(err.message || '移入回收站失败', 'error');
+      }
+    });
+  }
+
+  /* ---- 拖到侧栏「全部文件」= 移到顶层 ---- */
+  const allNav = $('#navAll');
+  if (allNav) {
+    allNav.addEventListener('dragover', (e) => {
+      if (!gridDrag) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'move';
+      if (!overAll) {
+        clearGridDrop();
+        overAll = true;
+        allNav.classList.add('drop-top');
+      }
+    });
+
+    allNav.addEventListener('dragleave', () => {
+      if (!overAll) return;
+      overAll = false;
+      allNav.classList.remove('drop-top');
+    });
+
+    allNav.addEventListener('drop', async (e) => {
+      if (!gridDrag) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const keys = draggedKeys();
+      allNav.classList.remove('drop-top');
+      overAll = false;
+      gridDrag = null;
+
+      const fileIds = keys.filter((k) => k.startsWith('f:')).map((k) => k.slice(2));
+      const dirIds = keys.filter((k) => k.startsWith('d:')).map((k) => k.slice(2));
+      if (!fileIds.length && !dirIds.length) return;
+
+      /* 移到顶层：文件的 courseId 置 null，目录的 parentId 置 null。
+       * 注意区分返回值形状：files.moveMany 是 { moved, state }，
+       * courses.move 直接是 state。 */
+      try {
+        let st = null;
+        if (fileIds.length) {
+          const res = await api.files.moveMany(fileIds, null);
+          st = res?.state || null;
+        }
+        for (const id of dirIds) {
+          st = await api.courses.move(id, null);
+        }
+        if (st) applyState(st);
+        clearSelection();
+
+        const what = [
+          dirIds.length ? `${dirIds.length} 个文件夹` : '',
+          fileIds.length ? `${fileIds.length} 个文件` : '',
+        ].filter(Boolean).join('和');
+        toast(`已把 ${what}移到顶层`, 'ok');
+      } catch (err) {
+        toast(err.message || '移动失败', 'error');
+      }
+    });
+  }
+
+  /* ---- 从软件外拖入文件 / 文件夹 ---- */
+  const isExternalDrag = (e) => !gridDrag && Array.from(e.dataTransfer?.types || []).includes('Files');
+
+  // 拖放范围是整个内容区（#content），不是只盯着网格（#grid）：
+  // 网格可能只占内容区上半部分，空白处也应该能接住文件。
+  // 虚线提示也画在 #content 上，视觉上和可放置范围一致。
+  const dropZone = $('#content');
+
+  dropZone.addEventListener('dragenter', (e) => {
+    if (!isExternalDrag(e)) return;
+    e.preventDefault();
+    dropZone.classList.add('drop-root');
+  });
+
+  dropZone.addEventListener('dragover', (e) => {
+    // 外部拖入：始终允许，提示「复制」
+    if (isExternalDrag(e)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      dropZone.classList.add('drop-root');
+      return;
+    }
+    if (!gridDrag) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+
+    const target = e.target.closest('[data-dir]');
+    if (!target) {
+      // 空白处：落到顶层
+      clearGridDrop();
+      dropZone.classList.add('drop-root');
+      return;
+    }
+    dropZone.classList.remove('drop-root');
+
+    // 不能拖到自己身上，也不能拖进自己的子孙目录
+    const dragIsDir = gridDrag.kind === 'dir';
+    const invalid = dragIsDir && (
+      target.dataset.dir === gridDrag.id
+      || subtreeIds(gridDrag.id).has(target.dataset.dir)
+    );
+    if (invalid) {
+      clearGridDrop();
+      return;
+    }
+    if (gridDropTarget !== target) {
+      clearGridDrop();
+      gridDropTarget = target;
+      target.classList.add('drop-into');
+    }
+  });
+
+  dropZone.addEventListener('dragleave', (e) => {
+    // 只有真正离开整个内容区时才清标记，避免在卡片间移动时闪烁
+    if (!dropZone.contains(e.relatedTarget)) clearGridDrop();
+  });
+
+  dropZone.addEventListener('drop', async (e) => {
+    // 外部拖入优先：把文件登记到「当前目录」，拖到某个文件夹卡片上就进那个目录
+    if (isExternalDrag(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      const dropDir = e.target.closest('[data-dir]');
+      const destId = dropDir ? dropDir.dataset.dir
+        : (S.view.type === 'course' ? S.view.courseId : null);
+      const paths = Array.from(e.dataTransfer.files)
+        .map((file) => api.pathForFile(file))
+        .filter(Boolean);
+      dropZone.classList.remove('drop-root');
+      if (!paths.length) {
+        toast('没读到文件路径，可能是浏览器内部拖拽，请从资源管理器拖', 'error');
+        return;
+      }
+      await importDroppedPaths(paths, destId);
+      return;
+    }
+
+    if (!gridDrag) return;
+    e.preventDefault();
+    const keys = draggedKeys();
+    const target = gridDropTarget;
+    const toTop = !target;
+    clearGridDrop();
+
+    const fileIds = keys.filter((k) => k.startsWith('f:')).map((k) => k.slice(2));
+    const dirIds = keys.filter((k) => k.startsWith('d:')).map((k) => k.slice(2));
+    const destId = toTop ? null : target.dataset.dir;
+
+    gridDrag = null;
+    if (!fileIds.length && !dirIds.length) return;
+
+    try {
+      // moveMany 返回 {moved, state}；courses.move 返回 state 本身
+      let st = null;
+      if (fileIds.length) {
+        const res = await api.files.moveMany(fileIds, destId);
+        st = res?.state || null;
+      }
+      for (const id of dirIds) {
+        if (id === destId) continue;
+        st = await api.courses.move(id, destId);
+      }
+      const destName = destId
+        ? (target.querySelector('.card-name')?.textContent || '目标目录')
+        : '全部文件';
+      if (st) applyState(st);
+      clearSelection();
+      toast(`已移动到「${destName}」`, 'ok');
+    } catch (err) {
+      toast(err.message || '移动失败', 'error');
+    }
+  });
+
+  /* 右键菜单
+     挂在 #content 而不是 #grid：网格只跟卡片一样高，卡片下方那片空白
+     属于 .content 的 padding 区域，绑在 #grid 上右键就什么都不会弹。 */
+  $('#content').addEventListener('contextmenu', async (e) => {
+    // 侧栏、预览、弹窗里的右键不归这里管
+    if (e.target.closest('.preview-body, .modal, .sidebar, .topbar')) return;
+    const card = e.target.closest('[data-file]');
+
+    // 空白处 / 文件夹卡片：给出「粘贴」等操作
+    if (!card) {
+      e.preventDefault();
+      const dirCard = e.target.closest('[data-dir]');
+      const destId = dirCard ? dirCard.dataset.dir
+        : (S.view.type === 'course' ? S.view.courseId : null);
+      const at = { x: e.clientX, y: e.clientY };
+
+      // 右键的是文件夹卡片时，额外给「打开这个文件夹」相关操作
+      const dirNode = dirCard ? S.courses.find((c) => c.id === dirCard.dataset.dir) : null;
+
+      /* 这个目录在磁盘上的位置。导入来的目录有 sourcePath，手工新建的
+       * 没有 —— 但可以顺着它下面的文件往上推（主进程 courseDirOf 做的）。
+       * 推不出来就是 null，此时「在文件夹中显示」这类条目干脆不出现，
+       * 免得点了报错。 */
+      let dirOnDisk = null;
+      if (dirNode) {
+        try {
+          dirOnDisk = (await api.courses.dir(dirNode.id))?.dir || null;
+        } catch { /* 探测失败就当作没有 */ }
+      }
+
+      // 有选中项时，空白处右键也给出剪切/复制/移动，方便直接操作
+      const selKeys = selectedKeys();
+      /* 右键点的文件夹如果本来就在多选里，它自己那组菜单（剪切/复制/
+       * 移动到…）会自动作用于整个选择，再列一遍批量版就是两条一模一样
+       * 的条目。这种情况整组让位给文件夹自己的那三条。 */
+      const dirInSel = dirNode ? selKeys.includes(`d:${dirNode.id}`) : false;
+      const selActions = selKeys.length && !dirInSel
+        ? [
+            {
+              label: `剪切 ${selKeys.length} 项`,
+              icon: '<path d="M6 4l9 12M18 4L9 16"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/>',
+              action: () => putInClipboard(selKeys, true),
+            },
+            {
+              label: `复制 ${selKeys.length} 项`,
+              icon: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+              action: () => putInClipboard(selKeys, false),
+            },
+            {
+              label: '移动到…',
+              icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/><path d="M9 13h6M13 10.5l2.5 2.5-2.5 2.5"/>',
+              action: () => showMoveTargets(selKeys, at.x + 4, at.y + 4),
+            },
+            { sep: true },
+          ]
+        : [];
+
+      const items = [
+        // 先「跳过去看」，再「用别的程序打开」—— 前者更常用
+        dirNode && dirOnDisk
+          ? {
+              label: '在电脑上显示文件夹',
+              icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/>',
+              action: () => api.courses.reveal(dirNode.id).catch((x) => toast(x.message, 'error')),
+            }
+          : null,
+        dirNode && dirOnDisk
+          ? {
+              label: '用其他软件打开',
+              icon: '<path d="M8 5l11 7-11 7V5z"/>',
+              action: () => showOpenWith(dirNode.id, 'dir', at.x + 4, at.y + 4),
+            }
+          : null,
+        dirNode ? { sep: true } : null,
+        ...selActions,
+        {
+          label: '粘贴',
+          icon: '<rect x="6" y="4" width="12" height="16" rx="2"/><path d="M9 4h6v3H9z"/>',
+          action: () => pasteInto(destId),
+        },
+        // 右键在文件夹卡片上时，除了「粘贴」还给出针对这个文件夹本身的操作。
+        // 删除放最后并用红色：删目录会连带里面的文件记录，是最重的一个动作。
+        dirNode ? { sep: true } : null,
+        /* 目录的剪切/复制/移动，和文件那套完全对称。
+         * putInClipboard / pasteInto 本来就认 d: 前缀，粘贴时会连整棵
+         * 子树一起复制或搬走，这里只是把入口补到文件夹菜单上。
+         * 右键的目录如果已在多选里，作用于整个选择（和文件菜单一致）。 */
+        dirNode
+          ? {
+              label: dirInSel ? `剪切 ${selKeys.length} 项` : '剪切',
+              icon: '<path d="M6 4l9 12M18 4L9 16"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/>',
+              action: () => putInClipboard(dirInSel ? selKeys : [`d:${dirNode.id}`], true),
+            }
+          : null,
+        dirNode
+          ? {
+              label: dirInSel ? `复制 ${selKeys.length} 项` : '复制',
+              icon: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+              action: () => putInClipboard(dirInSel ? selKeys : [`d:${dirNode.id}`], false),
+            }
+          : null,
+        dirNode
+          ? {
+              label: '移动到…',
+              icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/><path d="M9 13h6M13 10.5l2.5 2.5-2.5 2.5"/>',
+              action: () => showMoveTargets(dirInSel ? selKeys : [`d:${dirNode.id}`], at.x + 4, at.y + 4),
+            }
+          : null,
+        dirNode ? { sep: true } : null,
+        dirNode
+          ? {
+              label: '重命名文件夹',
+              icon: '<path d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/>',
+              action: () => openCourseModal('rename', dirNode),
+            }
+          : null,
+        dirNode && ENABLE_FOLDER_COVER
+          ? {
+              label: '更改封面',
+              icon: '<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M5 17l4.5-4.5 3.5 3.5 2.5-2.5L20 17"/>',
+              action: () => openCoverPanel(dirNode.id, at.x, at.y),
+            }
+          : null,
+        /* 「新建」展开成二级菜单：文件、文件夹。
+         * 以前这里只有「新建文件夹」，新建文件得跑去工具栏点按钮 ——
+         * 两件同类的事分在两个地方，用户每次都要先想「该点哪儿」。
+         * 收进一个「新建」里，右键（空白处或文件夹上）两样都能建。
+         * destId 已经指向「右键所在的位置」：空白处是当前目录，
+         * 文件夹卡片上是那个文件夹本身，所以建出来的东西位置天然对。 */
+        {
+          label: '新建',
+          icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/><path d="M12 11v5M9.5 13.5h5"/>',
+          children: [
+            {
+              label: '新建文件',
+              icon: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M12 11v6M9 14h6"/>',
+              action: () => openNewFileModal(destId),
+            },
+            {
+              label: '新建文件夹',
+              icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/>',
+              action: () => openCourseModal('create', null, destId),
+            },
+          ],
+        },
+        /* 导入文件/文件夹只在**空白处**右键时给。
+         * 右键点在文件夹卡片上时不列这两项：一是和右上角的「导入」按钮
+         * 完全重复，二是那一刻用户想操作的是这个文件夹本身（改名、
+         * 移动、删除），混进两个导入项反而让菜单变长、重点变糊。 */
+        dirNode
+          ? null
+          : {
+              label: '导入文件…',
+              icon: '<path d="M12 4v11"/><path d="M8 11l4 4 4-4"/><path d="M5 19h14"/>',
+              action: () => openImportModal(),
+            },
+        dirNode
+          ? null
+          : {
+              label: '导入文件夹…',
+              icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/><path d="M12 11v5M9.5 13.5h5"/>',
+              action: async () => {
+                const paths = await api.files.pickFolder();
+                if (!paths.length) return;
+                await importDroppedPaths(paths, destId);
+              },
+            },
+        // 删除放整个菜单最后并用红色：删目录会连带里面的文件记录，
+        // 是最重的一个动作，不该夹在「新建」「刷新」这种日常操作中间。
+        dirNode ? { sep: true } : null,
+        dirNode
+          ? {
+              label: '删除文件夹',
+              danger: true,
+              icon: '<path d="M5 7h14M9 7V5h6v2M7 7l1 12h8l1-12"/>',
+              action: () => confirmDeleteCourse(dirNode),
+            }
+          : null,
+        { sep: true },
+        {
+          label: '刷新 (Ctrl+R)',
+          icon: '<path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v4h-4"/>',
+          action: async () => {
+            try {
+              applyState(await api.getState());
+              toast('已刷新', 'ok');
+            } catch (x) { toast(x.message, 'error'); }
+          },
+        },
+      ];
+
+      showCtx(at.x, at.y, items);
+      return;
+    }
+
+    e.preventDefault();
+    const f = S.files.find((x) => x.id === card.dataset.file);
+    if (!f) return;
+
+    const at = { x: e.clientX, y: e.clientY };
+
+    // 右键的这个文件如果也在多选里，剪切/复制/移动就作用于整个选择，
+    // 否则只作用于它自己 —— 和资源管理器的行为一致。
+    const multiKeys = selectedKeys();
+    const isMulti = multiKeys.length > 1 && multiKeys.includes(`f:${f.id}`);
+    const keys = isMulti ? multiKeys : [`f:${f.id}`];
+
+    const items = [
+      {
+        label: '预览',
+        icon: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/>',
+        action: () => openPreview(f.id),
+      },
+      {
+        label: '用其他软件打开',
+        icon: '<path d="M8 5l11 7-11 7V5z"/>',
+        action: () => showOpenWith(f.id, 'file', at.x + 4, at.y + 4),
+      },
+      {
+        label: '用系统程序打开',
+        icon: '<path d="M14 4h6v6"/><path d="M20 4l-8 8"/>',
+        action: () => api.files.openExternal(f.id).catch((x) => toast(x.message, 'error')),
+      },
+      {
+        label: '重命名',
+        icon: '<path d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/>',
+        action: () => openRenameModal(f),
+      },
+      {
+        label: '在文件夹中显示',
+        icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/>',
+        action: () => api.files.reveal(f.id).catch((x) => toast(x.message, 'error')),
+      },
+      f.storage === 'copy'
+        ? {
+            label: '改回链接方式',
+            icon: '<path d="M10 13a4 4 0 0 0 5.7 0l2.3-2.3a4 4 0 1 0-5.7-5.7L11 6.3"/><path d="M14 11a4 4 0 0 0-5.7 0L6 13.3a4 4 0 1 0 5.7 5.7l1.3-1.3"/>',
+            action: () => api.files.setStorage(f.id, 'link')
+              .then(applyState)
+              .then(() => toast('已改回链接方式，副本已清理', 'ok'))
+              .catch((x) => toast(x.message, 'error')),
+          }
+        : null,
+      { sep: true },
+      // 剪切 / 复制 / 移动：右键的文件如果也在多选里，就作用于整个选择
+      {
+        label: isMulti ? `剪切 ${keys.length} 项` : '剪切',
+        icon: '<path d="M6 4l9 12M18 4L9 16"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/>',
+        action: () => putInClipboard(keys, true),
+      },
+      {
+        label: isMulti ? `复制 ${keys.length} 项` : '复制',
+        icon: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+        action: () => putInClipboard(keys, false),
+      },
+      {
+        label: '移动到…',
+        icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/><path d="M9 13h6M13 10.5l2.5 2.5-2.5 2.5"/>',
+        action: () => showMoveTargets(keys, at.x + 4, at.y + 4),
+      },
+    ];
+
+    items.push({ sep: true });
+    // 删除：和目录菜单保持一致，统一叫「删除」并用红色。
+    // 点下去先问一句「进回收站还是彻底删」，不直接动手。
+    items.push({
+      label: isMulti ? `删除 ${keys.length} 项` : '删除',
+      danger: true,
+      icon: '<path d="M5 7h14M9 7V5h6v2M7 7l1 12h8l1-12"/>',
+      action: async () => {
+        const fileIds = keys.filter((k) => k.startsWith('f:')).map((k) => k.slice(2));
+        const dirIds = keys.filter((k) => k.startsWith('d:')).map((k) => k.slice(2));
+        const lead = isMulti
+          ? `选中的 ${keys.length} 项将从库中移除。磁盘上的原文件始终不受影响。`
+          : (f.storage === 'copy'
+            ? `「${f.name}」的入库副本会被清掉，原始位置的文件不受影响。`
+            : `「${f.name}」将从库中移除，原文件始终留在磁盘上。`);
+        // 这批里有没有「复制入库」的文件 —— 有才提示副本会被清理
+        const hasCopies = S.files.some((x) => fileIds.includes(x.id) && x.storage === 'copy');
+        const choice = await askDelete({
+          title: isMulti ? '删除多项' : '删除文件', lead, hasCopies,
+        });
+        if (!choice) return;
+        try {
+          let st = null;
+          for (const id of fileIds) st = await api.files.remove(id, choice === 'trash');
+          for (const id of dirIds) st = await api.courses.remove(id, choice === 'trash');
+          if (st) applyState(st);
+          clearSelection();
+          toast(choice === 'trash' ? '已放进回收站' : '已彻底删除', 'ok');
+        } catch (x) {
+          toast(x.message, 'error');
+        }
+      },
+    });
+
+    showCtx(at.x, at.y, items);
+  });
+
+  /* 预览 */
+  $('#btnPreviewClose').addEventListener('click', closePreview);
+  $('#overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'overlay') closePreview();
+  });
+  $('#btnOpenSys').addEventListener('click', () => {
+    if (!S.previewFileId) return;
+    api.files.openExternal(S.previewFileId).catch((x) => toast(x.message, 'error'));
+  });
+  $('#btnEdit').addEventListener('click', enterEditMode);
+  $('#btnSaveEdit').addEventListener('click', saveEdit);
+
+  // 「打开方式」：点一下弹出本机可用的程序列表，选中即打开
+  $('#btnRun').addEventListener('click', async (e) => {
+    if (!S.previewFileId) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    await showOpenWith(S.previewFileId, 'file', rect.left, rect.bottom + 6);
+  });
+  $('#btnReveal').addEventListener('click', () => {
+    if (!S.previewFileId) return;
+    api.files.reveal(S.previewFileId).catch((x) => toast(x.message, 'error'));
+  });
+
+  /* 目录模态框 */
+  $('#btnCourseClose').addEventListener('click', () => { $('#courseModal').hidden = true; });
+  $('#btnCourseCancel').addEventListener('click', () => { $('#courseModal').hidden = true; });
+  $('#btnCourseSave').addEventListener('click', saveCourse);
+  $('#courseNameInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveCourse();
+  });
+  $('#swatches').addEventListener('click', (e) => {
+    const sw = e.target.closest('[data-color]');
+    if (!sw) return;
+    S.courseModal.color = sw.dataset.color;
+    $$('.swatch').forEach((s) => s.classList.remove('is-active'));
+    sw.classList.add('is-active');
+  });
+
+  /* 库根目录 */
+  $('#btnOpenRoot').addEventListener('click', () => {
+    api.library.openBackups().catch((e) => toast(e.message, 'error'));
+  });
+
+  /* 主题切换：新玻璃开关 / 旧按钮（USE_NEW_THEME_SWITCH 切换）
+   * 两条路都只调用 toggleTheme —— 切换逻辑本身没有第二份 */
+  if (USE_NEW_THEME_SWITCH && mountThemeSwitch($('#themeSwitchHost'), {
+    /* 新开关自己驱动整个揭幕流程（建双份 DOM → 每帧写 clip-path →
+       到位提交），所以这里只在它「建层失败」时兜底：调 toggleTheme，
+       但用标志位避开重复提交。 */
+    onToggle: () => toggleTheme($('#themeSwitchHost .tsw') || $('#themeSwitchHost')),
+  })) {
+    /* 开关接管了过渡：toggleTheme 不要再走一遍 animateThemeSwitch */
+    window.__vaultThemeSwitchOwnsTransition = true;
+    $('#btnTheme').hidden = true;
+  } else {
+    /* 旧按钮：点击 + 拖动（拖动逻辑在 bindThemeDrag 里） */
+    $('#btnTheme').addEventListener('click', () => toggleTheme($('#btnTheme')));
+    bindThemeDrag();
+  }
+
+  /* 快捷键一览 */
+  $('#btnShortcuts').addEventListener('click', openShortcuts);
+  $('#btnShortcutsClose').addEventListener('click', () => { $('#shortcutsModal').hidden = true; });
+  $('#btnShortcutsDone').addEventListener('click', () => { $('#shortcutsModal').hidden = true; });
+  $('#shortcutsModal').addEventListener('click', (e) => {
+    if (e.target.id === 'shortcutsModal') $('#shortcutsModal').hidden = true;
+  });
+
+  /* 更新内容公告 */
+  /* 设置 → 关于里点「查看」：显示全部历史，不只最新一批 */
+  $('#btnShowChangelog').addEventListener('click', () => openChangelog('all'));
+  $('#btnChangelogClose').addEventListener('click', closeChangelog);
+  $('#btnChangelogOk').addEventListener('click', closeChangelog);
+  $('#changelogModal').addEventListener('click', (e) => {
+    if (e.target.id === 'changelogModal') closeChangelog();
+  });
+
+  /* 设置面板 */
+  $('#btnSettings').addEventListener('click', openSettings);
+  $('#btnSettingsClose').addEventListener('click', () => { $('#settingsModal').hidden = true; });
+  $('#settingsModal').addEventListener('click', (e) => {
+    if (e.target.id === 'settingsModal') $('#settingsModal').hidden = true;
+  });
+
+  // 左侧分类切换
+  $('#settingsNav').addEventListener('click', (e) => {
+    const btn = e.target.closest('.snav-item');
+    if (!btn) return;
+    $$('.snav-item').forEach((b) => b.classList.toggle('is-active', b === btn));
+    $$('.spane').forEach((p) => p.classList.toggle('is-active', p.dataset.pane === btn.dataset.pane));
+  });
+
+  // 教程里的目录跳转。
+  //
+  // 不用 scrollIntoView：它只认最近的滚动祖先，而这里滚动的是
+  // .settings-panes、目标小节却在更里面一层，且顶部还有吸顶的目录条
+  // 要避开。手动算目标位置更可控，也不会把整个设置面板一起带动。
+  $('#guideToc').addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-goto]');
+    if (!chip) return;
+    const sec = $(`#guide-${chip.dataset.goto}`);
+    const scroller = $('.settings-panes');
+    if (!sec || !scroller) return;
+    const sticky = $('#guideToc').offsetHeight;
+    const top = scroller.scrollTop
+      + sec.getBoundingClientRect().top
+      - scroller.getBoundingClientRect().top
+      - sticky - 8;
+    const reduce = document.documentElement.classList.contains('no-motion')
+      || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    scroller.scrollTo({ top: Math.max(0, top), behavior: reduce ? 'auto' : 'smooth' });
+  });
+
+  // 通用开关
+  bindSwitch('#swRestoreView', 'restoreView', true);
+  bindSwitch('#swShowSize', 'showSize', true);
+  bindSwitch('#swReduceMotion', 'reduceMotion', false);
+  bindSwitch('#swAutoSwitch', 'autoSwitchCourse', true);
+  bindSwitch('#swAutoCheckUpdate', 'autoCheckUpdate', false);
+
+  // 密度
+  $('#densitySeg').addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn');
+    if (!btn) return;
+    saveSetting('density', btn.dataset.density);
+    applySettingEffects('density', btn.dataset.density);
+    syncSettingsUI();
+  });
+
+  // 重复文件策略（作为无重复冲突时的默认行为）
+  $('#dupSeg').addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn');
+    if (!btn) return;
+    saveSetting('duplicateMode', btn.dataset.dup);
+    syncSettingsUI();
+  });
+
+  $('#editorSeg').addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn');
+    if (!btn) return;
+    saveSetting('defaultEditor', btn.dataset.editor);
+    syncSettingsUI();
+  });
+
+  // 主题卡片
+  $('#themePicker').addEventListener('click', (e) => {
+    const card = e.target.closest('.tp-card');
+    if (!card) return;
+    setThemeChoice(card.dataset.theme);
+  });
+
+  // 数据
+  $('#btnOpenBackup').addEventListener('click', () => {
+    api.library.openBackups().catch((x) => toast(x.message, 'error'));
+  });
+  $('#btnOpenDataDir').addEventListener('click', () => {
+    api.data.openDir().catch((x) => toast(x.message, 'error'));
+  });
+
+  /* 软件更新 */
+  /* 自动检测的频率：改完由主进程按新设置重排定时器（见 settings:set） */
+  $('#autoCheckSeg').addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn');
+    if (!btn) return;
+    saveSetting('autoCheckInterval', btn.dataset.interval);
+    syncSettingsUI();
+  });
+  $('#btnUpdateAvailView').addEventListener('click', viewAutoUpdate);
+  $('#btnUpdateAvailClose').addEventListener('click', dismissAutoUpdate);
+  /* 主进程定时比对完，把「有更新」推过来 */
+  api.update.onAvailable?.((d) => showAutoUpdate(d));
+
+  $('#btnCheckUpdate').addEventListener('click', checkUpdate);
+  $('#btnApplyUpdate').addEventListener('click', applyUpdate);
+  $('#btnPickSource').addEventListener('click', async () => {
+    try {
+      const d = await api.update.pickSource();
+      if (!d) return;
+      await refreshUpdateInfo();
+      pendingUpdate = d;
+      renderUpdateResult(d);
+      $('#btnApplyUpdate').disabled = !d.ok || !d.total;
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+
+  /* 主进程代收的 Esc（焦点在 PDF iframe 里时，主文档收不到键盘事件） */
+  api.win.onEscape?.(() => handleEscape());
+
+  /* 全局键盘 */
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      handleEscape();
+    }
+    // Alt+← 返回上级目录
+    if (e.altKey && e.key === 'ArrowLeft') {
+      e.preventDefault();
+      goUp();
+      return;
+    }
+    if (e.ctrlKey && e.key.toLowerCase() === 'm') {
+      e.preventDefault();
+      setSelectMode(!S.selectMode);
+      return;
+    }
+    // Ctrl+F 搜索：焦点已在搜索框就收起，否则聚焦并全选。
+    // 收起时不清空输入内容 —— 用户可能只是想回到列表看看结果。
+    if (e.ctrlKey && e.key.toLowerCase() === 'f') {
+      e.preventDefault();
+      const input = $('#searchInput');
+      if (document.activeElement === input) {
+        input.blur();
+      } else {
+        input.focus();
+        input.select();
+      }
+      return;
+    }
+    // Ctrl+R：Electron 默认会重载整个页面（状态全丢），一律拦掉改成刷新数据。
+    // 这一条必须在输入框判断之前 —— 在搜索框里按 Ctrl+R 同样不该重载。
+    if (e.ctrlKey && e.key.toLowerCase() === 'r' && !e.shiftKey) {
+      e.preventDefault();
+      refreshState();
+      return;
+    }
+    // Ctrl+/ 快捷键一览（再按一次关闭）。编辑器里 Ctrl+/ 是「注释当前行」，
+    // 那个由 textarea 自己的 keydown 处理并 preventDefault，
+    // 所以这里要排除 textarea，别把注释功能抢走。
+    if (e.ctrlKey && e.key === '/' && !e.target.matches?.('textarea')) {
+      e.preventDefault();
+      toggleShortcuts();
+      return;
+    }
+
+    // ---- 预览里的快捷键（只在预览打开时生效）----
+    const inPreview = !$('#overlay').hidden;
+    if (inPreview && e.ctrlKey) {
+      const k = e.key.toLowerCase();
+
+      // Ctrl+S 保存
+      if (k === 's') {
+        e.preventDefault();
+        if (isEditing) saveEdit();
+        return;
+      }
+      // Ctrl+E 编辑开关：进入 / 退出
+      if (k === 'e' && !e.shiftKey) {
+        e.preventDefault();
+        toggleEditMode();
+        return;
+      }
+      // Ctrl+Shift+E 用外部编辑器打开
+      if (k === 'e' && e.shiftKey) {
+        e.preventDefault();
+        if (S.previewFileId) {
+          const rect = $('#btnRun').getBoundingClientRect();
+          showOpenWith(S.previewFileId, 'file', rect.left, rect.bottom + 6);
+        }
+        return;
+      }
+      // Ctrl+O 用系统程序打开
+      if (k === 'o') {
+        e.preventDefault();
+        if (S.previewFileId) {
+          api.files.openExternal(S.previewFileId).catch((x) => toast(x.message, 'error'));
+        }
+        return;
+      }
+      // Ctrl+Shift+R 在文件夹中显示
+      if (k === 'r' && e.shiftKey) {
+        e.preventDefault();
+        if (S.previewFileId) {
+          api.files.reveal(S.previewFileId).catch((x) => toast(x.message, 'error'));
+        }
+        return;
+      }
+    }
+
+    // ---- 全局快捷键（输入框里不触发，免得打字时误操作）----
+    const inField = e.target.matches?.('input, textarea, [contenteditable]');
+    if (inField) return;
+
+    // Ctrl+N 新建文件 / Ctrl+Shift+N 新建文件夹（再按一次关掉弹窗）
+    if (e.ctrlKey && e.key.toLowerCase() === 'n') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        toggleModal('courseModal', () => openCourseModal(
+          'create', null, S.view.type === 'course' ? S.view.courseId : null,
+        ));
+      } else {
+        toggleModal('newFileModal', openNewFileModal);
+      }
+      return;
+    }
+    // Ctrl+I 导入文件 / Ctrl+Shift+I 导入文件夹
+    if (e.ctrlKey && e.key.toLowerCase() === 'i') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        api.files.pickFolder().then((paths) => {
+          if (paths.length) {
+            importDroppedPaths(paths, S.view.type === 'course' ? S.view.courseId : null);
+          }
+        }).catch((x) => toast(x.message, 'error'));
+      } else {
+        toggleModal('importModal', openImportModal);
+      }
+      return;
+    }
+    // Ctrl+, 设置开关
+    if (e.ctrlKey && e.key === ',') {
+      e.preventDefault();
+      toggleModal('settingsModal', openSettings);
+      return;
+    }
+    // ? 也是快捷键面板开关
+    if (e.key === '?' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      toggleShortcuts();
+      return;
+    }
+    // Delete 移除选中项
+    if (e.key === 'Delete' && (S.selected.size || S.selectedDirs.size)) {
+      e.preventDefault();
+      removeSelected();
+      return;
+    }
+    // F2 重命名（单张卡片时；多选交给 grid 的 keydown 处理）
+    // Alt+↑ 回到「全部文件」
+    if (e.altKey && e.key === 'ArrowUp') {
+      e.preventDefault();
+      S.view = { type: 'all', courseId: null };
+      saveLastView();
+      render();
+      return;
+    }
+    // Alt+Home 回到顶层
+    if (e.altKey && e.key === 'Home') {
+      e.preventDefault();
+      S.view = { type: 'all', courseId: null };
+      saveLastView();
+      render();
+    }
+
+    // Ctrl+C：记下当前选中的条目（只记，不动磁盘）
+    if (e.ctrlKey && e.key.toLowerCase() === 'c') {
+      const keys = selectedKeys();
+      if (!keys.length) return;
+      e.preventDefault();
+      putInClipboard(keys, false);
+      return;
+    }
+
+    // Ctrl+X：剪切（复制 + 之后移动）
+    if (e.ctrlKey && e.key.toLowerCase() === 'x') {
+      const keys = selectedKeys();
+      if (!keys.length) return;
+      e.preventDefault();
+      putInClipboard(keys, true);
+      return;
+    }
+
+    // Ctrl+V：粘贴到当前目录
+    if (e.ctrlKey && e.key.toLowerCase() === 'v') {
+      e.preventDefault();
+      const destId = S.view.type === 'course' ? S.view.courseId : null;
+      pasteInto(destId);
+    }
+  });
+
+  /* 拖拽导入 */
+  // 全局阻止默认行为（否则 Electron 会把文件当成导航直接打开）。
+  // 内容区自己的监听会先处理掉来自外部的文件，走到这里的基本都是
+  // 落在侧栏/工具栏的，直接吞掉即可。
+  document.addEventListener('dragover', (e) => { e.preventDefault(); });
+  document.addEventListener('drop', (e) => {
+    if (e.defaultPrevented) return;
+    e.preventDefault();
+    if (Array.from(e.dataTransfer?.types || []).includes('Files')) {
+      $('#content')?.classList.remove('drop-root');
+      $('#grid')?.classList.remove('drop-root');
+    }
+  });
+}
+
+/**
+ * 软件风格的确认框，替代系统原生的 window.confirm。
+ *
+ * 原生 confirm 在 Electron 里是一个 Windows 白色对话框，
+ * 和深色主题完全不搭，也没有动画。这个版本复用 modal 的
+ * fadeIn + panelIn 动画，跟软件里其它弹窗一致。
+ *
+ * 返回 Promise<boolean>。
+ */
+function askConfirm({ title = '确认', lead = '', okText = '确定', danger = false, note = '' } = {}) {
+  return new Promise((resolve) => {
+    const modal = $('#confirmModal');
+    const okBtn = $('#btnConfirmOk');
+    const cancelBtn = $('#btnConfirmCancel');
+
+    $('#confirmTitle').textContent = title;
+    $('#confirmLead').textContent = lead;
+    /* note 是一段可选的结构化补充内容（HTML），比如把要删的文件名列出来。
+       调用方负责转义 —— 这里直接塞 innerHTML。 */
+    const noteEl = $('#confirmNote');
+    if (noteEl) {
+      noteEl.innerHTML = note;
+      noteEl.hidden = !note;
+    }
+    okBtn.textContent = okText;
+    okBtn.classList.toggle('danger-btn', danger);
+    $('#confirmIcon').classList.toggle('is-danger', danger);
+
+    modal.hidden = false;
+    // 让「确定」拿到焦点，回车就能确认
+    setTimeout(() => okBtn.focus(), 60);
+
+    const finish = (val) => {
+      modal.hidden = true;
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey, true);
+      resolve(val);
+    };
+    const onOk = () => finish(true);
+    const onCancel = () => finish(false);
+    const onBackdrop = (e) => { if (e.target === modal) finish(false); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); finish(true); }
+    };
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    modal.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey, true);
+  });
+}
+
+/**
+ * 重命名文件的弹窗。
+ * 只让用户改主名时自动保留扩展名（输入框里默认把扩展名选中之外的部分全选）。
+ */
+function openRenameModal(file) {
+  const modal = $('#renameModal');
+  const input = $('#renameInput');
+  const note = $('#renameNote');
+
+  const ext = file.ext || '';
+  const base = ext && file.name.toLowerCase().endsWith(ext)
+    ? file.name.slice(0, -ext.length)
+    : file.name;
+
+  input.value = file.name;
+  note.textContent = `会同步修改磁盘上的真实文件名（${file.path || ''}）。只改主名时扩展名 ${ext || '（无）'} 会自动保留。`;
+  modal.hidden = false;
+
+  const finish = () => {
+    modal.hidden = true;
+    $('#btnRenameClose').removeEventListener('click', onCancel);
+    $('#btnRenameCancel').removeEventListener('click', onCancel);
+    $('#btnRenameSave').removeEventListener('click', onSave);
+    modal.removeEventListener('click', onBackdrop);
+    input.removeEventListener('keydown', onKey);
+  };
+  const onCancel = () => finish();
+  const onBackdrop = (e) => { if (e.target === modal) finish(); };
+  const onKey = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); onSave(); }
+    if (e.key === 'Escape') { e.preventDefault(); finish(); }
+  };
+  const onSave = async () => {
+    const next = input.value.trim();
+    if (!next) { toast('文件名不能为空', 'error'); return; }
+    if (next === file.name) { finish(); return; }
+    try {
+      const res = await api.files.rename(file.id, next);
+      applyState(res.state);
+      finish();
+      if (res.changed) toast(`已重命名为「${res.name}」`, 'ok');
+    } catch (err) {
+      toast(err.message || '重命名失败', 'error');
+    }
+  };
+
+  $('#btnRenameClose').addEventListener('click', onCancel);
+  $('#btnRenameCancel').addEventListener('click', onCancel);
+  $('#btnRenameSave').addEventListener('click', onSave);
+  modal.addEventListener('click', onBackdrop);
+  input.addEventListener('keydown', onKey);
+
+  setTimeout(() => {
+    input.focus();
+    // 默认选中主名，扩展名留在外面 —— 大多数人只想改前面那截
+    input.setSelectionRange(0, base.length);
+  }, 60);
+}
+
+/**
+ * 删除确认弹窗：让用户选「放进回收站」还是「彻底删除」。
+ * 返回 'trash' | 'purge' | null（取消）
+ *
+ * @param {boolean} [hasCopies] 这批条目里有没有「复制入库」的文件。
+ *   有的话才提示「软件存的那份副本会被清理」—— 没有副本时多说一句
+ *   反而让人以为自己的文件有危险。
+ */
+function askDelete({ title, lead, hasCopies = false }) {
+  return new Promise((resolve) => {
+    const modal = $('#delModal');
+    $('#delTitle').textContent = title;
+    $('#delLead').textContent = lead;
+    // 「复制入库」的副本提示只在真涉及副本时出现
+    const copyNote = $('#delCopyNote');
+    if (copyNote) copyNote.hidden = !hasCopies;
+    modal.hidden = false;
+
+    const done = (val) => {
+      modal.hidden = true;
+      $('#delModal .dup-choices').removeEventListener('click', onClick);
+      $('#btnDelClose').removeEventListener('click', onCancel);
+      $('#btnDelCancel').removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onBackdrop);
+      resolve(val);
+    };
+    const onClick = (e) => {
+      const card = e.target.closest('[data-del]');
+      if (card) done(card.dataset.del);
+    };
+    const onCancel = () => done(null);
+    const onBackdrop = (e) => { if (e.target === modal) done(null); };
+
+    $('#delModal .dup-choices').addEventListener('click', onClick);
+    $('#btnDelClose').addEventListener('click', onCancel);
+    $('#btnDelCancel').addEventListener('click', onCancel);
+    modal.addEventListener('click', onBackdrop);
+  });
+}
+
+async function confirmDeleteCourse(course) {
+  const kids = subtreeIds(course.id);
+  const count = S.files.filter((f) => kids.has(f.courseId)).length;
+  const subCount = kids.size - 1;
+
+  const parts = [`目录「${course.name}」`];
+  if (subCount) parts.push(`及 ${subCount} 个子目录`);
+  if (count) parts.push(`共 ${count} 个文件`);
+
+  const choice = await askDelete({
+    title: '删除目录',
+    lead: `${parts.join('，')}。磁盘上的原文件始终不受影响。`,
+  });
+  if (!choice) return;
+
+  try {
+    const next = await api.courses.remove(course.id, choice === 'trash');
+    applyState(next);
+    toast(choice === 'trash' ? '已放进回收站' : '已彻底删除', 'ok');
+  } catch (err) {
+    toast(err.message || '删除失败', 'error');
+  }
+}
+
+/* ============================================================
+   主题
+   ============================================================ */
+function applyTheme(name, { titlebar = true } = {}) {
+  document.documentElement.dataset.theme = name;
+  // 同步原生标题栏配色，避免窗口控件与界面脱节。
+  // 但切换主题做圆形扩散动画时要延后同步：原生标题栏是系统画的，
+  // 不受 clip-path 裁剪，提前改会让右上角先一步变色，破坏动画观感。
+  if (!titlebar) return;
+  try {
+    window.vault.win.setTitlebarTheme(name);
+  } catch {
+    /* 老版本主进程没有这个接口，忽略 */
+  }
+}
+
+function prefersDark() {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+/** 侧栏主题开关：在浅色/深色之间切换，并同步「外观」里的选择
+ *
+ *  新开关（Aurora）自己驱动动画：它在 pointerdown 时调 prepare 建好
+ *  双份 DOM，每帧调 write 写 clipPath，到位后调 finish 提交。
+ *  所以这里只在「没有新开关」时走旧路径。 */
+function toggleTheme(fromEl) {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  S.settings = { ...S.settings, themeChoice: next };
+  api.settings.set({ themeChoice: next }).catch(() => {});
+  /* 新开关在场时它已经自己接管了整个流程（见 theme-switch.js 的 toggle），
+     不要再走一遍 animateThemeSwitch，否则会双重提交。 */
+  if (!window.__vaultThemeSwitchOwnsTransition) {
+    applyThemeWithTransition(next, fromEl || $('#btnTheme'));
+  }
+  syncSettingsUI();
+}
+
+/**
+ * 让侧栏那个开关可以真的「拖」。
+ *
+ * 三种操作都要支持，否则用起来会觉得这是个假开关：
+ *   1. 点一下      → 切换（交给 click，不在这里管）
+ *   2. 按住拖动    → 滑块跟手走，松手时按过没过半决定落哪边
+ *   3. 拖到一半松手 → 弹回原位，而不是卡在中间
+ *
+ * 关键点：拖动过程中要把 .is-dragging 挂上（去掉 CSS 过渡，跟手），
+ * 并且把 --knob-x 写成 inline 值 —— 主题类选择器管的是默认位置，
+ * inline 优先级更高，松手后再清掉让 CSS 接管。
+ */
+function bindThemeDrag() {
+  const btn = $('#btnTheme');
+  const knob = $('#themeKnob');
+  const track = btn?.querySelector('.theme-track');
+  if (!btn || !knob || !track) return;
+
+  const MIN = 0;
+  const maxX = () => Math.max(0, track.clientWidth - knob.offsetWidth);
+
+  let drag = null;
+
+  const setX = (x) => {
+    const clamped = Math.min(maxX(), Math.max(MIN, x));
+    knob.style.setProperty('--knob-x', `${clamped}px`);
+    return clamped;
+  };
+
+  const onDown = (e) => {
+    if (e.button !== 0) return;
+    const dark = document.documentElement.dataset.theme === 'dark';
+    drag = {
+      startX: e.clientX,
+      // 从当前实际位置起算，而不是从 0 或 maxX —— 否则一按下去滑块会跳
+      originX: dark ? maxX() : 0,
+      moved: false,
+      pointerId: e.pointerId,
+    };
+    knob.classList.add('is-dragging');
+    knob.setPointerCapture?.(e.pointerId);
+  };
+
+  const onMove = (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.startX;
+    if (Math.abs(dx) > 2) drag.moved = true;
+    setX(drag.originX + dx);
+    if (drag.moved) e.preventDefault();
+  };
+
+  const onUp = () => {
+    if (!drag) return;
+    const { moved } = drag;
+    const cur = parseFloat(knob.style.getPropertyValue('--knob-x')) || 0;
+    const half = maxX() / 2;
+    drag = null;
+    knob.classList.remove('is-dragging');
+
+    // 位置一律交还给 CSS：主题没变就滑回原处，变了就滑到对面，
+    // 两种都是「过渡动画」而不是硬跳，观感一致
+    knob.style.removeProperty('--knob-x');
+
+    if (!moved) return; // 只是点了一下，交给 click 处理
+
+    // 真拖过：标记一下，让紧随其后的 click 不要再切一次
+    btn.dataset.dragged = '1';
+    const wantDark = cur >= half;
+    const isDark = document.documentElement.dataset.theme === 'dark';
+    if (wantDark !== isDark) toggleTheme(btn);
+  };
+
+  knob.addEventListener('pointerdown', onDown);
+  knob.addEventListener('pointermove', onMove);
+  knob.addEventListener('pointerup', onUp);
+  knob.addEventListener('pointercancel', onUp);
+
+  // 拖动结束后浏览器还会补一个 click。捕获阶段拦掉它，
+  // 否则「拖到对面」会被再切一次主题，等于白拖。
+  btn.addEventListener('click', (e) => {
+    if (btn.dataset.dragged !== '1') return;
+    delete btn.dataset.dragged;
+    e.stopImmediatePropagation();
+    e.preventDefault();
+  }, true);
+}
+
+/* ============================================================
+   设置
+   ============================================================ */
+const SETTING_DEFAULTS = {
+  restoreView: true,
+  showSize: true,
+  reduceMotion: false,
+  autoSwitchCourse: true,
+  density: 'comfortable',
+  duplicateMode: 'skip',
+  theme: 'light',
+  themeChoice: 'light',
+  // 上次看过更新公告的版本号。空字符串 = 还没记录过
+  seenChangelogVersion: '',
+  // 自动检测更新。默认关：没设置开发目录之前，定时比对只会一遍遍失败
+  autoCheckUpdate: false,
+  // startup = 每次启动检测一次；1h / 6h / 24h = 按间隔循环
+  autoCheckInterval: 'startup',
+};
+
+function setting(key) {
+  const v = S.settings?.[key];
+  return v === undefined ? SETTING_DEFAULTS[key] : v;
+}
+
+function saveSetting(key, value) {
+  S.settings = { ...S.settings, [key]: value };
+  api.settings.set({ [key]: value }).catch(() => {});
+}
+
+function bindSwitch(sel, key, def) {
+  const el = $(sel);
+  if (!el) return;
+  el.addEventListener('click', () => {
+    const next = !el.classList.contains('is-on');
+    el.classList.toggle('is-on', next);
+    saveSetting(key, next);
+    applySettingEffects(key, next);
+  });
+}
+
+/** 有些设置需要立刻影响界面 */
+function applySettingEffects(key, value) {
+  if (key === 'reduceMotion') {
+    document.documentElement.classList.toggle('no-motion', !!value);
+  }
+  if (key === 'autoCheckUpdate' || key === 'autoCheckInterval') {
+    syncAutoCheckUI();
+  }
+  if (key === 'showSize' || key === 'density') {
+    applyLayoutSettings();
+    renderMain();
+  }
+}
+
+function applyLayoutSettings() {
+  const root = document.documentElement;
+  const density = setting('density');
+  root.dataset.density = density;
+  root.dataset.showSize = setting('showSize') ? 'on' : 'off';
+}
+
+function setSwitchState(sel, on) {
+  const el = $(sel);
+  if (el) el.classList.toggle('is-on', !!on);
+}
+
+function syncSettingsUI() {
+  setSwitchState('#swRestoreView', setting('restoreView'));
+  setSwitchState('#swShowSize', setting('showSize'));
+  setSwitchState('#swReduceMotion', setting('reduceMotion'));
+  setSwitchState('#swAutoSwitch', setting('autoSwitchCourse'));
+  setSwitchState('#swAutoCheckUpdate', setting('autoCheckUpdate'));
+  syncAutoCheckUI();
+
+  $$('#densitySeg .seg-btn').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.density === setting('density'));
+  });
+  $$('#dupSeg .seg-btn').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.dup === setting('duplicateMode'));
+  });
+  $$('#editorSeg .seg-btn').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.editor === setting('defaultEditor'));
+  });
+  const choice = S.settings.themeChoice || setting('theme') || 'light';
+  $$('#themePicker .tp-card').forEach((c) => {
+    c.classList.toggle('is-active', c.dataset.theme === choice);
+  });
+  syncThemeSwitch();
+}
+
+/** 「检测频率」这一行只在自动检测打开时才露出来 —— 关着还摆在那，
+ *  会让人以为间隔设置仍然生效 */
+function syncAutoCheckUI() {
+  const row = $('#autoCheckIntervalRow');
+  if (row) row.hidden = !setting('autoCheckUpdate');
+  $$('#autoCheckSeg .seg-btn').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.interval === setting('autoCheckInterval'));
+  });
+}
+
+/** 让侧栏那个开关的 aria 状态跟上当前主题（读屏和键盘用户靠它） */
+function syncThemeSwitch() {
+  const btn = $('#btnTheme');
+  if (!btn) return;
+  const dark = document.documentElement.dataset.theme === 'dark';
+  btn.setAttribute('aria-pressed', dark ? 'true' : 'false');
+  btn.title = dark ? '切换到浅色' : '切换到深色';
+}
+
+function setThemeChoice(choice) {
+  S.settings = { ...S.settings, themeChoice: choice };
+  api.settings.set({ themeChoice: choice }).catch(() => {});
+
+  const next = choice === 'system'
+    ? (prefersDark() ? 'dark' : 'light')
+    : choice;
+
+  applyThemeWithTransition(next);
+  syncSettingsUI();
+}
+
+/** 派发主题过渡事件：开关靠它在同一时刻开始、同一时刻结束 */
+function dispatchThemeEvent(name, detail) {
+  window.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
+/*
+ * 关于「边缘光带」：这个版本没有它，揭幕就是一条干净的 45° 边界。
+ *
+ * 实测（Chromium 142）任何额外的「捕获层」都要付一次性的重建成本：
+ *   · 设 view-transition-name 的元素 → 每次切换多一两帧 50~85ms 长帧
+ *   · 用 popover 顶到 top layer 的整屏光带 → 同样 70~100ms
+ * 去掉这一层之后，整段揭幕稳定在 6.2ms/帧、零长帧。
+ * 也试过用 mask 渐变的过渡带做「柔边」，但那样遮罩图要覆盖两个斜角
+ * 延伸出去的范围（1728×1000 时边长超过 4000px），实测还会在边缘露出
+ * 水平/直角硬边，所以最终只用 clip-path 的直线边界。
+ *
+ * 唯一保留在 top layer 的元素是左下角的主题开关：它只有 60×30，
+ * 而且动画只写 transform / opacity / canvas，实测没有引入长帧。
+ */
+
+/** 目标主题的背景色（降级遮罩用）。同步读写，不会画出中间态 */
+function themeBgColor(name) {
+  const root = document.documentElement;
+  const cur = root.dataset.theme;
+  root.dataset.theme = name;
+  const c = getComputedStyle(root).getPropertyValue('--bg-1').trim();
+  root.dataset.theme = cur;
+  return c || '#ffffff';
+}
+
+/**
+ * 降级：不支持 View Transition / 伪元素动画报错时的纯色遮罩。
+ * 目标主题的底色铺满窗口，opacity 0→1→0，中间那一刻把主题换掉。
+ * 只动画 opacity，结束时移除节点。
+ */
+async function degradeThemeSwitch(next, commit) {
+  const total = 520;
+  const veil = document.createElement('div');
+  veil.className = 'theme-veil';
+  veil.style.background = themeBgColor(next);
+  document.body.appendChild(veil);
+
+  dispatchThemeEvent(THEME_EVENT_START, { to: next, durationMs: total });
+  try {
+    await veil.animate(
+      [{ opacity: 0 }, { opacity: 1 }],
+      { duration: total * 0.45, easing: 'ease-out', fill: 'forwards' },
+    ).finished;
+  } catch {
+    /* 动画被取消：照样切过去 */
+  }
+  commit();
+  syncTitlebar(next);
+  try {
+    await veil.animate(
+      [{ opacity: 1 }, { opacity: 0 }],
+      { duration: total * 0.55, easing: 'ease-in', fill: 'forwards' },
+    ).finished;
+  } catch {
+    /* 忽略 */
+  }
+  veil.remove();
+  dispatchThemeEvent(THEME_EVENT_END, { to: next });
+}
+
+/* 揭幕期间的状态锁：鼠标和键盘都忽略，动画结束后立即解锁 */
+let themeTransitionLock = false;
+/* 标题栏跟色的延时票据：新的一次切换会让上一次的延时同步失效 */
+let themeTitlebarTicket = 0;
+
+/**
+ * 主题揭幕 · 双份 DOM
+ * ------------------------------------------------------------
+ * 照抄 aurora-win11-fx.html 的核心机制：
+ *
+ *   页面上同时叠两份完整界面，下层 appD 是深色，上层 appL 是浅色。
+ *   开关每帧写 `appL.style.clipPath = circle(R at 开关中心)`：
+ *     R=0    → 只看得到 appD（深色）
+ *     R=铺满 → 只看得到 appL（浅色）
+ *   中间任意 R 就是「圆形边界」的过渡态。
+ *
+ *   因为是**逐帧**写的，拖动滑块时页面实时跟着变 —— 这正是 View
+ *   Transition 做不到的：它只在切换瞬间拍一次快照，快照期间主线程
+ *   还被冻结几十毫秒，既不能跟手，开关也显得「严重延迟」。
+ *
+ * 和参考版的一处必要差异：
+ *   参考版是静态 demo，可以启动时克隆一次、永久复用。我们的界面是活的
+ *   （会滚动、增删文件、切视图），静态克隆体很快就会和真实界面不一致。
+ *   所以改成**每次拖动/点击开始时才克隆**（此刻两份内容与滚动位置完全
+ *   一致），动画结束后立刻销毁。克隆实测 5~8ms，且发生在 pointerdown
+ *   那一帧，用户感知不到。
+ *
+ * 暴露给 theme-switch.js 的接口挂在 window.__vaultThemeReveal 上，
+ * 因为开关每帧都要写 clipPath，只有它知道 pos。
+ */
+
+/** 当前的揭幕层；null 表示没有正在进行的揭幕 */
+let reveal = null;
+
+/** 当前主题的「反面」 */
+function otherTheme(name) {
+  return name === 'dark' ? 'light' : 'dark';
+}
+
+/**
+ * 开始一次揭幕：克隆当前界面，把克隆体设成目标主题，盖在上面。
+ * 返回是否成功。失败时调用方走瞬时切换。
+ *
+ * @param {string} target 目标主题
+ */
+function prepareThemeReveal(target) {
+  /* 已经有揭幕在跑：先收掉旧的，避免叠加多层 */
+  if (reveal) finishThemeReveal(false);
+
+  const appD = document.querySelector('.app');
+  if (!appD) return false;
+
+  const t0 = performance.now();
+
+  /* 克隆。克隆体不接事件，所以不需要重绑任何监听器。 */
+  const appL = appD.cloneNode(true);
+
+  /* 克隆体里的 id 全部摘掉：
+     · 避免 document.getElementById 拿到克隆体里的那一份
+     · 克隆体只用来「看」，不需要被任何代码引用 */
+  appL.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
+  appL.removeAttribute('id');
+  appL.id = 'appL';
+
+  /* ★ 真实界面（appD）保持原样，一个字都不改。
+     只把克隆体设成「另一个主题」—— 它一露出来就是另一套配色。
+     这样无论用户往哪边拖，两端都是对的：
+       appD 是当前主题，appL 是另一个主题，
+       圆的半径 R 就是「另一个主题露出多少」。 */
+  const cur = document.documentElement.dataset.theme || 'light';
+  /* 注意：不改 appD.dataset.theme。它就是真实界面，改它等于
+     「动画还没开始，界面就已经换色了」。 */
+  appL.dataset.theme = otherTheme(cur);
+
+  appL.setAttribute('aria-hidden', 'true');
+  appL.style.position = 'fixed';
+  appL.style.inset = '0';
+  /* 低于弹窗（70）和开关的 popover 层，高于主界面 */
+  appL.style.zIndex = '5';
+  appL.style.pointerEvents = 'none';
+  appL.style.clipPath = 'circle(0px at 0px 0px)';
+  appL.style.willChange = 'clip-path';
+  /* 克隆体自己铺底色：html/body 的底色在它身后，不跟着它变 */
+  appL.style.background = 'var(--bg-1)';
+  /* 独立合成层：clip-path 每帧变只重绘自己，不牵动整页 */
+  appL.style.contain = 'strict';
+
+  /* 克隆体的滚动位置要和原界面一致，否则一露出来就跳 */
+  syncScroll(appD, appL);
+
+  appD.parentNode.insertBefore(appL, appD.nextSibling);
+
+  reveal = { appD, appL, target, cloneMs: performance.now() - t0 };
+  return true;
+}
+
+/** 把 appD 里每个可滚动容器的 scrollTop/Left 抄到克隆体对应位置 */
+function syncScroll(from, to) {
+  const a = from.querySelectorAll('*');
+  const b = to.querySelectorAll('*');
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i += 1) {
+    if (a[i].scrollTop || a[i].scrollLeft) {
+      b[i].scrollTop = a[i].scrollTop;
+      b[i].scrollLeft = a[i].scrollLeft;
+    }
+  }
+}
+
+/**
+ * 每帧写圆形裁剪。由 theme-switch.js 的 render() 调用。
+ *
+ * @param {number} u   开关位置：0 = 深色，1 = 浅色
+ * @param {number} cx  开关中心 X（屏幕坐标）
+ * @param {number} cy  开关中心 Y
+ * @param {number} maxR 盖住整个窗口所需的半径
+ */
+function writeThemeReveal(u, cx, cy, maxR) {
+  if (!reveal) return;
+  const e = u * u * (3 - 2 * u);          // smoothstep，和参考版一致
+  const r = Math.max(0, maxR * e);
+  reveal.appL.style.clipPath =
+    `circle(${r.toFixed(1)}px at ${cx.toFixed(1)}px ${cy.toFixed(1)}px)`;
+}
+
+/**
+ * 结束揭幕：commit 的话把真实界面切成目标主题，然后销毁克隆体。
+ *
+ * @param {boolean} commit 是否真的切换（false = 用户拖到一半弹回去了）
+ */
+function finishThemeReveal(commit) {
+  if (!reveal) return;
+  const { appD, appL, target } = reveal;
+  reveal = null;
+
+  appL.remove();
+
+  if (commit) {
+    /* 真实界面切成目标主题。克隆体已经删了，两边不会错开。 */
+    appD.dataset.theme = target;
+    document.documentElement.dataset.theme = target;
+    applyTheme(target, { titlebar: false });
+    S.settings = { ...S.settings, theme: target, themeChoice: target };
+    api.settings.set({ theme: target, themeChoice: target }).catch(() => {});
+    syncThemeSwitch();
+    syncSettingsUI();
+  }
+  /* commit = false（拖到一半弹回去）：什么都没变，appD 本来就是当前主题 */
+}
+
+/* 暴露给开关。开关每帧调用 writeThemeReveal。 */
+window.__vaultThemeReveal = {
+  prepare: prepareThemeReveal,
+  write: writeThemeReveal,
+  finish: finishThemeReveal,
+  active: () => !!reveal,
+};
+
+/** 旧入口：保留给设置面板、跟随系统等没有拖动过程的调用方。
+ *  新开关接管时（__vaultThemeSwitchOwnsTransition）不会被调到。 */
+function applyThemeWithTransition(next) {
+  return animateThemeSwitch(next);
+}
+
+/**
+ * 从设置面板 / 跟随系统切换主题时的动画。
+ * 这条路径没有拖动过程，所以自己推一个 rAF 把 u 从 0 走到 1（或反过来）。
+ */
+async function animateThemeSwitch(next) {
+  const root = document.documentElement;
+  const cur = root.dataset.theme;
+  if (cur === next) return;
+
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    || root.classList.contains('no-motion');
+
+  if (!ENABLE_THEME_TRANSITION || reduce || !prepareThemeReveal(next)) {
+    finishThemeReveal(true);
+    syncTitlebar(next);
+    dispatchThemeEvent(THEME_EVENT_START, { to: next, durationMs: 0 });
+    dispatchThemeEvent(THEME_EVENT_END, { to: next });
+    return;
+  }
+
+  /* 圆心：开关在就取开关中心，不在就退回左下角 */
+  const sw = document.querySelector('.tsw') || document.getElementById('btnTheme');
+  const r = sw ? sw.getBoundingClientRect() : null;
+  const W = root.clientWidth;
+  const H = root.clientHeight;
+  const cx = r && r.width ? r.left + r.width / 2 : 40;
+  const cy = r && r.height ? r.top + r.height / 2 : H - 40;
+  const maxR = Math.max(
+    Math.hypot(cx, cy), Math.hypot(W - cx, cy),
+    Math.hypot(cx, H - cy), Math.hypot(W - cx, H - cy),
+  ) + 60;
+
+  /* 目标：浅色是 u=1（圆铺满），深色是 u=0（圆收尽） */
+  const from = cur === 'light' ? 1 : 0;
+  const to = next === 'light' ? 1 : 0;
+
+  dispatchThemeEvent(THEME_EVENT_START, { to: next, durationMs: THEME_ANIM_MS });
+
+  await new Promise((resolve) => {
+    const t0 = performance.now();
+    const tick = () => {
+      const q = Math.min(1, (performance.now() - t0) / THEME_ANIM_MS);
+      const u = from + (to - from) * q;
+      writeThemeReveal(u, cx, cy, maxR);
+      if (q < 1) requestAnimationFrame(tick);
+      else resolve();
+    };
+    requestAnimationFrame(tick);
+  });
+
+  finishThemeReveal(true);
+  dispatchThemeEvent(THEME_EVENT_END, { to: next });
+  syncTitlebar(next);
+}
+
+/** 只同步原生标题栏的配色（不重设页面主题） */
+/** 只同步原生标题栏的配色（不重设页面主题） */
+function syncTitlebar(name) {
+  try {
+    window.vault.win.setTitlebarTheme(name);
+  } catch {
+    /* 老版本主进程没有这个接口，忽略 */
+  }
+}
+
+async function openSettings() {
+  $('#settingsModal').hidden = false;
+  syncSettingsUI();
+  applyLayoutSettings();
+
+  // 数据统计
+  $('#statFiles').textContent = `${S.files.length} 个`;
+  $('#statCourses').textContent = `${S.courses.length} 个`;
+
+  try {
+    const info = await api.update.info();
+    $('#verCurrent').textContent = info.version;
+    $('#aboutVer').textContent = `版本 ${info.version}`;
+    const sp = $('#sourcePath');
+    sp.textContent = info.sourceDir || '未设置';
+    sp.title = info.sourceDir || '';
+    $('#statDataPath').textContent = info.dataDir || info.appDir || '—';
+    $('#statDataPath').title = info.dataDir || info.appDir || '';
+  } catch {
+    /* 信息读取失败不影响使用 */
+  }
+}
+
+async function refreshUpdateInfo() {
+  try {
+    const info = await api.update.info();
+    $('#verCurrent').textContent = info.version;
+    $('#aboutVer').textContent = `版本 ${info.version}`;
+    const sp = $('#sourcePath');
+    sp.textContent = info.sourceDir || '未设置';
+    sp.title = info.sourceDir || '';
+    $('#statDataPath').textContent = info.dataDir || info.appDir || '—';
+    $('#statDataPath').title = info.dataDir || info.appDir || '';
+  } catch {
+    /* 忽略 */
+  }
+}
+
+/* ---------- 重复文件检测 ---------- */
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i += 1; }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
+}
+
+/**
+ * 去掉「文件 (1)」「文件（2）」这类自动编号，还原成基名。
+ * 「文件 (1).png」→「文件.png」。只剥一层，够用了：重复下载同一个文件，
+ * 系统只会往后面加编号，不会出现「文件 (1) (1).png」这种。
+ */
+function stripCopyIndex(name) {
+  return String(name || '').replace(/\s*[（(]\d+[)）](\.[^.]*)?$/i, '$1');
+}
+
+/**
+ * 组内某个文件要不要在删除时特别提醒。
+ *
+ * 用户的意思：
+ *   - 「文件.png」和「文件 (1).png」—— 一眼就知道是同一份东西复制出来的，
+ *     删掉不需要心理负担，不要多问。
+ *   - 「pr.png」和「roc.png」—— 名字毫不相干，虽然内容一样，但很可能是
+ *     两次不同用途的导入，删之前必须让人确认一下。
+ *
+ * 所以判定标准是「和组内别的文件是不是同一个基名」。只要组里存在另一个
+ * 文件剥掉编号后跟自己同名，就算自动编号副本，不提醒；否则提醒。
+ */
+function dupNeedsWarn(file, group) {
+  const base = stripCopyIndex(file.name).toLowerCase();
+  return !group.files.some((o) => (
+    o !== file
+    && o.name !== file.name
+    && stripCopyIndex(o.name).toLowerCase() === base
+  ));
+}
+
+let dupeGroups = [];
+let dupeKeep = new Map(); // groupIndex -> 保留的 fileId
+
+async function findDuplicates(fromNav = false) {
+  const btn = fromNav ? $('#navDupes') : $('#btnFindDupes');
+  const restore = fromNav ? null : btn.textContent;
+  if (!fromNav) {
+    btn.disabled = true;
+    btn.textContent = '检测中…';
+  }
+  $('#navDupes').classList.add('is-busy');
+  // 让按钮文案先画出来，否则同步哈希会把它吞掉
+  await new Promise((r) => setTimeout(r, 16));
+  try {
+    // 从侧栏点进来就查全库；从设置点进来，当前在某个目录里就只查这个目录
+    const scopeId = !fromNav && S.view.type === 'course' ? S.view.courseId : null;
+    const res = await api.dupes.scan(scopeId);
+
+    if (!res.groups.length) {
+      toast(`已检测 ${res.scanned} 个文件，没有发现重复`, 'ok');
+      return;
+    }
+
+    dupeGroups = res.groups;
+    dupeKeep = new Map();
+    // 每组默认保留最早导入的那份
+    dupeGroups.forEach((g, i) => dupeKeep.set(i, g.files[0].id));
+
+    renderDupeModal(res);
+    $('#dupeModal').hidden = false;
+  } catch (err) {
+    toast(err.message || '检测失败', 'error');
+  } finally {
+    $('#navDupes').classList.remove('is-busy');
+    if (!fromNav) {
+      btn.disabled = false;
+      btn.textContent = restore || '开始检测';
+    }
+  }
+}
+
+function renderDupeModal(res) {
+  const totalDup = dupeGroups.reduce((n, g) => n + g.files.length - 1, 0);
+  $('#dupeSummary').innerHTML = `
+    <div class="dupe-stat">
+      <strong>${dupeGroups.length}</strong>
+      <small>组重复</small>
+    </div>
+    <div class="dupe-stat">
+      <strong>${totalDup}</strong>
+      <small>个多余副本</small>
+    </div>
+    <div class="dupe-stat">
+      <strong>${fmtBytes(res.waste)}</strong>
+      <small>可释放</small>
+    </div>
+    <p class="dupe-tip">每组默认保留最早导入的那份，你可以点选要保留哪一份。</p>`;
+
+  $('#dupeGroups').innerHTML = dupeGroups.map((g, gi) => `
+    <section class="dupe-group" data-group="${gi}">
+      <header class="dupe-group-head">
+        <span class="dupe-size">${fmtBytes(g.size)}</span>
+        <span class="dupe-count">${g.files.length} 个相同文件</span>
+      </header>
+      <div class="dupe-files">
+        ${g.files.map((f) => {
+          // 名字和同组文件毫不相干时先标出来，别让人点删除按钮才发现
+          const warn = dupNeedsWarn(f, g);
+          return `
+          <label class="dupe-file ${f.id === dupeKeep.get(gi) ? 'is-keep' : ''}" data-file="${f.id}">
+            <input type="radio" name="keep-${gi}" value="${f.id}"
+                   ${f.id === dupeKeep.get(gi) ? 'checked' : ''} />
+            <span class="dupe-radio"></span>
+            <span class="dupe-file-body">
+              <span class="dupe-name-row">
+                <span class="dupe-name">${escapeHtml(f.name)}</span>
+                ${warn ? '<span class="dupe-warn" title="它和这一组里其他文件名字不一样，只是内容完全相同">名字不同</span>' : ''}
+              </span>
+              <span class="dupe-path" title="${escapeHtml(f.path)}">${escapeHtml(f.dirPath)}</span>
+            </span>
+            <span class="dupe-tag">${f.id === dupeKeep.get(gi) ? '保留' : '删除'}</span>
+          </label>`;
+        }).join('')}
+      </div>
+    </section>`).join('');
+
+  updateDupeFooter();
+}
+
+function updateDupeFooter() {
+  const toDelete = dupeGroups.reduce(
+    (n, g, i) => n + g.files.filter((f) => f.id !== dupeKeep.get(i)).length,
+    0,
+  );
+  $('#btnDupeRemove').disabled = toDelete === 0;
+  $('#btnDupeRemove').textContent = toDelete ? `删除 ${toDelete} 个` : '无需删除';
+  $('#dupeFootNote').textContent = toDelete ? '删除的文件会先进回收站' : '';
+}
+
+async function removeDuplicates() {
+  const ids = [];
+  /** 待删文件里名字和同组不一样的 —— 这些要单独提醒 */
+  const renamed = [];
+  dupeGroups.forEach((g, i) => {
+    for (const f of g.files) {
+      if (f.id === dupeKeep.get(i)) continue;
+      ids.push(f.id);
+      if (dupNeedsWarn(f, g)) renamed.push(f);
+    }
+  });
+  if (!ids.length) return;
+
+  /* 「文件 (1)」那种自动编号副本不啰嗦，直接删；名字毫不相干但内容一样的，
+   * 把名字列出来再确认一次 —— 很可能是两次不同用途的导入，误删代价高。 */
+  const note = renamed.length
+    ? `<p>其中 ${renamed.length} 个是和同组文件<b>名字不同、内容相同</b>的，请确认确实是同一份：</p>
+       <ul>${renamed.slice(0, 8).map((f) => `<li>${escapeHtml(f.name)}</li>`).join('')}${
+         renamed.length > 8 ? `<li>…等 ${renamed.length} 个</li>` : ''
+       }</ul>`
+    : '';
+
+  const ok = await askConfirm({
+    title: renamed.length ? '确认移除这些重复文件' : '移除重复文件',
+    lead: renamed.length
+      ? `将移除 ${ids.length} 个重复文件，它们会先进入回收站，可以还原。`
+      : `将移除 ${ids.length} 个重复文件。它们会先进入回收站，可以随时还原。`,
+    okText: renamed.length ? '确认移除' : '移除',
+    // 名字不同的那批把按钮标红，提醒这是需要多看一眼的操作
+    danger: renamed.length > 0,
+    note,
+  });
+  if (!ok) return;
+
+  try {
+    const res = await api.dupes.remove(ids);
+    applyState(res.state);
+    $('#dupeModal').hidden = true;
+    toast(`已移除 ${res.removed} 个重复文件，可在回收站还原`, 'ok');
+  } catch (err) {
+    toast(err.message || '删除失败', 'error');
+  }
+}
+
+/* ============================================================
+   软件更新
+   ============================================================ */
+let pendingUpdate = null;
+
+/* ---------- 自动检测到的更新 ---------- *
+ * 主进程按设置的间隔在后台比对开发目录，结果通过 'update:available' 送过来。
+ * 这里只在「软件更新」区块下面摆一条提醒，不弹窗也不抢焦点：定时检测很
+ * 可能正赶上用户在干别的，弹出来打断的代价比晚看几分钟大得多。
+ * 明细仍然走下面的 updateResult，和手动检查完全同一条路径。 */
+let autoUpdate = null;
+// 用户关掉过的提醒（按比对结果记账：下次比出不一样的东西还会再提醒）
+let autoUpdateDismissed = '';
+
+function autoUpdateKey(d) {
+  return `${d.version || ''}|${d.total}`;
+}
+
+function showAutoUpdate(d) {
+  // 检测失败（没设开发目录、目录被移走）静默跳过，不要隔一阵就报一次错
+  if (!d?.ok) return;
+  autoUpdate = d.total ? d : null;
+  if (!d.total) {
+    // 已经没有差异了（可能刚更新完），旧的提醒要收掉
+    $('#updateAvail').hidden = true;
+    return;
+  }
+  if (autoUpdateKey(d) === autoUpdateDismissed) return;
+
+  const parts = [];
+  if (d.changed.length) parts.push(`修改 ${d.changed.length}`);
+  if (d.added.length) parts.push(`新增 ${d.added.length}`);
+  if (d.removed.length) parts.push(`删除 ${d.removed.length}`);
+  $('#updateAvailDesc').textContent = `共 ${d.total} 个文件有变化（${parts.join(' · ')}）`;
+  $('#updateAvail').hidden = false;
+}
+
+/** 「查看明细」：把自动检测的这份结果直接展开，不再重新扫一遍磁盘 */
+function viewAutoUpdate() {
+  if (!autoUpdate) return;
+  pendingUpdate = autoUpdate;
+  renderUpdateResult(autoUpdate);
+  $('#btnApplyUpdate').disabled = !autoUpdate.total || !!autoUpdate.depsChanged;
+  autoUpdateDismissed = autoUpdateKey(autoUpdate);
+  $('#updateAvail').hidden = true;
+
+  const reduce = document.documentElement.classList.contains('no-motion')
+    || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  $('#updateResult').scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
+}
+
+function dismissAutoUpdate() {
+  if (autoUpdate) autoUpdateDismissed = autoUpdateKey(autoUpdate);
+  $('#updateAvail').hidden = true;
+}
+
+function renderUpdateResult(d) {
+  const box = $('#updateResult');
+  box.hidden = false;
+
+  if (!d.ok) {
+    box.innerHTML = `<div class="ur-head">
+      <svg viewBox="0 0 24 24" style="color:var(--accent)"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor"/></svg>
+      无法检查</div><div>${escapeHtml(d.reason || '未知原因')}</div>`;
+    return;
+  }
+
+  if (!d.total) {
+    box.innerHTML = `<div class="ur-head">
+      <svg viewBox="0 0 24 24" style="color:#3aa675"><path d="M4 12.5l5 5L20 6.5"/></svg>
+      已是最新</div><div>没有检测到文件变化。</div>`;
+    return;
+  }
+
+  const rows = [];
+  d.changed.forEach((f) => rows.push(`<li>~ ${escapeHtml(f)}</li>`));
+  d.added.forEach((f) => rows.push(`<li class="ur-ok">+ ${escapeHtml(f)}</li>`));
+  d.removed.forEach((f) => rows.push(`<li class="ur-warn">- ${escapeHtml(f)}</li>`));
+
+  /* 依赖变了但只同步代码 = 新代码 require 不到新库，装出来的软件会白屏。
+   * 这种事必须在点「应用」之前就拦住，不能等用户更新完发现打不开。 */
+  const depWarn = d.depsChanged
+    ? `<div class="ur-deps">
+        <svg viewBox="0 0 24 24"><path d="M12 4l9 16H3L12 4z"/><path d="M12 10v4"/><circle cx="12" cy="17" r="0.9" fill="currentColor"/></svg>
+        <div><strong>依赖有变化，不能只同步代码。</strong>
+        更新只复制代码文件，不会安装新的 npm 依赖。请重新打包后再分发。</div>
+      </div>`
+    : '';
+
+  box.innerHTML = `<div class="ur-head">
+    <svg viewBox="0 0 24 24" style="color:var(--accent)"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/></svg>
+    ${d.total} 个文件有变化</div>${depWarn}<ul>${rows.join('')}</ul>`;
+}
+
+async function checkUpdate() {
+  const btn = $('#btnCheckUpdate');
+  btn.disabled = true;
+  btn.textContent = '检查中…';
+  try {
+    const d = await api.update.check();
+    pendingUpdate = d;
+    renderUpdateResult(d);
+    // 依赖变了就不能「应用并重启」，只能重新打包
+    $('#btnApplyUpdate').disabled = !d.ok || !d.total || !!d.depsChanged;
+    // 明细已经展开在下面了，提醒条留着只是重复一遍
+    if (d.ok) {
+      autoUpdateDismissed = autoUpdateKey(d);
+      $('#updateAvail').hidden = true;
+    }
+  } catch (err) {
+    renderUpdateResult({ ok: false, reason: err.message });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '检查更新';
+  }
+}
+
+async function applyUpdate() {
+  if (!pendingUpdate?.total) return;
+  const ok = await askConfirm({
+    title: '应用更新',
+    lead: `将同步 ${pendingUpdate.total} 个文件到程序目录，旧文件会自动备份，然后软件重启。确定吗？`,
+    okText: '应用并重启',
+  });
+  if (!ok) return;
+
+  const btn = $('#btnApplyUpdate');
+  btn.disabled = true;
+  btn.textContent = '更新中…';
+  try {
+    const r = await api.update.apply();
+    toast(`已同步 ${r.applied} 个文件，正在重启…`, 'ok');
+    setTimeout(() => api.update.restart(), 700);
+  } catch (err) {
+    toast(err.message || '更新失败', 'error');
+    btn.disabled = false;
+    btn.textContent = '应用并重启';
+  }
+}
+
+/* ============================================================
+   启动
+   ============================================================ */
+async function boot() {
+  bindEvents();
+  try {
+    const state = await api.bootstrap();
+    applyState(state);
+
+    if (setting('restoreView')) restoreLastView();
+
+    collapseTreeOnBoot();
+    render();
+
+    const choice = S.settings.themeChoice || S.settings.theme || 'light';
+    const resolved = choice === 'system' ? (prefersDark() ? 'dark' : 'light') : choice;
+    applyTheme(resolved);
+
+    applyLayoutSettings();
+    document.documentElement.classList.toggle('no-motion', !!setting('reduceMotion'));
+    syncSettingsUI();
+
+    // 跟随系统时，系统主题变化要实时反映
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+      if ((S.settings.themeChoice || 'light') !== 'system') return;
+      applyThemeWithTransition(e.matches ? 'dark' : 'light');
+    });
+
+    renderGuide();
+    maybeShowChangelog();
+  } catch (err) {
+    toast(`初始化失败：${err.message}`, 'error');
+  }
+}
+
+// 调试/自动化钩子：供开发期脚本驱动界面，不参与业务逻辑
+window.__vaultDebug = {
+  get state() { return S; },
+  apply: applyState,
+  render,
+  openPreview,
+  closePreview,
+  refresh: async () => applyState(await api.getState()),
+  openChangelog,
+  closeChangelog,
+  openSettings,
+  renderGuide,
+};
+
+boot();

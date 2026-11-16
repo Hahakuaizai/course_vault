@@ -1,0 +1,46 @@
+/* ============================================================
+   主题切换 · 页面揭幕动画
+   ------------------------------------------------------------
+   照抄 aurora-win11-fx.html 的做法：
+
+   ★ 核心机制：**两份完整的 DOM 叠加**
+   app.js 在启动时把 `.app` 克隆一份，克隆体叫 appL，盖在原界面
+   appD 之上，并把它的 data-theme 设成另一个主题。两份各自按自己的
+   data-theme 渲染，颜色天然不同。
+
+   开关每帧写 appL.style.clipPath = circle(R at 开关中心)：
+     · R 从 0 涨到铺满 → 上层（appL）从开关里涌出来
+     · R 从铺满收到 0 → 上层（appL）被吸回开关里
+   因为是逐帧写的，**拖动滑块时页面实时跟着变**，不是松手才播一次。
+   这正是用户说的「页面没有跟随滑块的移动而变化」缺的那一环。
+
+   以前用 View Transition：它只在切换瞬间拍一次快照，快照期间主线程
+   还被冻结几十毫秒，既不能跟手，也让开关显得「严重延迟」。
+   ============================================================ */
+
+/* 上层（克隆体）：不接事件（除非它就是当前主题，见 JS 里的 pointerEvents），
+   只裁形状。will-change 让浏览器为它单独建一层，clip-path 每帧改才不重绘整页。 */
+#appL {
+  pointer-events: none;
+  will-change: clip-path;
+}
+
+/* ---------- 降级遮罩 ----------
+   双份 DOM 建不起来（极端情况：克隆失败）时的纯色过渡。
+   由 JS 临时创建、动画结束即移除，平时不在 DOM 里。 */
+.theme-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0;
+}
+
+/* ---------- 旧 View Transition 规则 ----------
+   保留为空壳：万一还有别处调用 document.startViewTransition，
+   别让它默认的交叉淡入和新机制抢戏。 */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
