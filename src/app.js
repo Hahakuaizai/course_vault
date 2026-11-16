@@ -248,6 +248,12 @@ const RELEASE_NOTES = [
   {
     date: '2026-11-16',
     items: [
+      { type: 'fix', text: '修复「全部文件」里用名称搜索搜到某个文件夹后，点它进不去：标题和面包屑都换成了新目录，可网格里还是全库的搜索结果，里面的文件一个都看不见。原因是进目录时只清掉了搜索结果、没清掉搜索框里的文字，界面一直当自己还在搜索。现在点文件夹、点侧栏、点目录树、点面包屑、按 Alt+↑ / Alt+Home，都会把搜索一起收起来，进去就能看到里面的内容' },
+    ],
+  },
+  {
+    date: '2026-11-16',
+    items: [
       { type: 'fix', text: '修复目录树整个显示不出来、只剩一片空白（但文件还能搜到）：保存目录时漏传了一个字段，导致目录的「上级目录」存成了颜色值，每个目录都挂不到上一级，整棵树就散了。你的目录和文件一个都没丢，这次启动会自动修回来，修之前还会把数据库另存一份备份' },
       { type: 'fix', text: '修复在软件里改了目录结构（新建、移动、重命名、删除），重启后又变回原样：和上一条是同一个原因，「上级目录」这一列根本没存进去。现在改完立刻就能存住' },
       { type: 'fix', text: '修复「检查更新」明明改了好几个文件却只报一两个：读取文件内容失败时被当成了「内容相同」，那个文件就静默漏掉了。现在读不到会明确报出来，宁可多报也不漏' },
@@ -1710,11 +1716,35 @@ function updateSelBar() {
     + (nFiles ? ` · ${fmtSize(sizes)}` : '');
 }
 
+/**
+ * 切换视图前清掉搜索状态。
+ *
+ * ★ 只清 searchHits 是不够的
+ * renderMain() 和 visibleFiles() 判断「是否在搜索」用的是
+ * `!!S.search.trim()` —— 搜索框里的文字。而 searchHits 只有**内容
+ * 搜索**才会填（名称搜索走本地过滤，压根不碰它）。所以导航时如果
+ * 只清 searchHits、留着 S.search，用户点进文件夹后会看到：
+ *   · 标题、面包屑都换成了新目录（导航逻辑确实执行了）；
+ *   · 但网格里还是全库的搜索结果，文件一个都不显示；
+ *   · 看起来就是「点了有反应，但没进去」。
+ * 实测：在「全部文件」搜 code → 点 code 文件夹 → 标题变成 code、
+ * 面包屑变成「全部 / 项目设计 / code」，可计数还是「2 个结果」、
+ * 里面那 3 个文件（工作满意度分析.R 等）一个都看不见。
+ * 必须连搜索框一起清空，否则 `searching` 一直是 true。
+ */
+function clearSearchState() {
+  S.searchHits = null;
+  if (!S.search) return;
+  S.search = '';
+  const inp = $('#searchInput');
+  if (inp) inp.value = '';
+}
+
 /** 进入某个目录 */
 function enterDir(dirId) {
   if (!dirId) return;
   S.view = { type: 'course', courseId: dirId };
-  S.searchHits = null;
+  clearSearchState();
   clearSelection();
   revealInTree(dirId);
   saveLastView();
@@ -3570,6 +3600,9 @@ function bindEvents() {
   $$('.nav-item[data-view]').forEach((el) => {
     el.addEventListener('click', () => {
       S.view = { type: el.dataset.view, courseId: null };
+      /* 换视图要连搜索一起清掉，否则停在搜索结果里点侧栏没反应
+         （详见 clearSearchState 的注释） */
+      clearSearchState();
       // 回收站是独立视图，需要换掉主区的 class
       document.body.classList.toggle('trash-view', S.view.type === 'trash');
       saveLastView();
@@ -3654,7 +3687,7 @@ function bindEvents() {
     const row = e.target.closest('[data-course]');
     if (!row) return;
     S.view = { type: 'course', courseId: row.dataset.course };
-    S.searchHits = null;
+    clearSearchState();
     saveLastView();
     render();
   });
@@ -3934,7 +3967,7 @@ function bindEvents() {
     const id = btn.dataset.crumb;
     if (id === 'root') S.view = { type: 'all', courseId: null };
     else S.view = { type: 'course', courseId: id };
-    S.searchHits = null;
+    clearSearchState();
     saveLastView();
     render();
   });
@@ -5196,6 +5229,7 @@ function bindEvents() {
     if (e.altKey && e.key === 'ArrowUp') {
       e.preventDefault();
       S.view = { type: 'all', courseId: null };
+      clearSearchState();
       saveLastView();
       render();
       return;
@@ -5204,6 +5238,7 @@ function bindEvents() {
     if (e.altKey && e.key === 'Home') {
       e.preventDefault();
       S.view = { type: 'all', courseId: null };
+      clearSearchState();
       saveLastView();
       render();
     }
