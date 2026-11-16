@@ -193,29 +193,29 @@ initTilt();
 initSwitchWatch();
 
 /* ---------- 主题切换光线 ----------
-   一条 45° 的液态玻璃光带横穿窗口。**配色跟着目的地走**：
+   一条 45° 的液态玻璃光带横穿窗口。**配色跟着方向走**：
 
      切到深色  月光白紫（夜色漫上来）  左下 ──▶ 右上
      切到浅色  阳光金黄（天亮了照进来）右上 ──▶ 左下
 
-   两个方向共用同一套几何，方向靠 CSS 关键帧反过来（见 page-motion.css
-   的 cv-light-fwd / cv-light-back）。
+   ★ 位置由开关的 pos 直接驱动，不是一段自己跑完的动画
+   参考文件（slider-follow-light.txt）的核心是这条链：
 
-   ★ 触发为什么用 prepare 事件，而不是盯着 data-theme
-   `document.documentElement.dataset.theme` 要等揭幕**播完**才更新
-   （见 app.js 的 finishThemeReveal）。盯着它的话，光线只能等揭幕结束
-   才开始，和圆扩散彻底脱节 —— 用户的原话是「光线出现得有点晚」。
-   而且亮→暗那条路径在 prepare 阶段就会把 .app 先切成深色，用
-   data-theme 判断方向还可能读到中间态，颜色会反。
+       pos ──▶ u ──▶ F = -.14 + 1.28u ──▶ p / A ──▶ 光的位置与亮度
 
-   `cv:theme-transition-prepare` 是揭幕**建立的那一刻**派发的，
-   detail 里带明确的 `to`（目标主题）。所有路径都会经过它：
-     · 点开关 / 拖开关  → theme-switch.js 的 beginReveal
-     · 设置面板 / 跟随系统 → app.js 的 animateThemeSwitch
-   所以用它触发，光线和揭幕同一帧起步，时长也对齐（800ms），
-   到终点时正好和揭幕一起收。
+   中间这环不能省。以前这里是「prepare 时给元素加个 .go 类，让 CSS
+   @keyframes 自己跑 1150ms」—— 那时光不管滑块停在哪都会一路扫到终点，
+   用户的原话是「想做成和滑块速度一致的光线，停在中间光也悬停中间」。
+   现在改成：驱动方（开关的 render、设置面板的 rAF）每帧把当前 u 交给
+   set()，由它算出 p / A 写进 CSS 变量。pos 不动 → u 不动 → 光冻结。
 
-   ★ 只在有事情发生时扫
+   ★ 三个驱动方，同一套 set()
+     · 开关拖动 / 点击   theme-switch.js 的 render()，u 就是 pos（弹簧驱动）
+     · 设置面板 / 跟随系统 app.js 的 animateThemeSwitch()，u 由 rAF 推
+     · 开屏            本文件自己 rAF 推一遍（下面那段），借同一个 set()
+   所以三种路径的观感完全一致，只是 u 的来源不同。
+
+   ★ 只在有事情发生时动
    以前这里还挂过「空闲时每 18 秒扫一次」的定时器，用户什么都没做
    界面就自己动，像故障重绘 —— 已经去掉。同理，主区背景层那个 26 秒
    的漂移动画（pmDrift）也删了，那才是用户反馈「没切主题也在横扫」的
@@ -230,33 +230,189 @@ function initSweep() {
   el.setAttribute('aria-hidden', 'true');
   document.body.appendChild(el);
 
-  /**
-   * 播一次。
-   * @param {'dark'|'light'} target 目标主题 —— 决定配色和方向：
-   *        到 dark 用 to-dark（月光紫、左下→右上）；
-   *        到 light 用 to-light（阳光金、右上→左下）。
-   */
-  const play = (target) => {
-    if (reduceMotion()) return;
-    el.dataset.mode = target === 'dark' ? 'to-dark' : 'to-light';
-    el.classList.remove('go');
-    void el.offsetWidth;             /* 强制重排，让动画能重新开始 */
-    el.classList.add('go');
-    clearTimeout(el._t);
-    /* 光带动画 1150ms（覆盖揭幕实测时长），留一点余量再摘类 */
-    el._t = setTimeout(() => el.classList.remove('go'), 1300);
+  let lastP = NaN;
+  let lastA = NaN;
+  let mode = '';
+
+  /* ---------- 平滑状态 ----------
+     targetU 是驱动方给的「真实进度」，curU 是光实际走到的位置。
+     两者之间差一阶延迟 —— 光因此永远慢半拍，读起来是「柔缓地跟上」，
+     而不是和页面一模一样地平移。见下面 set() 的注释。 */
+  let targetU = null;
+  let curU = null;
+  let dragging = false;
+  let wantIdle = false;
+  let raf = 0;
+  let idleTimer = 0;
+  let lastT = 0;
+
+  const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+  const ss = (a, b, x) => {
+    const t = clamp01((x - a) / (b - a));
+    return t * t * (3 - 2 * t);
   };
 
-  /* 开屏那一下：按当前主题选配色，和「刚从另一边切过来」同款 */
-  setTimeout(() => {
-    play(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
-  }, 900);
+  /** 把进度画成 CSS 变量（位置 + 亮度） */
+  function paint(u) {
+    const F = 1.14 - 1.28 * clamp01(u);
+    const p = F * 100;
+    const A = ss(-0.1, 0.03, F) * (1 - ss(0.97, 1.12, F));
+    /* 死区：变化小到看不出来就不写，省掉无谓的样式重算。 */
+    if (Math.abs(p - lastP) < 0.12 && Math.abs(A - lastA) < 0.004) return;
+    lastP = p;
+    lastA = A;
+    el.style.setProperty('--p', p.toFixed(2));
+    el.style.setProperty('--a', A.toFixed(3));
+  }
 
-  /* 主题切换：在揭幕建立的那一刻同步起步 */
+  function clearVars() {
+    lastP = NaN;
+    lastA = NaN;
+    targetU = null;
+    curU = null;
+    el.style.setProperty('--p', '-14');
+    el.style.setProperty('--a', '0');
+  }
+
+  function kick() {
+    if (raf) return;
+    lastT = performance.now();
+    raf = requestAnimationFrame(loop);
+    /* ★ 兜底：窗口在后台 / 最小化时浏览器完全不派发 rAF，光会永远停在
+       半路，等窗口回到前台才突然补上。用 setTimeout 并行推进 —— 后台
+       的 setTimeout 被节流到约 1s 一次，但至少能把光推到终点，
+       用户切回来时状态是对的（theme-switch.js 的 kick() 同款处理）。 */
+    if (!idleTimer) {
+      idleTimer = setTimeout(function backup() {
+        idleTimer = 0;
+        if (targetU === null || curU === null) return;
+        /* 已经追上了：没有待办就收工，别空转 */
+        if (curU === targetU) {
+          if (wantIdle) clearVars();
+          return;
+        }
+        loop(performance.now());
+        /* loop 跑完如果 curU 还没到目标，说明 rAF 那一帧被浏览器丢了
+           （窗口在后台时会这样）—— 继续用 setTimeout 推。注意判断
+           条件必须是「还没到目标」，不能是「raf 为 0」：loop 在
+           「已对齐但驱动方还在跑」的分支里本来就不会请求帧，
+           用 raf 判断会让这个兜底每 120ms 空转一次。 */
+        if (curU !== targetU && !idleTimer) idleTimer = setTimeout(backup, 120);
+      }, 120);
+    }
+  }
+
+  function loop(t) {
+    raf = 0;
+    if (targetU === null || curU === null) return;
+    const dt = Math.min(64, Math.max(1, t - lastT)) / 1000;
+    lastT = t;
+
+    /* 一阶趋近（指数平滑）。时间常数的两个取值就是「光比页面慢多少」：
+       · 拖动中 70ms —— 必须跟手。用户拖着滑块，光要是明显落在后面，
+         会觉得是卡顿而不是柔和。
+       · 松手后 / 设置面板 240ms —— 这就是用户要的「比动画慢一点点」。
+         揭幕约 1.4s，光会晚 200ms 左右才到位，收尾也因此更缓。 */
+    const tau = dragging ? 0.07 : 0.24;
+    const k = 1 - Math.exp(-dt / tau);
+    curU += (targetU - curU) * k;
+    if (Math.abs(targetU - curU) < 0.0008) curU = targetU;
+    paint(curU);
+
+    if (curU !== targetU) {
+      raf = requestAnimationFrame(loop);
+    } else if (wantIdle) {
+      /* 驱动方说结束了，且光也追到了终点：清掉变量收工。
+         注意是「追到终点之后才清」，不是一收到 hide 就清 ——
+         否则光会在还差一截的地方突然消失。 */
+      clearVars();
+    } else {
+      /* 已对齐但驱动方还在跑（比如弹簧停在中间）：保持不动，
+         不再请求帧。等下一次 set() 再唤醒。 */
+    }
+  }
+
+  /**
+   * 按开关位置更新光的目标位置 —— 整条链的中间那环。
+   *
+   * @param {number} u 开关位置 0..1（0 = 深色端，1 = 浅色端）
+   * @param {'to-dark'|'to-light'} [m] 配色；省略则沿用上一次
+   * @param {boolean} [isDrag] 是否正在拖动（决定平滑的时间常数）
+   *
+   * 映射取自参考文件，但把方向倒了过来：
+   *   F = 1.14 - 1.28 * u   → p = F * 100 ∈ [-14, 114]
+   *   A = ss(-0.1, 0.03, F) * (1 - ss(0.97, 1.12, F))
+   *
+   *   u = 0（深色端） → p = 114, A = 0  光在右上屏外、不可见
+   *   u = 0.5        → p =  50, A = 1  光压在正中、最亮
+   *   u = 1（浅色端） → p = -14, A = 0  光在左下屏外、不可见
+   *
+   * ★ 为什么是 1.14 - 1.28u 而不是参考文件的 -0.14 + 1.28u
+   * 参考版的 u 就是「亮的进度」，所以 u 涨光往一个固定方向走。
+   * 我们的 u 是**揭幕的浅色进度**（0=深色、1=浅色），而验收过的方向是
+   *   切到深色：左下 → 右上   （u 从 1 降到 0）
+   *   切到浅色：右上 → 左下   （u 从 0 升到 1）
+   * 要让 u 递减时光往右上走，p 必须随 u 递减 —— 于是符号反过来。
+   * A 的两个端点不受影响：u=0/1 时 F=±1.14，两端的 smoothstep 都把它
+   * 压成 0；u=0.5 时 F=0.5，A=1。位置和亮度的性质完全保留。
+   */
+  const set = (u, m, isDrag) => {
+    if (m && m !== mode) { mode = m; el.dataset.mode = m; }
+    dragging = !!isDrag;
+    /* 首次（或刚从 hide 里恢复）：直接把光的起点对齐到 u，
+       不要让光从上一次结束的位置飞过来。 */
+    if (curU === null) curU = clamp01(u);
+    targetU = clamp01(u);
+    wantIdle = false;
+    kick();
+  };
+
+  /** 驱动方宣告本次切换结束：等光追到终点后自行清空 */
+  const hide = () => {
+    wantIdle = true;
+    if (curU === null || targetU === null) { clearVars(); return; }
+    kick();
+  };
+
+  window.__vaultSweep = { set, hide };
+
+  /* 揭幕建立时先定好配色。位置不在这里推 —— 拖动路径下目的地还没定，
+     theme-switch.js 会按拖动方向覆盖这个初始值。 */
   window.addEventListener('cv:theme-transition-prepare', (e) => {
     const to = e.detail && e.detail.to;
     if (to !== 'dark' && to !== 'light') return;
-    play(to);
+    mode = to === 'dark' ? 'to-dark' : 'to-light';
+    el.dataset.mode = mode;
   });
+
+  /* 开屏那一下：没有拖动过程，自己用 rAF 从一端推到另一端。
+     只是「借」同一个 set()，和真切换完全同构，区别只在 u 来自时间。
+     用 smoothstep 而不是线性：开屏没人跟手，柔一点更好看。
+
+     ★ 注意这里要等 set() 的平滑追上来再宣告结束
+     现在 set() 只更新「目标」，光由内部的 rAF 慢慢追上。如果按时间
+     一到就 hide()，光会停在还差一截的位置然后被清空。所以留一段余量
+     让平滑收尾（240ms 时间常数下大约 3 倍才追到 95%）。 */
+  setTimeout(() => {
+    if (reduceMotion()) return;
+    const dark = document.documentElement.dataset.theme === 'dark';
+    /* 当前是深色 = 刚从浅色切过来：u 从 1 走到 0，配色 to-dark。
+       当前是浅色则反过来。 */
+    const m = dark ? 'to-dark' : 'to-light';
+    const from = dark ? 1 : 0;
+    const to = dark ? 0 : 1;
+    const t0 = performance.now();
+    /* 1600ms：和真切换那条路径的节奏对齐（开关弹簧现在约 1.5s）。
+       以前是 1150ms，用户连着三轮都说快，这里一起放慢。 */
+    const DUR = 1600;
+    const tick = () => {
+      const q = Math.min(1, (performance.now() - t0) / DUR);
+      const e = q * q * (3 - 2 * q);
+      set(from + (to - from) * e, m);
+      if (q < 1) requestAnimationFrame(tick);
+      else setTimeout(hide, 700);
+    };
+    requestAnimationFrame(tick);
+  }, 900);
 }
 initSweep();

@@ -364,12 +364,32 @@
    直接盖一层冷白芯 + 紫雾上去。两层的分工写在下面各自的注释里。
 
    ★ 什么时候扫
-   只在主题切换落定后、以及软件打开时。**静置时绝不自己动** ——
+   只在主题切换过程中、以及软件打开时。**静置时绝不自己动** ——
    以前 .main::before 上挂过一个 26 秒漂移的动画，那才是用户看到的
-   「没人操作界面自己横扫」，已经在上面删掉了。 */
+   「没人操作界面自己横扫」，已经在上面删掉了。
+
+   ★ 位置由滑块 pos 直接驱动，不是动画
+   --p 是光在行程上的位置（-14 → 114，单位是「光带自身宽度的百分比」），
+   --a 是亮度（0 → 1 → 0）。两个都由 page-motion.js 的 set() 每帧按
+   开关的 pos 算出来写在这里。所以：
+     · 拖着滑块走，光跟着走；
+     · 松手停在中间，光就停在中间、最亮；
+     · pos 不动，变量不动，光冻结在原地。
+   以前这里挂的是 @keyframes cv-light-fwd / cv-light-back，1150ms 自己
+   跑完 —— 不管滑块停在哪，光都会自顾自扫到终点再消失。参考文件
+   （slider-follow-light.txt）里那句「少了中间这环、改用 @keyframes/
+   定时器驱动，光就不会跟手停住」说的就是这件事。 */
 .cv-sweep {
   position: fixed; inset: 0; z-index: 400;
-  pointer-events: none; overflow: hidden; opacity: 0;
+  pointer-events: none; overflow: hidden;
+  /* 两个变量都由 JS 每帧写。默认值 = 光在屏外、完全透明。 */
+  --p: -14;
+  --a: 0;
+  /* ★ 亮度 --a 不能写在这一层上
+     它一旦取 0~1 之间的值，就会给 .cv-sweep 建一个不透明度分组，
+     两片光各自的 mix-blend-mode 就被关进这个组里、只和组内的透明底
+     混合，等于失效（深色主题上 screen 的发光会整个丢掉）。所以 --a
+     只作用在 ::before / ::after 自己身上（见下），容器保持不透明。 */
 }
 
 /* 光带本体。两片共用几何，只在配色和混合模式上分岔。
@@ -389,169 +409,150 @@
   height: var(--h);
   margin: calc(var(--h) / -2) 0 0 -105vmax;
   transform-origin: 50% 50%;
-  /* 45° = "\" 延伸方向；translateY 垂直于它，即 "/" 移动方向 */
-  transform: rotate(45deg) translateY(var(--travel));
+  /* 45° = "\" 延伸方向；translateY 垂直于它，即 "/" 移动方向。
+     --p 是行程位置，取值 -14 → 50 → 114：
+       -14  光带中心在左下方屏外
+        50  光带中心正好压在窗口中心
+       114  光带中心在右上方屏外
+     取 (50 - p) 是为了让 p=50 时位移恰好为 0 —— 光带本来就是用
+     left/top 50% 居中的，位移 0 就是压在正中。这是「拖到中间、
+     光也停在中间」的关键；写成 p 的绝对值就永远对不齐中心。
+     行程单位用 vmax（绝对长度），不用百分比：translateY 的百分比
+     相对元素自身高度（8.5vmax），而这里要移动的是窗口对角线量级。 */
+  transform: rotate(45deg)
+    translateY(calc(var(--travel) * (50 - var(--p)) / 100));
+  /* 亮度写在光层自己身上，不是容器上 —— 理由见 .cv-sweep 的注释 */
+  opacity: var(--a);
   will-change: transform, opacity;
 }
 
-/* ---------- 切到浅色：阳光金黄 ----------
+/* ---------- 切到浅色：阳光金 ----------
    白天来了，一束暖光从右上斜下来。浅色底是 #faf9f5（接近白），
    screen 会把一切叠成白，所以这一套必须用 normal 直接盖色。
 
-   主光是一道有**实体感**的玻璃光带：沿厚度方向的剖面是
-     淡入 → 上边缘亮线 → 玻璃体 → 中心高光 → 玻璃体 → 下边缘亮线 → 淡出
-   两条亮线就是玻璃边缘的折射，中间那段层次是玻璃厚度里透出来的光。
-   边缘过渡只有 3%（约 3px），轮廓清楚；完全不用 filter: blur ——
-   一模糊就又变回「虚」的了。 */
+   ★ 剖面：中心亮芯，向两侧平滑衰减 —— 不要再做边缘亮线
+   早先那版在 9% / 91% 各放了一条几乎不透明的亮线，本意是「玻璃边缘的
+   折射」，实际观感是一根**有两条白边的塑料管**：轮廓太硬、中间发灰，
+   用户的原话是「光线有点难看」。现在改成一条干净的衰减曲线 ——
+   50% 最亮，往外按二次曲线淡到 0，整条光只有「一道」，没有边。
+
+   ★ 颜色统一成「阳光金 / 月光白」两支
+   以前金色那套里掺了橙、紫色那套里掺了紫，光带上同时出现两三种色相，
+   看着脏。现在每支只用一个主色：
+     切到浅色  #ffd98a 一类的暖金（光芯偏白，因为亮到顶就发白）
+     切到深色  #f4f7ff 一类的冷白（月光本来就没有明显色相） */
 .cv-sweep[data-mode="to-light"]::before {
-  --h: 8.5vmax;
-  --travel: 130vmax;
+  /* 6vmax：1430 宽的窗口上约 86px。8.5vmax 时用户嫌「这么粗」，
+     4.2vmax 时又嫌「太细」，取中间。 */
+  --h: 6vmax;
+  /* 205vmax：p 从 -14 走到 114 是 1.28 个 travel，总行程约 262vmax，
+     和旧关键帧的 +130vmax → -130vmax 等长，光还是从屏外进、出屏外。 */
+  --travel: 205vmax;
   background: linear-gradient(
     to bottom,
-    transparent 0%,
-    rgba(255, 198, 92, 0.14) 3%,
-    rgba(255, 224, 150, 0.62) 6%,
-    rgba(255, 248, 214, 0.98) 9%,      /* 上边缘：玻璃折射亮线 */
-    rgba(255, 210, 116, 0.62) 14%,
-    rgba(255, 192, 80, 0.46) 26%,
-    rgba(255, 220, 142, 0.80) 42%,
-    rgba(255, 250, 226, 1) 50%,     /* 中心：最亮的那道芯 */
-    rgba(255, 220, 142, 0.80) 58%,
-    rgba(255, 192, 80, 0.46) 74%,
-    rgba(255, 210, 116, 0.62) 86%,
-    rgba(255, 248, 214, 0.98) 91%,     /* 下边缘：对称的折射亮线 */
-    rgba(255, 224, 150, 0.62) 94%,
-    rgba(255, 198, 92, 0.14) 97%,
-    transparent 100%
+    rgba(255, 216, 138, 0) 0%,
+    rgba(255, 218, 142, 0.05) 14%,
+    rgba(255, 224, 156, 0.20) 27%,
+    rgba(255, 232, 176, 0.48) 38%,
+    rgba(255, 242, 205, 0.78) 45%,
+    rgba(255, 250, 232, 0.96) 49%,     /* 光芯：最亮，接近白 */
+    rgba(255, 250, 232, 0.96) 51%,
+    rgba(255, 242, 205, 0.78) 55%,
+    rgba(255, 232, 176, 0.48) 62%,
+    rgba(255, 224, 156, 0.20) 73%,
+    rgba(255, 218, 142, 0.05) 86%,
+    rgba(255, 216, 138, 0) 100%
   );
-  /* 两端淡出：让这道光像从画面外射进来的一束，而不是一根被切断的棒子。
-     只淡 10%，中间八成是完整的一整片玻璃。 */
-  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
-  mask-image: linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
-  /* 玻璃边缘微微透出的一层暖辉，给光带一点「厚度」 */
-  filter: drop-shadow(0 0 18px rgba(255, 178, 56, 0.34));
-  mix-blend-mode: normal;
-}
-
-/* 液态层：玻璃体内部的高光斑 + 贯穿细芯。
-   高光斑让表面看起来是有起伏的液体，不是一块平板。 */
-.cv-sweep[data-mode="to-light"]::after {
-  --h: 11vmax;
-  --travel: 130vmax;
-  background:
-    /* 沿光带方向的几处凸起高光（不等距，读起来像液体表面） */
-    radial-gradient(ellipse 9vmax 46% at 26% 34%, rgba(255, 248, 214, 0.38), transparent 70%),
-    radial-gradient(ellipse 14vmax 40% at 47% 62%, rgba(255, 252, 232, 0.46), transparent 72%),
-    radial-gradient(ellipse 7vmax 38% at 63% 30%, rgba(255, 244, 200, 0.34), transparent 68%),
-    radial-gradient(ellipse 11vmax 44% at 81% 58%, rgba(255, 246, 216, 0.28), transparent 70%),
-    /* 中心那道贯穿的细芯，强化「光束」的指向性 */
-    linear-gradient(to bottom,
-      transparent 42%,
-      rgba(255, 252, 234, 0.40) 48%,
-      rgba(255, 254, 246, 0.52) 50%,
-      rgba(255, 252, 234, 0.40) 52%,
-      transparent 58%);
+  /* 两端淡出：让这道光像从画面外射进来的一束，而不是一根被切断的棒子。 */
   -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%);
   mask-image: linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%);
+  /* 一层很淡的暖辉，给光一点体积感；半径从 18px 收到 12px，
+     避免细光被外晕糊成一大团。 */
+  filter: drop-shadow(0 0 12px rgba(255, 190, 90, 0.26));
   mix-blend-mode: normal;
-  opacity: 0.9;
 }
 
-/* ---------- 切到深色：月光白 + 紫 ----------
-   夜色漫上来。深色底是 #1a1917，screen 能把紫白叠成发光，
+/* 外晕层：比主光宽、比主光淡，只做柔和的扩散。
+   不再画「液体表面凸起」和「贯穿细芯」—— 那些小结构在 6vmax 的
+   厚度上读不出来，只会把光弄脏。 */
+.cv-sweep[data-mode="to-light"]::after {
+  --h: 9vmax;
+  --travel: 205vmax;
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 214, 132, 0) 0%,
+    rgba(255, 216, 140, 0.10) 30%,
+    rgba(255, 222, 152, 0.20) 44%,
+    rgba(255, 226, 160, 0.26) 50%,
+    rgba(255, 222, 152, 0.20) 56%,
+    rgba(255, 216, 140, 0.10) 70%,
+    rgba(255, 214, 132, 0) 100%
+  );
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 14%, #000 86%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0%, #000 14%, #000 86%, transparent 100%);
+  mix-blend-mode: normal;
+  opacity: calc(var(--a) * 0.9);
+}
+
+/* ---------- 切到深色：月光白 ----------
+   夜色漫上来。深色底是 #1a1917，screen 能把冷白叠成发光，
    所以这一套用 screen，月光才有那种「从暗处透出来」的质感。
 
-   剖面结构和金色那套完全同构，只是配色换成冷白 + 紫：
-   边缘是紫的折射，中心是偏冷的月白。 */
+   剖面与金色那套完全同构，只是主色换成冷白 —— 紫色整个去掉了。
+   深底上带紫的冷白会读成「霓虹紫」，不是月光；月光就是白的，
+   只是比阳光冷一点。 */
 
 .cv-sweep[data-mode="to-dark"]::before {
-  --h: 8.5vmax;
-  --travel: 130vmax;
+  --h: 6vmax;
+  --travel: 205vmax;
   background: linear-gradient(
     to bottom,
-    transparent 0%,
-    rgba(158, 132, 255, 0.12) 3%,
-    rgba(200, 186, 255, 0.52) 6%,
-    rgba(244, 242, 255, 0.96) 9%,      /* 上边缘：紫白折射亮线 */
-    rgba(188, 172, 255, 0.60) 14%,
-    rgba(164, 144, 255, 0.44) 26%,
-    rgba(206, 194, 255, 0.76) 42%,
-    rgba(252, 251, 255, 1) 50%,     /* 中心：月白芯 */
-    rgba(206, 194, 255, 0.76) 58%,
-    rgba(164, 144, 255, 0.44) 74%,
-    rgba(188, 172, 255, 0.60) 86%,
-    rgba(244, 242, 255, 0.96) 91%,     /* 下边缘：对称折射亮线 */
-    rgba(200, 186, 255, 0.52) 94%,
-    rgba(158, 132, 255, 0.12) 97%,
-    transparent 100%
+    rgba(238, 243, 255, 0) 0%,
+    rgba(240, 245, 255, 0.05) 14%,
+    rgba(242, 247, 255, 0.20) 27%,
+    rgba(245, 249, 255, 0.48) 38%,
+    rgba(249, 252, 255, 0.78) 45%,
+    rgba(255, 255, 255, 0.96) 49%,     /* 光芯：纯白 */
+    rgba(255, 255, 255, 0.96) 51%,
+    rgba(249, 252, 255, 0.78) 55%,
+    rgba(245, 249, 255, 0.48) 62%,
+    rgba(242, 247, 255, 0.20) 73%,
+    rgba(240, 245, 255, 0.05) 86%,
+    rgba(238, 243, 255, 0) 100%
   );
-  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
-  mask-image: linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
-  filter: drop-shadow(0 0 18px rgba(150, 124, 255, 0.40));
-  mix-blend-mode: screen;
-}
-
-/* 液态层：同构 —— 玻璃体内的高光斑 + 贯穿细芯 */
-.cv-sweep[data-mode="to-dark"]::after {
-  --h: 11vmax;
-  --travel: 130vmax;
-  background:
-    radial-gradient(ellipse 9vmax 46% at 26% 34%, rgba(222, 214, 255, 0.34), transparent 70%),
-    radial-gradient(ellipse 14vmax 40% at 47% 62%, rgba(236, 232, 255, 0.42), transparent 72%),
-    radial-gradient(ellipse 7vmax 38% at 63% 30%, rgba(214, 204, 255, 0.30), transparent 68%),
-    radial-gradient(ellipse 11vmax 44% at 81% 58%, rgba(228, 222, 255, 0.24), transparent 70%),
-    linear-gradient(to bottom,
-      transparent 42%,
-      rgba(250, 249, 255, 0.36) 48%,
-      rgba(255, 255, 255, 0.46) 50%,
-      rgba(250, 249, 255, 0.36) 52%,
-      transparent 58%);
   -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%);
   mask-image: linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%);
+  filter: drop-shadow(0 0 12px rgba(215, 228, 255, 0.28));
   mix-blend-mode: screen;
-  opacity: 0.9;
 }
 
-.cv-sweep.go { opacity: 1; }
-
-/* 默认（切到深色）：左下 → 右上。
-   translateY 从 +travel 走到 -travel —— 45° 下 +Y 是左下，-Y 是右上。
-
-   ★ 时长 1150ms —— 跟着揭幕的实际时长，不是那个 800 常量
-   THEME_ANIM_MS 是 800，但那只是「标称」时长：揭幕真正结束的时刻由
-   旋钮弹簧的 knobArrived() 决定，实测在 1000~1150ms 之间浮动（弹簧
-   物理参数 SK=11.5 / SC=5.1 决定的收敛过程）。光带按 800ms 跑完，
-   就会比揭幕早收 200~350ms —— 用户的原话是「更新没正好到达终点」。
-   取 1150ms 覆盖实测的上界，两条动画的终点才对得上。
-   缓动沿用揭幕的 THEME_EASE（cubic-bezier(.5,0,.5,1)）。 */
-.cv-sweep.go::before { animation: cv-light-fwd 1150ms cubic-bezier(0.5, 0, 0.5, 1) 1 both; }
-.cv-sweep.go::after  { animation: cv-light-fwd-soft 1150ms cubic-bezier(0.5, 0, 0.5, 1) 1 both; }
-
-/* 切到浅色：方向反过来，右上 → 左下。
-   只换 animation-name，几何完全一样，方向靠关键帧反写。 */
-.cv-sweep[data-mode="to-light"].go::before { animation-name: cv-light-back; }
-.cv-sweep[data-mode="to-light"].go::after  { animation-name: cv-light-back-soft; }
-
-@keyframes cv-light-fwd {
-  from { transform: rotate(45deg) translateY(var(--travel)); opacity: 0; }
-  10%  { opacity: 1; }
-  90%  { opacity: 1; }
-  to   { transform: rotate(45deg) translateY(calc(var(--travel) * -1)); opacity: 0; }
+/* 外晕层：同构，更宽更淡 */
+.cv-sweep[data-mode="to-dark"]::after {
+  --h: 9vmax;
+  --travel: 205vmax;
+  background: linear-gradient(
+    to bottom,
+    rgba(232, 239, 255, 0) 0%,
+    rgba(234, 241, 255, 0.10) 30%,
+    rgba(238, 244, 255, 0.20) 44%,
+    rgba(240, 246, 255, 0.26) 50%,
+    rgba(238, 244, 255, 0.20) 56%,
+    rgba(234, 241, 255, 0.10) 70%,
+    rgba(232, 239, 255, 0) 100%
+  );
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 14%, #000 86%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0%, #000 14%, #000 86%, transparent 100%);
+  mix-blend-mode: screen;
+  opacity: calc(var(--a) * 0.9);
 }
-@keyframes cv-light-fwd-soft {
-  from { transform: rotate(45deg) translateY(var(--travel)); }
-  to   { transform: rotate(45deg) translateY(calc(var(--travel) * -1)); }
-}
-@keyframes cv-light-back {
-  from { transform: rotate(45deg) translateY(calc(var(--travel) * -1)); opacity: 0; }
-  10%  { opacity: 1; }
-  90%  { opacity: 1; }
-  to   { transform: rotate(45deg) translateY(var(--travel)); opacity: 0; }
-}
-@keyframes cv-light-back-soft {
-  from { transform: rotate(45deg) translateY(calc(var(--travel) * -1)); }
-  to   { transform: rotate(45deg) translateY(var(--travel)); }
-}
+
+/* 方向：translateY = travel × (50 - p) / 100。
+     p 从 -14 涨到 114 时，位移从 +131vmax 降到 -131vmax。
+     45° 下局部 +Y 指向左下、-Y 指向右上 —— 所以「p 变大」= 光往右上走。
+   · to-dark：p 由小到大（左下 → 右上），正是「夜色漫上来」。
+   · to-light：p 由大到小（右上 → 左下），正是「天亮了照进来」。
+   JS 只要按方向决定 p 的起点和终点，CSS 不用再分岔 —— 旧版的
+   cv-light-fwd / cv-light-back 两组关键帧因此整个删掉了。 */
 
 @media (prefers-reduced-motion: reduce) {
   .cv-sweep { display: none; }

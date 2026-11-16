@@ -758,16 +758,20 @@
                 <button class="seg-btn" data-dup="replace">替换</button>
               </div>
             </div>
-            <div class="srow">
+            <!-- 和上面「检测频率」同一种排法：.seg 放进 .srow-text 里，
+                 由 .srow-text 的 column 布局把它排到说明下面。
+                 原来是左右排，设置面板窄的时候 4 个分段按钮把左边的说明
+                 挤成一列竖排的字（「默认编辑/器」那样），读起来很别扭。 -->
+            <div class="srow srow-stack">
               <div class="srow-text">
                 <strong>默认编辑器</strong>
                 <small>预览右上角「打开」按钮标出的是默认项，点开可换其他已安装的程序</small>
-              </div>
-              <div class="seg seg-sm" id="editorSeg">
-                <button class="seg-btn" data-editor="vscode">VS Code</button>
-                <button class="seg-btn" data-editor="cursor">Cursor</button>
-                <button class="seg-btn" data-editor="notepadpp">Notepad++</button>
-                <button class="seg-btn" data-editor="notepad">记事本</button>
+                <div class="seg seg-sm" id="editorSeg">
+                  <button class="seg-btn" data-editor="vscode">VS Code</button>
+                  <button class="seg-btn" data-editor="cursor">Cursor</button>
+                  <button class="seg-btn" data-editor="notepadpp">Notepad++</button>
+                  <button class="seg-btn" data-editor="notepad">记事本</button>
+                </div>
               </div>
             </div>
           </section>

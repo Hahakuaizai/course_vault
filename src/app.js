@@ -254,7 +254,16 @@ const RELEASE_NOTES = [
       { type: 'fix', text: '修复更新内容显示的还是上一批：版本号是自动递增的，但更新说明要手写，两者容易脱节。现在说明跟着代码一起走，每次改了什么就记什么' },
       { type: 'fix', text: '修复没切主题时界面也会自己出现光线横扫：真正在动的是主区那层极光背景，它挂了一个 26 秒一轮的「缓慢平移 + 放大再荡回来」，深色下光斑边界反复扫过内容区。现在背景改成完全静止，光斑位置和浓度不变' },
       { type: 'fix', text: '修复切换主题时页面上方先出现一条横贯窗口的黑色条带：揭幕那一层克隆界面盖不住顶部 46px 的标题栏，圆扩散到上面时那一条还是旧主题的颜色。现在克隆层盖在标题栏之上，整块页面一起变色' },
-      { type: 'improve', text: '主题切换加了一道液态玻璃质感的光线：切到深色是月光白与紫、从左下斜扫到右上，切到浅色是阳光金黄、从右上斜扫到左下；线本身沿左上→右下延伸，扫动方向与它垂直。光线和揭幕同一刻起步、同一刻到达终点' },
+      { type: 'improve', text: '主题切换加了一道液态玻璃质感的光线：切到深色是月光白、从左下斜扫到右上，切到浅色是阳光金、从右上斜扫到左下；线本身沿左上→右下延伸，扫动方向与它垂直。光线和揭幕同一刻起步、同一刻到达终点' },
+      { type: 'improve', text: '主题切换的光线改成跟着滑块走：拖动时跟手移动，松手停在中间时光就悬在中间、最亮，不再自顾自扫到终点。整套切换（页面揭幕、光线、滑块）都由同一个进度驱动，节奏始终一致' },
+      { type: 'improve', text: '主题切换的动画整体放慢一档，收尾更柔和：原来一次切换约 1.1 秒，现在约 1.4 秒' },
+      { type: 'improve', text: '主题切换的光线换成统一的月光白与阳光金两种颜色，去掉了原来夹在里面的紫色和橙色；同时收窄了光的厚度，边缘改成从中心向外平滑衰减，不再是一根带两条硬边的管子' },
+      { type: 'improve', text: '光线再放慢一档：它现在会比页面揭幕晚 200 毫秒左右才收尾，扫过去的感觉更从容，不再显得着急' },
+      { type: 'new', text: '新增快捷键 Ctrl+Shift+T 切换浅色 / 深色主题' },
+      { type: 'fix', text: '设置里的 Ctrl+, 现在在搜索框里也能按了：以前它排在「输入框里不响应快捷键」的判断之后，正停在搜索框里想改设置时会按不出反应' },
+      { type: 'fix', text: '修复刚启动后第一次点主题开关没反应：启动恢复主题时开关会误把它当成一次用户切换，内部进度和当前主题对不上。现在启动恢复直接落位、不播动画' },
+      { type: 'fix', text: '修复切换主题后文件夹网格里的卡片仍停在旧主题的深色、要过几秒才变白：连续点开关时，揭幕用的那层克隆界面会残留一份在页面上，它带着旧的深色主题继续给卡片上色。现在每次建层前先把上一轮收干净，并加了超时兜底' },
+      { type: 'fix', text: '设置 → 导入里的「默认编辑器」选项不再把左侧说明挤成一列竖排的字，改成标题说明在上、四个编辑器选项在下一行' },
     ],
   },
   {
@@ -651,6 +660,7 @@ const SHORTCUT_GROUPS = [
       { keys: ['Ctrl', 'F'], desc: '搜索（再按收起）' },
       { keys: ['Ctrl', 'R'], desc: '刷新' },
       { keys: ['Ctrl', 'M'], desc: '多选模式开关' },
+      { keys: ['Ctrl', 'Shift', 'T'], desc: '切换浅色 / 深色主题' },
       { keys: ['Ctrl', ','], desc: '设置（再按关闭）' },
       { keys: ['Ctrl', '/'], desc: '快捷键面板（再按关闭）' },
     ],
@@ -5126,6 +5136,16 @@ function bindEvents() {
       }
     }
 
+    // Ctrl+, 设置开关。**放在 inField 判断之前**：这是「随时都能按」的
+    // 入口，用户常常正停在搜索框里想改个设置。输入框里按 Ctrl+, 没有
+    // 任何原生含义（不像 Ctrl+A / Ctrl+Z 那样会和编辑操作抢），
+    // 所以这里不该被 inField 拦掉。
+    if (e.ctrlKey && e.key === ',') {
+      e.preventDefault();
+      toggleModal('settingsModal', openSettings);
+      return;
+    }
+
     // ---- 全局快捷键（输入框里不触发，免得打字时误操作）----
     const inField = e.target.matches?.('input, textarea, [contenteditable]');
     if (inField) return;
@@ -5154,12 +5174,6 @@ function bindEvents() {
       } else {
         toggleModal('importModal', openImportModal);
       }
-      return;
-    }
-    // Ctrl+, 设置开关
-    if (e.ctrlKey && e.key === ',') {
-      e.preventDefault();
-      toggleModal('settingsModal', openSettings);
       return;
     }
     // ? 也是快捷键面板开关
@@ -5415,6 +5429,17 @@ async function confirmDeleteCourse(course) {
    ============================================================ */
 function applyTheme(name, { titlebar = true } = {}) {
   document.documentElement.dataset.theme = name;
+  /* ★ 必须同时同步 .app 的 data-theme。
+     styles.css 里深色规则写的是两条并列选择器：
+       :root[data-theme='dark'] .card, .app[data-theme='dark'] .card { ... }
+     它们本来是「html 上」和「.app 上」各挂一份、互为备份。但 .app 的
+     data-theme 只在 finishThemeReveal 里被写一次，任何没走到那一步的
+     路径（切换被打断、看门狗收尾、或者别处直接改了 html）都会让两边
+     分叉 —— 实测复现过 html=light 而 .app=dark 的状态：侧栏工具栏都
+     是浅色，唯独卡片还是深色，因为 `.app[data-theme='dark'] .card`
+     仍在命中。这里统一由 applyTheme 一处写入，两边就不会再分叉。 */
+  const appEl = document.querySelector('.app');
+  if (appEl) appEl.dataset.theme = name;
   // 同步原生标题栏配色，避免窗口控件与界面脱节。
   // 但切换主题做圆形扩散动画时要延后同步：原生标题栏是系统画的，
   // 不受 clip-path 裁剪，提前改会让右上角先一步变色，破坏动画观感。
@@ -5772,6 +5797,20 @@ function prepareThemeReveal(target) {
   /* 已经有揭幕在跑：先收掉旧的，避免叠加多层 */
   if (reveal) finishThemeReveal(false);
 
+  /* ★ 兜底：清掉任何残留的克隆层。
+     正常情况下 finishThemeReveal 会 appL.remove()，但只要有一次切换
+     没走到 finish（比如弹簧还没到位就被新的切换打断、或者 rAF 在窗口
+     后台被完全停掉），克隆层就会留在 DOM 里。它是 `.app` 的完整副本，
+     同样带着 class="app" 和 data-theme，于是：
+       · 页面上同时存在两个 .app，克隆层那个压在上面；
+       · `.app[data-theme='dark'] .card` 这类规则继续命中克隆层里的卡片，
+         用户看到的就是「已经切到浅色了，卡片还是深色」；
+       · 而 html 的 data-theme 是新的，所以侧栏、工具栏看起来是正常的。
+     实测复现：document.querySelectorAll('.app').length === 2，
+     且真实的那个是 dark、克隆层是 light（或反过来）。
+     这里在建新层之前无条件清一遍，孤儿层就不可能积累。 */
+  document.querySelectorAll('#appL').forEach((n) => n.remove());
+
   const appD = document.querySelector('.app');
   if (!appD) return false;
 
@@ -5937,6 +5976,29 @@ function finishThemeReveal(commit) {
   void document.documentElement.offsetHeight;
   document.documentElement.classList.remove('theme-switching', 'theme-snapshot');
   lastRevealCover = NaN;
+
+  /* ★ 深→浅之后卡片还停在深色：主动把卡片的入场动画收干净。
+     用户反馈「dark 切到 light 后文件夹网格还是深色，要过几秒才变白」。
+     卡片身上挂着 `animation: cardIn 0.34s both` + `--i` 错峰延迟，
+     fill-mode 是 both —— 动画还没开始跑（延迟期）时，卡片保持 0% 关键帧
+     的 opacity:0 / 深色背景；跑完之后才停在终态。正常情况下一插入就
+     开始跑、半秒内结束，所以平时看不出问题。
+     但在「揭幕刚结束、克隆体刚摘掉」这个时间点，如果浏览器把这几张
+     卡片的动画重新排了一轮（合成层重建会这样），它们就会从 0% 重新
+     起步：整块区域在深色底上闪一下透明，再慢慢淡入浅色 —— 用户看到
+     的就是「网格还是深色，过几秒才变白」。
+
+     处理：切换落定后把卡片的入场动画直接取消（cancel 之后元素回到
+     没有动画时的普通样式，也就是最终配色），再强制一次样式重算。
+     动画本来就只是一次性的入场效果，切换主题时没有重播的必要。 */
+  document.querySelectorAll('.card').forEach((el) => {
+    if (typeof el.getAnimations === 'function') {
+      el.getAnimations().forEach((a) => {
+        if (a.animationName === 'cardIn' || a.animationName === 'pmCardIn') a.cancel();
+      });
+    }
+  });
+  void document.querySelector('.grid')?.offsetHeight;
 }
 
 /* 暴露给开关。开关每帧调用 writeThemeReveal。 */
@@ -5984,12 +6046,23 @@ async function animateThemeSwitch(next) {
 
   await new Promise((resolve) => {
     const t0 = performance.now();
+    const sweep = window.__vaultSweep;
+    const sweepMode = next === 'dark' ? 'to-dark' : 'to-light';
     const tick = () => {
       const q = Math.min(1, (performance.now() - t0) / THEME_ANIM_MS);
       const u = from + (to - from) * q;
       writeThemeReveal(u);
+      /* 光带同样按 u 每帧推 —— 和开关拖动那条路径共用同一个 set()，
+         只是这里的 u 来自时间而不是弹簧。第三个参数 false 表示「不是
+         拖动」：光会以较慢的时间常数跟上来，收尾比页面晚一点。 */
+      if (sweep) sweep.set(u, sweepMode, false);
       if (q < 1) requestAnimationFrame(tick);
-      else resolve();
+      else {
+        /* 等光追到终点再收 —— hide() 只是宣告「没有新目标了」，
+           它内部会等平滑追上才清空变量。 */
+        if (sweep) setTimeout(() => sweep.hide(), 700);
+        resolve();
+      }
     };
     requestAnimationFrame(tick);
   });
@@ -6410,7 +6483,22 @@ async function boot() {
 
     const choice = S.settings.themeChoice || S.settings.theme || 'light';
     const resolved = choice === 'system' ? (prefersDark() ? 'dark' : 'light') : choice;
+    /* ★ 启动恢复的主题要「直接落定」，不能让开关播一段弹簧动画
+       mountThemeSwitch 在初始化很早的位置就挂上了（约 4895 行），那时
+       还没读设置、也不知道真实主题；这里 applyTheme 才是真正的落定。
+       两者不一致时，开关会把它当成一次用户切换，播一段没人要求的动画，
+       并且把内部 target 推到一个和 data-theme 看起来一致、实际语义已经
+       错位的状态 —— 紧接着用户点一下开关，切换判定就会失效（实测表现
+       是「刚启动后第一下点开关没反应」）。
+       这里先声明「正在做启动恢复」，让开关的 MutationObserver 走吸附
+       分支；落定之后再撤掉这个标记。 */
+    window.__vaultThemeBootRestoring = true;
     applyTheme(resolved);
+    /* MutationObserver 的回调是微任务，等本轮同步代码跑完才会派发。
+       这里用 setTimeout(0) 撤标记：它在微任务之后，正好保证 observer
+       已经看到这个标记。不用 rAF —— 窗口在后台时 rAF 不派发，标记会
+       一直挂着，之后所有真实切换都会变成瞬移。 */
+    setTimeout(() => { window.__vaultThemeBootRestoring = false; }, 0);
 
     applyLayoutSettings();
     document.documentElement.classList.toggle('no-motion', !!setting('reduceMotion'));

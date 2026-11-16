@@ -178,7 +178,6 @@ function check(name, ok, extra) {
       mainH: parseFloat(b.height),
       softH: parseFloat(a.height),
       vmax: Math.max(innerWidth, innerHeight),
-      beforeBlendDark: null,
     };
   `);
   /* 主光厚度应远小于窗口短边（原来的 30vmax 会铺满大半屏） */
@@ -187,7 +186,7 @@ function check(name, ok, extra) {
   check('弥散层比主光厚但不超过窗口短边的一半', geo.softH > geo.mainH && geo.softH < 803 / 2,
     { softH: geo.softH });
 
-  /* ---------- 6. 两套配色与方向 ---------- */
+  /* ---------- 6. 两套配色 ---------- */
   const styles = await ev(`
     const el = document.querySelector('.cv-sweep');
     const get = (mode) => {
@@ -200,42 +199,95 @@ function check(name, ok, extra) {
   `);
   /* 切到深色 = 月光：深底上 screen 才能发光 */
   check('切到深色那套用 screen（深底上发光）', styles.toDark.blend === 'screen', styles.toDark);
-  check('切到深色带紫色（月光）', /1[4-9][0-9],\s*1[2-8][0-9],\s*255/.test(styles.toDark.bg), styles.toDark.bg.slice(0, 100));
+  /* 月光必须是**冷白**，不能带明显色相。旧版掺了紫色（158,132,255 一类），
+     在深底上读成霓虹紫而不是月光，用户明确要求换成统一的月光白。
+     这里断言 R/G/B 三个通道彼此接近（最大差 < 24），也就是「白」。 */
+  const moonRGB = (styles.toDark.bg.match(/rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)/g) || [])
+    .map((s) => s.match(/\d+/g).map(Number))
+    .filter((c) => c[3] !== undefined ? c[3] > 0.3 : true);
+  const moonMaxSpread = moonRGB.length
+    ? Math.max(...moonRGB.map((c) => Math.max(c[0], c[1], c[2]) - Math.min(c[0], c[1], c[2])))
+    : 999;
+  check('切到深色是月光白（无色相，不是紫色）', moonMaxSpread < 24,
+    { spread: moonMaxSpread, sample: moonRGB.slice(0, 3) });
   /* 切到浅色 = 阳光：白底上 screen 会糊成白，必须 normal */
   check('切到浅色那套用 normal（白底上才看得见）', styles.toLight.blend === 'normal', styles.toLight);
   check('切到浅色是金黄色（阳光）', /255,\s*1[89][0-9]|255,\s*2[0-4][0-9]/.test(styles.toLight.bg), styles.toLight.bg.slice(0, 100));
 
-  /* ---------- 7. 切换方向：浅→深是 fwd，深→浅是 back ---------- */
-  const dirs = await ev(`
+  /* ---------- 7. 位置由 pos 驱动，不是 CSS 关键帧 ----------
+     改造后这里不再有 cv-light-fwd / cv-light-back 两组 @keyframes：
+     光带的位置完全由 page-motion.js 按开关的 pos 算出 --p / --a 写进来。
+     这正是参考文件（slider-follow-light.txt）的核心 —— 用关键帧或定时器
+     驱动的话，滑块停在中间时光会自顾自扫到终点。 */
+  const drive = await ev(`
     const el = document.querySelector('.cv-sweep');
-    el.dataset.mode = 'to-dark';
-    el.classList.remove('go');
-    void el.offsetWidth;
-    el.classList.add('go');
-    const fwd = getComputedStyle(el, '::before').animationName;
-    el.dataset.mode = 'to-light';
-    el.classList.remove('go');
-    void el.offsetWidth;
-    el.classList.add('go');
-    const back = getComputedStyle(el, '::before').animationName;
-    el.classList.remove('go');
-    return { fwd, back };
+    const b = getComputedStyle(el, '::before');
+    const api = window.__vaultSweep;
+    if (!api) return { err: 'no __vaultSweep' };
+
+    const read = () => ({
+      p: +el.style.getPropertyValue('--p'),
+      a: +el.style.getPropertyValue('--a'),
+    });
+    /* set() 现在只更新「目标」，光由它内部的 rAF 平滑追上来 —— 所以要
+       等几帧再读，不能同步读（那是旧实现的语义）。用 8 帧 × 90ms 的
+       时间常数，足够追到 95% 以上。 */
+    const settle = () => new Promise((r) => setTimeout(r, 1400));
+
+    /* 冻结开关的 render 循环，免得它每帧覆盖我们的目标 */
+    const saved = { set: api.set, hide: api.hide };
+    api.set = () => {}; api.hide = () => {};
+    const setAndSettle = async (u) => { saved.set(u, 'to-dark'); await settle(); return read(); };
+
+    api.set = saved.set;
+    const at0 = await setAndSettle(0);
+    const atMid = await setAndSettle(0.5);
+    const at1 = await setAndSettle(1);
+
+    /* 停住：目标不变时，位置必须纹丝不动 */
+    const freezeA = await setAndSettle(0.5);
+    const freezeB = await setAndSettle(0.5);
+
+    api.set = saved.set; api.hide = saved.hide;
+    saved.hide();
+
+    return {
+      anim: b.animationName,
+      at0, atMid, at1, freezeA, freezeB,
+      hasKeyframes: [...document.styleSheets].some((s) => {
+        try { return [...s.cssRules].some((r) => r.name === 'cv-light-fwd'); } catch { return false; }
+      }),
+    };
   `);
-  check('切到深色用正向关键帧（左下→右上）', dirs.fwd === 'cv-light-fwd', dirs);
-  check('切到浅色用反向关键帧（右上→左下）', dirs.back === 'cv-light-back', dirs);
+  check('没有 CSS 关键帧在驱动光带（cv-light-fwd 已删除）',
+    drive.anim === 'none' && drive.hasKeyframes === false, { anim: drive.anim, kf: drive.hasKeyframes });
+  check('u=0 时光在屏外且不可见', drive.at0.a === 0, drive.at0);
+  check('u=0.5 时光在正中且最亮', Math.abs(drive.atMid.p - 50) < 0.5 && drive.atMid.a === 1, drive.atMid);
+  check('u=1 时光在另一端屏外且不可见', drive.at1.a === 0, drive.at1);
+  check('同一个 u 重复写，位置完全冻结（跟手停住的关键）',
+    drive.freezeA.p === drive.freezeB.p && drive.freezeA.a === drive.freezeB.a,
+    { a: drive.freezeA, b: drive.freezeB });
 
   /* ---------- 8. 真实切换一轮，确认配色跟着方向走 ----------
      必须等足够久：开关有个 pageLockUntil（动画时长 + 90ms）的锁，
-     而且在 reveal 没结束时点击会被直接忽略。前面第 6 步手动改过
-     dataset.mode 并触发过 go，等它彻底静下来再点。 */
+     而且在 reveal 没结束时点击会被直接忽略。前面几步手动改过
+     dataset.mode、也直接调过 __vaultSweep，等它彻底静下来再点。
+
+     ★ 监听 data-mode 而不是 .go
+     改造后没有 .go 这个类了（以前它负责启动 CSS 关键帧）。现在光的
+     配色写在 data-mode 上，由 theme-switch.js 的 render() 每帧按 u 的
+     变化方向设置。 */
   await c.wait(4500);
   const themeBefore = await ev(`return document.documentElement.dataset.theme`);
   await ev(`
     window.__modeLog = [];
+    window.__pLog = [];
     const el = document.querySelector('.cv-sweep');
-    new MutationObserver(() => {
-      if (el.classList.contains('go')) window.__modeLog.push(el.dataset.mode);
-    }).observe(el, { attributes: true, attributeFilter: ['class', 'data-mode'] });
+    new MutationObserver(() => window.__modeLog.push(el.dataset.mode))
+      .observe(el, { attributes: true, attributeFilter: ['data-mode'] });
+    /* 同时记 --p，确认它真的被推进过（不是一直停在屏外） */
+    new MutationObserver(() => window.__pLog.push(+el.style.getPropertyValue('--p')))
+      .observe(el, { attributes: true, attributeFilter: ['style'] });
     document.querySelector('#themeSwitchHost .tsw').click();
     return true;
   `);
@@ -243,6 +295,9 @@ function check(name, ok, extra) {
   const sw = await ev(`
     return {
       modes: window.__modeLog,
+      pMin: Math.min(...window.__pLog),
+      pMax: Math.max(...window.__pLog),
+      n: window.__pLog.length,
       theme: document.documentElement.dataset.theme,
     };
   `);
@@ -252,6 +307,8 @@ function check(name, ok, extra) {
   check('确实切换了主题', sw.theme !== themeBefore, { themeBefore, after: sw.theme });
   if (sw.theme !== themeBefore) {
     check('切换后横扫用了对应的配色', sw.modes.includes(expectMode), { ...sw, expectMode });
+    /* 光确实扫过一整段：p 至少要跨过 40 个百分点，而不是原地不动 */
+    check('切换过程中光带确实移动了', sw.pMax - sw.pMin > 40, { pMin: sw.pMin, pMax: sw.pMax, n: sw.n });
   }
 
   /* 切回最初的主题 */
@@ -263,6 +320,41 @@ function check(name, ok, extra) {
   }
   const restored = await ev(`return document.documentElement.dataset.theme`);
   check('已切回原主题', restored === theme0, { restored, theme0 });
+
+  /* ---------- 9. 连点之后不能留下克隆层 ----------
+     用户反馈「dark 切到 light 后文件夹网格还是深色，要几秒才变白」。
+     根因是连点时 beginReveal() 直接复用了上一轮的克隆层（`if (revealOn)
+     return true`），但那一层是按旧目标主题建的，和新 target 对不上，
+     于是收尾条件永远不成立 —— appL 这个 `.app` 的完整副本就留在 DOM 上，
+     继续命中 `.app[data-theme='dark'] .card` 之类的规则，卡片保持深色。
+     修法是 beginReveal 遇到进行中的揭幕先 endReveal(false) 收干净。 */
+  await c.wait(3000);
+  await ev(`
+    const btn = document.querySelector('#themeSwitchHost .tsw');
+    for (let i = 0; i < 3; i += 1) setTimeout(() => btn.click(), i * 700);
+    return true;
+  `);
+  await c.wait(9000);
+  const burst = await ev(`
+    const apps = [...document.querySelectorAll('.app')];
+    return {
+      nApp: apps.length,
+      hasAppL: !!document.getElementById('appL'),
+      themes: apps.map((a) => a.getAttribute('data-theme')),
+      htmlTheme: document.documentElement.dataset.theme,
+      cardBg: document.querySelector('.card')
+        ? getComputedStyle(document.querySelector('.card')).backgroundColor : null,
+    };
+  `);
+  check('连点三次后 DOM 里只剩一个 .app（克隆层没有残留）',
+    burst.nApp === 1 && !burst.hasAppL, burst);
+  check('连点后 .app 与 html 的主题一致',
+    burst.themes.every((t) => t === burst.htmlTheme), burst);
+  if (burst.cardBg) {
+    const dark = +burst.cardBg.match(/\d+/)[0] < 100;
+    check('连点后卡片底色与主题一致（不再停在旧主题的深色）',
+      (burst.htmlTheme === 'dark') === dark, { theme: burst.htmlTheme, cardBg: burst.cardBg });
+  }
 
   console.log(`\n通过 ${pass} / 失败 ${fail}`);
   c.close();

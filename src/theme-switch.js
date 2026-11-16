@@ -46,8 +46,14 @@ export const USE_NEW_THEME_SWITCH = true;
 
 /* 页面揭幕的时长与缓动。
    缓动取 smoothstep 的等价 bezier —— 参考版 waveClip 里套的就是
-   `progress*progress*(3-2*progress)`。 */
-export const THEME_ANIM_MS = 800;
+   `progress*progress*(3-2*progress)`。
+
+   ★ 800 → 1180：跟着弹簧一起放慢
+   这个常量只影响**设置面板 / 跟随系统**那条路径（它没有拖动过程，
+   自己用 rAF 推 u）；开关拖动那条路由弹簧 SK/SC 决定实际时长，实测
+   现在约 1.5s。两条路径的观感要一致，所以按同样比例放慢约 47%，
+   推到 1180ms 时走完 u，加上收尾和光带淡出，整体接近开关路径。 */
+export const THEME_ANIM_MS = 1180;
 export const THEME_EASE = 'cubic-bezier(0.5, 0, 0.5, 1)';
 
 const EVT_START = 'cv:theme-transition-start';
@@ -292,9 +298,27 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
   const fxLimit = lowPower ? 28 : 96;
   const fxDpr = lowPower ? 1 : 2;
 
-  /* ---------- 物理状态 ---------- */
-  const SK = 11.5;   // 旋钮弹簧刚度
-  const SC = 5.1;    // 旋钮阻尼
+  /* ---------- 物理状态 ----------
+     ★ 为什么从参考版的 11.5 / 5.1 降到 7.0 / 3.98
+     用户连着三轮反馈「速度太快了」「再舒缓一点」「还是有点点快」。
+     参考文件（animation-light-slider-speed-complete.txt）里写得很清楚：
+     整套动画**没有统一 duration**，非拖动时 pos 由这条弹簧推，拖动时
+     pos 被手直接赋值，光带和页面揭幕都只是 pos 的从动件。所以想放慢
+     只有一个旋钮 —— SK。改它，页面揭幕、横扫光、旋钮三者同步变慢，
+     不用碰任何一个动画时长，它们也不会互相错开。
+
+     弹簧周期 T = 2π/√SK：11.5 → 1.85s，8.4 → 2.17s，7.0 → 2.37s。
+     实测揭幕总时长 1121ms → 1289ms → 约 1.5s。
+
+     ★ SC 必须按阻尼比同步降
+     ζ = SC / (2√SK)。保持 ζ ≈ 0.752：
+       11.5 / (2×3.391) = 5.10 / 6.782 = 0.752  （参考版）
+        7.0 / (2×2.646) = 3.98 / 5.292 = 0.752
+     阻尼比不变，收尾「过冲一点再荡回来」的形态完全一样，只是整体
+     放慢。只降 SK 不降 SC 的话阻尼相对变大，观感会从「柔缓地荡到位」
+     变成「一路刹车拖到停」，反而不自然。 */
+  const SK = 7.0;    // 旋钮弹簧刚度
+  const SC = 3.98;   // 旋钮阻尼
   const KF = 130;    // 光弧弹簧刚度
   const CF = 10.5;   // 光弧阻尼
 
@@ -337,6 +361,12 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
   let lastDrawT = -1;
   let lastArcF = NaN;
   let lastF = null;
+  /* 全屏光带的配色方向：0 = 正走向深色（月光紫），1 = 正走向浅色（阳光金），
+     -1 = 尚未确定。sweepLastU 是上一帧的 u，用来判断光往哪边走。 */
+  let sweepDir = -1;
+  let sweepLastU = null;
+  /* render() 里 aria-checked 的上一次值，避免每帧重复写同一条属性 */
+  let lastAriaDark = null;
   let side = null;
   let hitS = 0;
   let hitSide = 0;
@@ -680,7 +710,10 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
        `appL.style.clipPath = clipNow`），所以拖动滑块时页面实时跟随。
        圆心取开关中心的屏幕坐标，半径取「盖住整个窗口」所需的距离。 */
     if (revealActive()) {
-      if (revealMoving()) revealStarted = true;
+      if (revealMoving()) {
+        if (!revealStarted) revealStartAt = performance.now();
+        revealStarted = true;
+      }
       /* 圆心/半径由 app.js 的 writeThemeReveal 按参考版 waveClip
          统一计算（锚点随 u 在左上区域移动），这里只报开关位置 */
       writeRevealAt(u);
@@ -693,6 +726,40 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
       band.style.background = A > 0.01 ? bandCss(arcC, A, F * 100) : 'none';
       lastBandA = A;
       lastBandF = F * 100;
+    }
+
+    /* --- 全屏液态玻璃光带（page-motion.js 的 .cv-sweep）---
+       ★ 必须挂在 pos 驱动的这条链上，不能靠 CSS 动画自己跑。
+       这里每帧把 pos 交给它：拖着滑块走，光跟着走；松手停在中间，
+       光就停在中间；pos 不动，光冻结。
+
+       ★ 配色看「光正在往哪边走」，不能看 target
+       target 是**上一次落定**的那一端，拖动过程中它一直停在出发端。
+       拿它选配色的话，从浅色往深色拖时会全程显示阳光金，正好反了。
+       所以这里跟踪 u 的变化方向：u 在减小 = 正走向深色 = 月光紫；
+       u 在增大 = 正走向浅色 = 阳光金。用户拖回头时光的颜色也跟着
+       换回来，和光的移动方向始终一致。 */
+    const sweep = window.__vaultSweep;
+    if (sweep) {
+      if (revealOn && revealMoving()) {
+        /* 首次（还没测出方向）先按「正在离开当前主题」猜一下：
+           当前是深色，多半是往浅色拖 → 阳光金；反之月光紫。
+           下一帧 u 一动就会被真实方向覆盖。 */
+        if (sweepDir < 0) sweepDir = isDark() ? 1 : 0;
+        if (sweepLastU !== null) {
+          if (u < sweepLastU - 0.0008) sweepDir = 0;
+          else if (u > sweepLastU + 0.0008) sweepDir = 1;
+        }
+        sweepLastU = u;
+        /* 第三个参数是「是否正在拖动」：拖动时光要紧跟手（平滑时间常数
+           很小），松手后弹簧自己走时光可以慢半拍、更柔缓。 */
+        sweep.set(u, sweepDir === 0 ? 'to-dark' : 'to-light', drag);
+      } else if (!revealOn && Math.abs(target - pos) < 1e-6 && Math.abs(xv) < 1e-6) {
+        /* 已经落定且完全静止：把光收回屏外，别让它停在半空 */
+        sweep.hide();
+        sweepDir = -1;
+        sweepLastU = null;
+      }
     }
 
     /* --- 颜色：整块控件跟着 tt 走 --- */
@@ -764,7 +831,12 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
     lastF = u;
 
     const dark = u < 0.5;
-    btn.setAttribute('aria-checked', dark ? 'true' : 'false');
+    /* 只在值真的变了才写：setAttribute 即使写的是同一个值也会产生一条
+       attribute mutation record，每帧一条纯属浪费（实测一次切换 974 条）。 */
+    if (dark !== lastAriaDark) {
+      lastAriaDark = dark;
+      btn.setAttribute('aria-checked', dark ? 'true' : 'false');
+    }
     btn.setAttribute('aria-label', dark ? '深色模式' : '浅色模式');
   }
 
@@ -838,6 +910,23 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
     /* 揭幕收尾：只看旋钮到没到位，不等光弧弹簧收干净。
        先把最后一帧的 clipPath 写满/写空，再提交并销毁克隆体 ——
        顺序不能反，否则克隆体停在中间态、真实界面已经换了主题。 */
+    /* ★ 看门狗：揭幕层挂着超过 6 秒就强制收尾。
+       正常情况 knobArrived() 会在 1.4s 左右为真，下面那个 if 就收掉了。
+       但如果 rAF 链被浏览器打断（窗口最小化 / 后台标签），或弹簧因为
+       某些状态没收敛，appL 会一直留在 DOM 里 —— 而它是 `.app` 的完整
+       副本，同样命中 `.app[data-theme='dark'] .card` 这类规则，表现就是
+       用户看到的「已经切到浅色了，网格里的卡片还是深色」。
+       这里兜一层，保证任何路径下克隆层都不会长期残留。 */
+    if (revealOn && revealStarted && !knobArrived()
+      && performance.now() - revealStartAt > 6000) {
+      pos = target;
+      xv = 0;
+      render();
+      const curDark = isDark();
+      const wantDark = target === 0;
+      endReveal(wantDark !== curDark);
+    }
+
     if (revealOn && revealStarted && knobArrived()) {
       pos = target;
       xv = 0;
@@ -1215,6 +1304,10 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
   let revealOn = false;
   /* 揭幕是否真的开始推进过（旋钮动过）。见 revealMoving 的说明 */
   let revealStarted = false;
+  /* 揭幕真正开始推进的时刻，给 frame() 里的看门狗用 */
+  let revealStartAt = 0;
+  /* 独立看门狗定时器（不依赖 rAF，见 beginReveal） */
+  let revealWatchdog = 0;
 
   const revealApi = () => window.__vaultThemeReveal || null;
   const revealActive = () => revealOn;
@@ -1229,7 +1322,21 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
   }
 
   function beginReveal() {
-    if (revealOn) return true;
+    /* ★ 已经有一层在跑：先把它干净地收掉，再建新的。
+       原先这里是 `if (revealOn) return true;` —— 直接复用旧的层。
+       问题出在「连点」：用户连点两下，第二次点击时 revealOn 还是 true，
+       于是跳过建层、只改 target。可旧层的 appL 是按**上一次**的
+       「当前主题的反面」建的（prepare 里定的），跟新 target 对不上；
+       同时 knobArrived() 又是拿新 target 比的 —— 弹簧可能早就停在
+       新 target 上，条件立刻为真，于是「收尾」时提交了一个和克隆层
+       不匹配的主题，克隆层却没被删掉。
+       实测连点三次：页面会残留一到两个 .app 副本，而它们是完整副本、
+       同样命中 `.app[data-theme='dark'] .card` 这类规则 —— 用户看到的
+       就是「主题已经切了，网格里的卡片还是深色，过一会儿才变」。
+       先收尾再重建，状态永远是干净的。 */
+    if (revealOn) {
+      endReveal(false);          /* 不提交：上一轮作废 */
+    }
     const api = revealApi();
     /* 目标主题不在这里定死：拖到哪边算哪边，prepare 只负责把
        「浅色层 + 底下的目标态」备好（见 app.js）。 */
@@ -1247,6 +1354,29 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
 
     revealOn = true;
     revealStarted = false;
+
+    /* ★ 独立看门狗：不依赖 frame() 的 rAF。
+       窗口最小化 / 切到后台时浏览器完全不派发 rAF，frame() 停摆，
+       frame() 里那个「超过 6 秒强制收尾」的检查也就永远跑不到 ——
+       appL 会一直挂在 DOM 上。而它是 `.app` 的完整副本，同样命中
+       `.app[data-theme='dark'] .card`，用户切回窗口看到的就是
+       「主题已经变了，网格里的卡片还是深色」。
+       setTimeout 在后台虽然被节流到约 1s 一次，但仍在跑，够用。 */
+    clearTimeout(revealWatchdog);
+    revealWatchdog = setTimeout(() => {
+      revealWatchdog = 0;
+      if (!revealOn) return;
+      /* 到位了就走正常路径；没到位也强制收尾（按目标主题提交） */
+      pos = target;
+      xv = 0;
+      revealOn = false;
+      const api = revealApi();
+      if (api) api.finish(true);
+      pendingLift = false;
+      btn.classList.remove('is-veiled');
+      if (lifted) scheduleLower();
+    }, 8000);
+
     return true;
   }
 
@@ -1254,6 +1384,8 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
   function endReveal(commit) {
     if (!revealOn) return;
     revealOn = false;
+    clearTimeout(revealWatchdog);
+    revealWatchdog = 0;
     const api = revealApi();
     if (api) api.finish(commit);
     /* 开关自己路径的收尾（事件路径由 onEnd 做）：清掉待提升标志，
@@ -1327,6 +1459,36 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
     }
   });
 
+  /* ---------- 全局快捷键：Ctrl+Shift+T 切换主题 ----------
+   *
+   * ★ 为什么挑这个组合
+   * 项目里已经被占掉的：Ctrl+N / Shift+N（新建）、Ctrl+I / Shift+I（导入）、
+   * Ctrl+F（搜索）、Ctrl+R（刷新）、Ctrl+M（多选）、Ctrl+,（设置）、
+   * Ctrl+/（快捷键面板）、Ctrl+E / S / O / Shift+E / Shift+R（预览编辑）、
+   * Ctrl+C / X / V（剪贴板）、Ctrl+A（全选）。
+   * Ctrl+Shift+T 在这些里面没有冲突；而且「T = Theme」好记，
+   * 和浏览器「重新打开关闭的标签页」的语义也不至于互相干扰
+   * （这是桌面应用，没有标签页）。
+   *
+   * ★ 为什么挂在这里而不是 app.js
+   * 主题切换有两条实现：旧的 toggleTheme（走 animateThemeSwitch）和
+   * 新开关（自己建双份 DOM、每帧写 clipPath、弹簧到位后提交）。后者
+   * 在场时前者的路径是死的（__vaultThemeSwitchOwnsTransition）。
+   * 快捷键必须调用开关自己的 toggle()，否则会绕过揭幕直接瞬切。
+   * 所以监听器挂在开关模块里 —— 开关没挂载时这段代码根本不会执行，
+   * 也就不会出现「快捷键调了一个不存在的入口」。 */
+  document.addEventListener('keydown', (e) => {
+    if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+    if (e.key.toLowerCase() !== 't') return;
+    /* 输入框里不劫持：用户在文本框里按 Ctrl+Shift+T 可能想撤销输入法
+       或做别的，抢过来会让人莫名其妙。 */
+    if (e.target.matches?.('input, textarea, [contenteditable]')) return;
+    e.preventDefault();
+    /* 用 toggle() 而不是 onToggle()：onToggle 是「建层失败时的兜底」，
+       走的是旧路径；toggle() 才是开关自己的完整流程。 */
+    toggle();
+  });
+
   /* ---------- 与页面揭幕的联动 ---------- */
   const onStart = (e) => {
     const d = e.detail || {};
@@ -1382,10 +1544,36 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
   window.addEventListener(EVT_END, onEnd);
   window.addEventListener(EVT_PREPARE, onPrepare);
 
-  /* 没有事件的主题变化（启动恢复、跟随系统、设置同步）：直接同步到终态 */
+  /* 没有事件的主题变化（启动恢复、跟随系统、设置同步）：直接同步到终态。
+   *
+   * ★ 启动恢复那一次必须「瞬移」，不能开弹簧
+   * app.js 的初始化顺序是「先 mountThemeSwitch（4895 行），后
+   * applyTheme(resolved)（6418 行）」。挂载时开关按当时读到的主题取了
+   * 初值，紧接着 applyTheme 才把真实主题落下来 —— 两者不一致时，
+   * 这里就会 setTarget 推一段弹簧。可启动那一刻用户没做任何操作，
+   * 屏幕上却有一段开关自己滑过去的动画；更要命的是这段时间 target
+   * 已经被改成新值、data-theme 也是新值，用户此时点一下开关，
+   * toggle() 读到的 target 和主题看起来「已经一致」，切换判定就乱了
+   * （实测表现为「刚启动后点一下开关没反应」）。
+   *
+   * 判据用 app.js 显式打的标记 __vaultThemeBootRestoring（见那边
+   * 初始化末尾的注释），不靠计时也不靠「第几次变化」—— 后者在
+   * 「启动主题恰好等于挂载初值」时就等不到，会把用户第一次真实切换
+   * 误当成启动恢复而瞬移。 */
   const mo = new MutationObserver(() => {
     if (document.documentElement.classList.contains('theme-switching')) return;
     const t = isDark() ? 0 : 1;
+    if (window.__vaultThemeBootRestoring) {
+      /* 启动恢复：直接落位，不播动画 */
+      target = t;
+      pos = t;
+      xv = 0;
+      fa = fT(pos);
+      fv = 0;
+      btn.setAttribute('aria-checked', t === 1 ? 'false' : 'true');
+      kick();
+      return;
+    }
     if (t !== target) setTarget(t);
     else if (Math.abs(pos - t) > 0.01 && !drag) setTarget(t);
   });
