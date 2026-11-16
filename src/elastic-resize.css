@@ -1,0 +1,64 @@
+/* ============================================================
+   弹性分隔条 · 目录栏与主区之间
+   把手外形由 elastic-resize.js 逐帧驱动 SVG path（弯曲/偏移/粗细/透明度），
+   本文件只负责定位、命中区、焦点轮廓与无障碍隐藏文本。
+   ============================================================ */
+
+/* 把手绝对定位的参照系 */
+.layout { position: relative; }
+
+.elastic-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--sidebar-w, 250px);
+  width: 32px;
+  margin-left: -16px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ew-resize;
+  touch-action: none;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.elastic-handle-svg {
+  width: 80px;
+  height: 160px;
+  flex: none;
+  overflow: visible;
+  pointer-events: none;
+}
+
+/* 聚焦轮廓：48×132 圆角框，陶土橙（跟随主题 --accent） */
+.elastic-handle:focus-visible::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 48px;
+  height: 132px;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--accent);
+  border-radius: 24px;
+  pointer-events: none;
+}
+
+/* 拖动期间全局光标与禁选（仅拖动态生效，松手即移除） */
+.app.elastic-dragging { cursor: ew-resize !important; }
+.app.elastic-dragging * { user-select: none !important; }
+
+/* aria-live 宣告区：视觉隐藏 */
+.elastic-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

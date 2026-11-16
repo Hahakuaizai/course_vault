@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="theme-transition.css" />
   <link rel="stylesheet" href="theme-switch.css" />
   <link rel="stylesheet" href="page-motion.css" />
+  <link rel="stylesheet" href="elastic-resize.css" />
 </head>
 <body>
   <div class="app">
@@ -181,8 +182,19 @@
         </div>
       </aside>
 
+      <!-- 弹性分隔条：拖动调整目录栏宽度（elastic-resize.js 驱动） -->
+      <div class="elastic-handle" id="elasticHandle" role="separator" tabindex="0"
+           aria-orientation="vertical" aria-controls="mainRegion" aria-label="调整目录栏宽度"
+           aria-valuemin="20" aria-valuemax="40" aria-valuenow="26" aria-valuetext="目录栏宽度百分之 26.0">
+        <svg class="elastic-handle-svg" viewBox="0 0 80 160" aria-hidden="true" focusable="false">
+          <path class="elastic-handle-outer" d="M40 50 Q40 80 40 110" fill="none" stroke="#ffffff" stroke-width="0" stroke-linecap="round"/>
+          <path class="elastic-handle-inner" d="M40 50 Q40 80 40 110" fill="none" stroke="#c9c2b8" stroke-width="0" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div class="elastic-sr-only" id="elasticLive" aria-live="polite"></div>
+
       <!-- 主区 -->
-      <main class="main">
+      <main class="main" id="mainRegion">
         <div class="toolbar">
           <div class="toolbar-left">
             <div class="title-line">
@@ -932,5 +944,6 @@
 
   <script type="module" src="app.js"></script>
   <script type="module" src="page-motion.js"></script>
+  <script type="module" src="elastic-resize.js"></script>
 </body>
 </html>
