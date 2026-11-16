@@ -246,6 +246,27 @@ function toast(msg, type = '') {
  * 旧的批留在数组里当历史，反正弹窗只取 slice(0, 1)。 */
 const RELEASE_NOTES = [
   {
+    date: '2026-11-16',
+    items: [
+      { type: 'fix', text: '修复目录树整个显示不出来、只剩一片空白（但文件还能搜到）：保存目录时漏传了一个字段，导致目录的「上级目录」存成了颜色值，每个目录都挂不到上一级，整棵树就散了。你的目录和文件一个都没丢，这次启动会自动修回来，修之前还会把数据库另存一份备份' },
+      { type: 'fix', text: '修复在软件里改了目录结构（新建、移动、重命名、删除），重启后又变回原样：和上一条是同一个原因，「上级目录」这一列根本没存进去。现在改完立刻就能存住' },
+      { type: 'fix', text: '修复「检查更新」明明改了好几个文件却只报一两个：读取文件内容失败时被当成了「内容相同」，那个文件就静默漏掉了。现在读不到会明确报出来，宁可多报也不漏' },
+      { type: 'fix', text: '修复更新内容显示的还是上一批：版本号是自动递增的，但更新说明要手写，两者容易脱节。现在说明跟着代码一起走，每次改了什么就记什么' },
+      { type: 'fix', text: '修复没切主题时界面也会自己出现光线横扫：真正在动的是主区那层极光背景，它挂了一个 26 秒一轮的「缓慢平移 + 放大再荡回来」，深色下光斑边界反复扫过内容区。现在背景改成完全静止，光斑位置和浓度不变' },
+      { type: 'fix', text: '修复切换主题时页面上方先出现一条横贯窗口的黑色条带：揭幕那一层克隆界面盖不住顶部 46px 的标题栏，圆扩散到上面时那一条还是旧主题的颜色。现在克隆层盖在标题栏之上，整块页面一起变色' },
+      { type: 'improve', text: '主题切换加了一道液态玻璃质感的光线：切到深色是月光白与紫、从左下斜扫到右上，切到浅色是阳光金黄、从右上斜扫到左下；线本身沿左上→右下延伸，扫动方向与它垂直。光线和揭幕同一刻起步、同一刻到达终点' },
+    ],
+  },
+  {
+    date: '2026-11-16',
+    items: [
+      { type: 'improve', text: '主题切换动画与参考版对齐：亮→暗时整页浅色收成左上方的一个点，暗→亮时从那个点反向扩张到整屏；揭幕期间关掉颜色过渡与毛玻璃重算，不再有切换完颜色还慢慢淡的拖尾，也更流畅' },
+      { type: 'fix', text: '修复切换主题时滑块「慢半拍」、拖动时不跟手：动画期间开关没有浮到揭幕层之上，屏幕上看到的是克隆层里冻住的开关副本，真的开关在下面动完了才露出来。现在开关全程浮在最上层，点击和拖动都与页面同步' },
+      { type: 'fix', text: '修复「更新内容」每次启动都弹：一条残缺的老文件记录会让每一次保存整体失败，「已看过新版本」的记录存不下来；另外资料库里暂时没有文件时，设置会被当成空库跳过。现在只在更新后第一次启动时弹一次' },
+      { type: 'fix', text: '修复滑块被点过之后周围残留一圈紫色高亮、要点别处才消失：鼠标和触控按下不再让开关抢焦点，键盘 Tab 时的焦点圈保留' },
+    ],
+  },
+  {
     date: '2026-11-15',
     items: [
       { type: 'new', text: '右键文件 →「打开方式」里，能打开项目的编辑器现在有二级菜单：除了「打开整个项目」，还能选「单独打开这个文件」，不想把整个项目拖进编辑器时用它' },
@@ -352,7 +373,31 @@ function renderReleaseNotes(mode = 'latest') {
   if (!body) return;
   const cur = S.version ? `v${S.version}` : '当前版本';
   const list = mode === 'all' ? RELEASE_NOTES : RELEASE_NOTES.slice(0, 1);
-  body.innerHTML = list.map((b, i) => releaseBlock(b, cur, i === 0)).join('');
+
+  /* 最新那批的日期是手写的，如果这次更新忘了新开一批（只改了代码没写说明），
+   * 弹出来就会是上一次的内容 —— 用户看到的是「更新内容还是上次的」。
+   * 这里加一条兜底提示：最新批次的日期不是今天，就把话说清楚，
+   * 免得用户以为更新没生效。日期用本地时区算，避免跨时区差一天。 */
+  const newest = list[0];
+  const stale = mode !== 'all' && newest && !isToday(newest.date);
+  const hint = stale
+    ? `<div class="cl-stale">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor"/></svg>
+        <span>这是 ${escapeHtml(newest.date)} 那次的更新说明，本次更新没有单独写说明（改动见下）。</span>
+      </div>`
+    : '';
+
+  body.innerHTML = hint + list.map((b, i) => releaseBlock(b, cur, i === 0)).join('');
+}
+
+/** 判断日期字符串（YYYY-MM-DD）是不是今天 */
+function isToday(dateStr) {
+  if (!dateStr) return false;
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return dateStr === `${y}-${m}-${d}`;
 }
 
 /**
@@ -5709,6 +5754,8 @@ let themeTitlebarTicket = 0;
 
 /** 当前的揭幕层；null 表示没有正在进行的揭幕 */
 let reveal = null;
+/** 上一帧写过的揭幕进度（死区跳过用，见 writeThemeReveal） */
+let lastRevealCover = NaN;
 
 /** 当前主题的「反面」 */
 function otherTheme(name) {
@@ -5740,23 +5787,35 @@ function prepareThemeReveal(target) {
   appL.removeAttribute('id');
   appL.id = 'appL';
 
-  /* ★ 真实界面（appD）保持原样，一个字都不改。
-     只把克隆体设成「另一个主题」—— 它一露出来就是另一套配色。
-     这样无论用户往哪边拖，两端都是对的：
-       appD 是当前主题，appL 是另一个主题，
-       圆的半径 R 就是「另一个主题露出多少」。 */
+  /* ★ 和参考版（aurora）完全同构：克隆体永远是「浅色层」，盖在真实
+     界面上面，圆就是浅色层的可见范围，R = maxR × smoothstep(u)，
+     u 是开关位置（0=深色 1=浅色）：
+       · 暗→亮：真实界面是深色，浅色圆从锚点扩张到整屏；
+       · 亮→暗：真实界面先一步切成深色（此刻浅色层正满幅盖着，
+         看不见），浅色圆再从满幅收缩到锚点的一个点上消失。
+     之前的做法是「克隆体=目标主题、圆只扩不收」：亮→暗时看到的是
+     一团深色从锚点涨开，而不是浅色收成一个点 —— 波形正好反着，
+     这就是和参考版对不上的地方。 */
   const cur = document.documentElement.dataset.theme || 'light';
-  /* 注意：不改 appD.dataset.theme。它就是真实界面，改它等于
-     「动画还没开始，界面就已经换色了」。 */
-  appL.dataset.theme = otherTheme(cur);
+  appL.dataset.theme = 'light';
 
   appL.setAttribute('aria-hidden', 'true');
   appL.style.position = 'fixed';
   appL.style.inset = '0';
-  /* 低于弹窗（70）和开关的 popover 层，高于主界面 */
-  appL.style.zIndex = '5';
+  /* ★ 45：必须高于 .titlebar 的 z-index 30。
+     原先这里是 5，理由是「高于主界面」，但 .app 本身是 static、没有
+     z-index，所以 .titlebar 的 z-index 30 是在**根层叠上下文**里和
+     克隆层直接比较的 —— 克隆层永远盖不住顶部那 46px。表现就是：圆
+     扩散到顶部时，标题栏那一条还是旧主题的颜色，像一道黑色横条卡在
+     动画上面。实测把克隆层提到 40 以上，顶部立刻跟着圆一起变色。
+     上限仍要低于弹窗（60 / 70 / 80…）和开关的 popover 层，
+     这样揭幕时浮在上面的弹窗保持原色、不被克隆体盖住。 */
+  appL.style.zIndex = '45';
   appL.style.pointerEvents = 'none';
-  appL.style.clipPath = 'circle(0px at 0px 0px)';
+  /* 初始帧和当前状态严丝合缝：当前是浅色 → 浅色层满幅（u=1）；
+     当前是深色 → 浅色层收成一个点（u=0）。第一帧写错一像素，
+     按下瞬间就会闪一下。 */
+  appL.style.clipPath = revealClip(cur === 'light' ? 1 : 0);
   appL.style.willChange = 'clip-path';
   /* 克隆体自己铺底色：html/body 的底色在它身后，不跟着它变 */
   appL.style.background = 'var(--bg-1)';
@@ -5768,7 +5827,36 @@ function prepareThemeReveal(target) {
 
   appD.parentNode.insertBefore(appL, appD.nextSibling);
 
-  reveal = { appD, appL, target, cloneMs: performance.now() - t0 };
+  /* 揭幕期间的两个全局开关（styles.css 里早就备好了规则，之前没人拨）：
+     · theme-switching：把全局的 0.34s 颜色过渡按到 0。否则提交那一帧
+       真实界面换主题时，body/侧栏/卡片等会再补一段交叉淡入 —— 波纹
+       已经走完了，颜色还在慢慢爬，观感就是「拖尾、和参考版不一样」。
+     · theme-snapshot：关掉所有 backdrop-filter。圆扩大时 Chromium 要
+       逐帧重算被裁剪区域里的毛玻璃，是揭幕卡顿的主因（见 styles.css
+       里那段注释）。揭幕只有半秒，少一层模糊看不出来。
+     必须在克隆之后、第一帧揭幕之前加：克隆体同在 body 里，一起生效，
+     它的首帧也不用付毛玻璃的钱。 */
+  document.documentElement.classList.add('theme-switching', 'theme-snapshot');
+  lastRevealCover = NaN;
+
+  /* 亮→暗：真实界面现在就切成深色。浅色层正满幅盖着（u=1），
+     这一步看不见；接下来圆往锚点收缩，露出的自然是深色。
+     必须排在加 theme-switching 之后：过渡被压住，换色是瞬时的，
+     不会和圆的收缩打架。根元素的 data-theme 先不动（它管 html
+     底色等 .app 之外的东西），等 finish 时统一落定。 */
+  if (target === 'dark') appD.dataset.theme = 'dark';
+
+  /* 强制排版一次：把克隆体的首次样式/布局成本付在 pointerdown 这一帧，
+     而不是摊进动画的头几帧里（那几帧正是用户盯着看的开始段）。
+     只付布局不付绘制，绘制由紧接着的揭幕帧自然带出。 */
+  void appL.offsetHeight;
+
+  reveal = { appD, appL, target, from: cur, cloneMs: performance.now() - t0 };
+  /* 通知开关「揭幕已备好」：它靠这个事件置 pendingLift，等 START
+     时把自己顶到揭幕层之上（见 theme-switch.js 的 onPrepare）。
+     以前没有任何地方派发这个事件，那套联动是死的 —— 设置路径
+     的切换同样受影响，一并补上。 */
+  dispatchThemeEvent(THEME_EVENT_PREPARE, { to: target });
   return true;
 }
 
@@ -5786,19 +5874,33 @@ function syncScroll(from, to) {
 }
 
 /**
- * 每帧写圆形裁剪。由 theme-switch.js 的 render() 调用。
+ * 参考版 waveClip 的同式：浅色层的圆形裁剪。
  *
- * @param {number} u   开关位置：0 = 深色，1 = 浅色
- * @param {number} cx  开关中心 X（屏幕坐标）
- * @param {number} cy  开关中心 Y
- * @param {number} maxR 盖住整个窗口所需的半径
+ * @param {number} u  开关位置 / 浅色进度：0 = 深色，1 = 浅色
+ *
+ * 锚点不在开关上，而在窗口左上区域：cx 随 u 在 115↔325 之间
+ * 移动、cy 固定 115 —— 这是参考版 dock 坐标（440×230 坐标系里
+ * 旋钮中心 wcx/wcy）直接当窗口像素用的结果，也是它标志性的
+ * 观感：亮→暗时整页浅色收成左上方的一个点，暗→亮时从那个点
+ * 反向扩张到整屏。半径 maxR = 对角线 + 120，保证满幅时盖得住。
  */
-function writeThemeReveal(u, cx, cy, maxR) {
-  if (!reveal) return;
+function revealClip(u) {
+  const maxR = Math.hypot(window.innerWidth, window.innerHeight) + 120;
   const e = u * u * (3 - 2 * u);          // smoothstep，和参考版一致
   const r = Math.max(0, maxR * e);
-  reveal.appL.style.clipPath =
-    `circle(${r.toFixed(1)}px at ${cx.toFixed(1)}px ${cy.toFixed(1)}px)`;
+  const cx = 115 + 210 * u;
+  return `circle(${r.toFixed(1)}px at ${cx.toFixed(1)}px 115px)`;
+}
+
+/** 每帧写圆形裁剪。由 theme-switch.js 的 render() 调用 */
+function writeThemeReveal(u) {
+  if (!reveal) return;
+  /* 死区：进度变化小于 0.0012 就不写了（参考版 lastClipK 的同款处理）。
+     弹簧收尾段 pos 还在以千分之几的速度爬，每帧都写 clip-path 等于
+     每帧都逼浏览器重算一次整层裁剪，纯浪费 —— 画面上根本看不出差别。 */
+  if (Number.isFinite(lastRevealCover) && Math.abs(u - lastRevealCover) < 0.0012) return;
+  lastRevealCover = u;
+  reveal.appL.style.clipPath = revealClip(u);
 }
 
 /**
@@ -5808,22 +5910,33 @@ function writeThemeReveal(u, cx, cy, maxR) {
  */
 function finishThemeReveal(commit) {
   if (!reveal) return;
-  const { appD, appL, target } = reveal;
+  const { appD, appL, target, from } = reveal;
   reveal = null;
 
   appL.remove();
 
+  /* 落定主题：commit 用目标，否则回到建层前的主题。
+     亮→暗时 appD 在 prepare 里已经先切了深色，这里是同一值；
+     commit=false 时靠这一句把它改回浅色。根元素统一在这里落定。 */
+  const finalTheme = commit ? target : from;
+  appD.dataset.theme = finalTheme;
+  document.documentElement.dataset.theme = finalTheme;
+
   if (commit) {
-    /* 真实界面切成目标主题。克隆体已经删了，两边不会错开。 */
-    appD.dataset.theme = target;
-    document.documentElement.dataset.theme = target;
     applyTheme(target, { titlebar: false });
     S.settings = { ...S.settings, theme: target, themeChoice: target };
     api.settings.set({ theme: target, themeChoice: target }).catch(() => {});
     syncThemeSwitch();
     syncSettingsUI();
   }
-  /* commit = false（拖到一半弹回去）：什么都没变，appD 本来就是当前主题 */
+
+  /* 收尾：先强制排版一次，让新主题的颜色在 theme-switching 还压着
+     过渡时就落定成当前值，再撤掉两个全局开关。顺序反了（先撤开关、
+     浏览器还没重算过新颜色），那段 0.34s 的颜色过渡会被重新触发，
+     等于修复白做。 */
+  void document.documentElement.offsetHeight;
+  document.documentElement.classList.remove('theme-switching', 'theme-snapshot');
+  lastRevealCover = NaN;
 }
 
 /* 暴露给开关。开关每帧调用 writeThemeReveal。 */
@@ -5860,17 +5973,8 @@ async function animateThemeSwitch(next) {
     return;
   }
 
-  /* 圆心：开关在就取开关中心，不在就退回左下角 */
-  const sw = document.querySelector('.tsw') || document.getElementById('btnTheme');
-  const r = sw ? sw.getBoundingClientRect() : null;
-  const W = root.clientWidth;
-  const H = root.clientHeight;
-  const cx = r && r.width ? r.left + r.width / 2 : 40;
-  const cy = r && r.height ? r.top + r.height / 2 : H - 40;
-  const maxR = Math.max(
-    Math.hypot(cx, cy), Math.hypot(W - cx, cy),
-    Math.hypot(cx, H - cy), Math.hypot(W - cx, H - cy),
-  ) + 60;
+  /* 圆心/半径由 writeThemeReveal 按参考版 waveClip 统一算
+     （锚点在窗口左上、随 u 移动），这里不用再算一遍 */
 
   /* 目标：浅色是 u=1（圆铺满），深色是 u=0（圆收尽） */
   const from = cur === 'light' ? 1 : 0;
@@ -5883,7 +5987,7 @@ async function animateThemeSwitch(next) {
     const tick = () => {
       const q = Math.min(1, (performance.now() - t0) / THEME_ANIM_MS);
       const u = from + (to - from) * q;
-      writeThemeReveal(u, cx, cy, maxR);
+      writeThemeReveal(u);
       if (q < 1) requestAnimationFrame(tick);
       else resolve();
     };
@@ -6215,9 +6319,33 @@ function renderUpdateResult(d) {
       </div>`
     : '';
 
+  /* 读不到内容的文件：多半是正被编辑器或杀软占用。不能只说「有变化」，
+   * 得让用户知道这些是「没读到」而不是「真的改了」，否则他会以为
+   * 更新了也没用。 */
+  const unread = d.unreadable || [];
+  const unreadWarn = unread.length
+    ? `<div class="ur-deps">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor"/></svg>
+        <div><strong>有 ${unread.length} 个文件读不到内容</strong>
+        （可能正被编辑器或杀毒软件占用），已按「有变化」处理。关掉占用的程序后重新检查会更准确。</div>
+      </div>`
+    : '';
+
+  /* 有目录读不到：那里面的文件根本没进入比对，必须说清楚，
+   * 否则用户会以为「没检测到 = 没改动」。 */
+  const badDirs = d.unreadableDirs || [];
+  const dirWarn = badDirs.length
+    ? `<div class="ur-deps">
+        <svg viewBox="0 0 24 24"><path d="M12 4l9 16H3L12 4z"/><path d="M12 10v4"/><circle cx="12" cy="17" r="0.9" fill="currentColor"/></svg>
+        <div><strong>有 ${badDirs.length} 个目录读不到</strong>
+        （${badDirs.slice(0, 3).map((x) => escapeHtml(x.dir)).join('、')}${badDirs.length > 3 ? ' 等' : ''}），
+        里面的文件没有参与比对。</div>
+      </div>`
+    : '';
+
   box.innerHTML = `<div class="ur-head">
     <svg viewBox="0 0 24 24" style="color:var(--accent)"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/></svg>
-    ${d.total} 个文件有变化</div>${depWarn}<ul>${rows.join('')}</ul>`;
+    ${d.total} 个文件有变化</div>${depWarn}${unreadWarn}${dirWarn}<ul>${rows.join('')}</ul>`;
 }
 
 async function checkUpdate() {

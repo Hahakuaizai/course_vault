@@ -185,12 +185,76 @@ function isEmpty() {
   if (!db) return true;
   const d = db.prepare('SELECT count(*) c FROM dirs').get().c;
   const f = db.prepare('SELECT count(*) c FROM files').get().c;
-  return d === 0 && f === 0;
+  /* 设置和回收站也要算「有数据」：以前只数目录和文件，库里暂时没有
+   * 文件时（新用户、清空了库），loadState 会把整个数据库当空的跳过，
+   * 改走 JSON/默认分支 —— 设置明明已经写进库里了却读不出来，
+   * seenChangelogVersion 就是这样丢的（更新公告因此反复弹/永不弹，
+   * 主题等其他设置也会跟着丢）。 */
+  const s = db.prepare('SELECT count(*) c FROM settings').get().c;
+  const t = db.prepare('SELECT count(*) c FROM trash').get().c;
+  return d === 0 && f === 0 && s === 0 && t === 0;
 }
 
 /* ------------------------------------------------------------------ *
  * 写：整体同步
  * ------------------------------------------------------------------ */
+
+/**
+ * 按 SQL 里的占位符个数校验参数，个数不对立刻抛错。
+ *
+ * 为什么要这层：`node:sqlite` 传的参数少于占位符时**不报错**，而是把参数
+ * 整体往前对齐，从缺的那个位置开始整列错位。这种错位不会让任何一行写入
+ * 失败，只会把数据默默写进错误的列 —— 本项目就因此出现过「目录树整棵
+ * 消失」「目录改动重启后失效」两个事故，排查了很久才找到。
+ * 宁可让保存当场失败（界面上能立刻看到报错），也不要静默写坏数据。
+ */
+function bindArgs(sql, params) {
+  const want = (sql.match(/\?/g) || []).length;
+  if (want !== params.length) {
+    throw new Error(`SQL 占位符 ${want} 个，实际传了 ${params.length} 个参数（会导致字段错位）`);
+  }
+  return params;
+}
+
+/* 目录的 upsert 语句单独提出来：bindArgs 要靠它数占位符，
+ * 语句和参数分开放，谁都不会漏看另一边的列数。 */
+const DIR_UPSERT_SQL = `
+  INSERT INTO dirs(id, name, parent_id, color, sort_order, created_at, source_path)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    name = excluded.name,
+    parent_id = excluded.parent_id,
+    color = excluded.color,
+    sort_order = excluded.sort_order,
+    source_path = excluded.source_path
+`;
+
+const FILE_UPSERT_SQL = `
+  INSERT INTO files(id, dir_id, name, ext, size, mtime, added_at, path, origin, storage)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    dir_id   = excluded.dir_id,
+    name     = excluded.name,
+    ext      = excluded.ext,
+    size     = excluded.size,
+    mtime    = excluded.mtime,
+    added_at = excluded.added_at,
+    path     = excluded.path,
+    origin   = excluded.origin,
+    storage  = excluded.storage
+`;
+
+const TRASH_UPSERT_SQL = `
+  INSERT INTO trash(id, deleted_at, payload) VALUES (?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    deleted_at = excluded.deleted_at,
+    payload    = excluded.payload
+`;
+
+const SETTINGS_UPSERT_SQL = `
+  INSERT INTO settings(key, value) VALUES (?, ?)
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value
+`;
 
 /**
  * 把内存 state 同步进数据库。
@@ -217,26 +281,27 @@ function writeAll(state) {
       if (!wantDirs.has(id)) delDir.run(id);
     }
 
-    const upDir = db.prepare(`
-      INSERT INTO dirs(id, name, parent_id, color, sort_order, created_at, source_path)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
-        parent_id = excluded.parent_id,
-        color = excluded.color,
-        sort_order = excluded.sort_order,
-        source_path = excluded.source_path
-    `);
+    const upDir = db.prepare(DIR_UPSERT_SQL);
     dirs.forEach((c, i) => {
-      upDir.run(
+      /* ⚠️ 参数必须和上面 INSERT 的 7 列一一对应：
+       *   id, name, parent_id, color, sort_order, created_at, source_path
+       *
+       * 这里曾经漏掉 parentId，从它开始整列错位：颜色写进 parent_id、
+       * 序号写进 color、创建时间写进 sort_order。后果有两个，都很严重：
+       *   1. 每个目录的「上级目录」都是一个不存在的 id，整棵树挂不到根上
+       *      —— 侧栏目录空白、主区也看不到东西，像数据全丢了（但能搜到）。
+       *   2. 在软件里改了目录结构（新建/移动/重命名），重启后全部失效
+       *      —— 因为 parentId 根本没存进去，读回来永远是坏值。
+       * 改这里时请数一遍占位符，或者跑 test/unit-db-roundtrip.js。 */
+      upDir.run(...bindArgs(DIR_UPSERT_SQL, [
         c.id,
-        c.name,
+        c.name || '',
         c.parentId || null,
         c.color || null,
         c.sortOrder ?? i,
         c.createdAt || Date.now(),
         c.sourcePath || null,
-      );
+      ]));
     });
 
     /* --- 文件 --- */
@@ -250,33 +315,25 @@ function writeAll(state) {
       if (!wantFiles.has(id)) delFile.run(id);
     }
 
-    const upFile = db.prepare(`
-      INSERT INTO files(id, dir_id, name, ext, size, mtime, added_at, path, origin, storage)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        dir_id   = excluded.dir_id,
-        name     = excluded.name,
-        ext      = excluded.ext,
-        size     = excluded.size,
-        mtime    = excluded.mtime,
-        added_at = excluded.added_at,
-        path     = excluded.path,
-        origin   = excluded.origin,
-        storage  = excluded.storage
-    `);
+    const upFile = db.prepare(FILE_UPSERT_SQL);
     for (const f of files) {
-      upFile.run(
+      upFile.run(...bindArgs(FILE_UPSERT_SQL, [
         f.id,
         f.courseId || null,
-        f.name,
+        f.name || '',
         f.ext || '',
         f.size || 0,
         f.mtime || 0,
         f.addedAt || 0,
-        f.path,
+        /* path 缺失的老记录（JSON 时代的残缺数据）不能把整个事务拖垮：
+           以前这里传 undefined，SQLite 直接抛错回滚 —— 每一次保存都
+           失败，设置永远存不下来，更新公告就会每次启动都弹。
+           缺 path 就存空串，界面会把它当作「原文件丢失」处理，
+           正好可以走重新定位流程。 */
+        f.path ?? '',
         f.origin || null,
         f.storage || 'link',
-      );
+      ]));
     }
 
     /* --- 回收站 --- */
@@ -290,27 +347,23 @@ function writeAll(state) {
       if (!wantTrash.has(id)) delTrash.run(id);
     }
 
-    const upTrash = db.prepare(`
-      INSERT INTO trash(id, deleted_at, payload) VALUES (?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        deleted_at = excluded.deleted_at,
-        payload    = excluded.payload
-    `);
+    const upTrash = db.prepare(TRASH_UPSERT_SQL);
     for (const t of trash) {
-      upTrash.run(
+      upTrash.run(...bindArgs(TRASH_UPSERT_SQL, [
         t.id,
         t.deletedAt || Date.now(),
         JSON.stringify({ files: t.files || [], courses: t.courses || [] }),
-      );
+      ]));
     }
 
     /* --- 设置 --- */
-    const upSet = db.prepare(`
-      INSERT INTO settings(key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `);
+    const upSet = db.prepare(SETTINGS_UPSERT_SQL);
     for (const [k, v] of Object.entries(settings)) {
-      upSet.run(k, JSON.stringify(v));
+      const sv = JSON.stringify(v);
+      /* undefined 序列化出来还是 undefined，绑不进 SQLite，
+         同样会拖垮整个事务（同上）——这种值跳过不存 */
+      if (sv === undefined) continue;
+      upSet.run(k, sv);
     }
 
     db.exec('COMMIT');

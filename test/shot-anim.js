@@ -1,12 +1,16 @@
-/* 截切换动画中间帧：手动推进到指定进度，然后恢复 rAF 再截图
-   （接管 rAF 期间合成器不出新帧，captureScreenshot 会卡住）。 */
+/* 截切换动画中间帧。
+   先 reload 拿到干净状态（避免上一轮测试遗留的 down/drag 标记），
+   再手动推进 rAF 到指定进度，恢复 rAF 后截图。 */
 module.exports = async function (cdp) {
-  await cdp.wait(1200);
   const frac = Number(process.argv[3] || 0.5);
+
+  await cdp.send('Page.reload', { ignoreCache: true });
+  await cdp.wait(2500);
 
   const info = await cdp.evaluate(`
     const queue = [];
     const realRaf = window.requestAnimationFrame;
+    const realCaf = window.cancelAnimationFrame;
     window.requestAnimationFrame = (cb) => { queue.push(cb); return queue.length; };
     window.cancelAnimationFrame = () => {};
     let vnow = performance.now();
@@ -26,12 +30,12 @@ module.exports = async function (cdp) {
     const kr = knob.getBoundingClientRect();
     const sx = kr.left + kr.width / 2, sy = kr.top + kr.height / 2;
     const theme0 = document.documentElement.dataset.theme;
+    /* 往「另一侧」拖 */
     const dir = theme0 === 'light' ? -1 : 1;
     const base = { bubbles: true, cancelable: true, clientY: sy,
                    pointerId: 150, pointerType: 'mouse', button: 0 };
     btn.dispatchEvent(new PointerEvent('pointerdown', { ...base, clientX: sx, buttons: 1 }));
 
-    /* 行程约 40px */
     const dist = 40 * ${frac};
     for (let i = 1; i <= 10; i++) {
       btn.dispatchEvent(new PointerEvent('pointermove', {
@@ -41,21 +45,21 @@ module.exports = async function (cdp) {
     pump(4);
 
     const l = document.getElementById('appL');
-    const clip = l ? l.style.clipPath : null;
-    /* 恢复 rAF，让合成器能出新帧 */
-    window.requestAnimationFrame = realRaf;
-    window.cancelAnimationFrame = realRaf === window.requestAnimationFrame ? window.cancelAnimationFrame : window.cancelAnimationFrame;
-    return {
+    const out = {
       theme0,
-      clip,
+      clip: l ? l.style.clipPath : null,
       appLTheme: l ? l.dataset.theme : null,
       size: [window.innerWidth, window.innerHeight],
       btnRect: [br.left, br.top, br.width, br.height].map(v => +v.toFixed(1)),
     };
+    window.requestAnimationFrame = realRaf;
+    window.cancelAnimationFrame = realCaf;
+    window.__shotPid = 150;
+    return out;
   `);
   console.log(`拖到 ${frac * 100}%`, JSON.stringify(info));
 
-  await cdp.wait(150);
+  await cdp.wait(120);
   const res = await cdp.send('Page.captureScreenshot', { format: 'png' });
   require('fs').writeFileSync(
     require('path').resolve(__dirname, '.shot-anim.png'),
@@ -63,7 +67,7 @@ module.exports = async function (cdp) {
   );
   console.log('已存 test/.shot-anim.png');
 
-  /* 收尾：取消拖动，让它弹回 */
+  /* 收尾：取消拖动 */
   await cdp.evaluate(`
     const btn = document.querySelector('.tsw');
     const br = btn.getBoundingClientRect();
@@ -72,5 +76,5 @@ module.exports = async function (cdp) {
       pointerId: 150, pointerType: 'mouse', button: 0,
     }));
   `);
-  await cdp.wait(1200);
+  await cdp.wait(1500);
 };

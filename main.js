@@ -216,6 +216,161 @@ function normalizeParsed(parsed) {
   return next;
 }
 
+/* ------------------------------------------------------------------ *
+ * 目录树自愈
+ * ------------------------------------------------------------------ */
+/**
+ * 修复「所有目录的 parentId 都指向不存在的 id」的坏数据。
+ *
+ * 成因（已在 db.js 修掉，这里只负责把已经写坏的救回来）：
+ * `writeAll` 的 INSERT 有 7 个占位符却只传了 6 个参数，从 parent_id 开始
+ * 整列错位 —— parent_id 里存的是颜色、color 里存的是序号。回读时每个目录
+ * 的父级都是一个不存在的 id，整棵树挂不到根上：侧栏「目录」空白、主区
+ * 也只显示顶层文件（文件都挂在目录下），看起来像数据全丢了，但搜索还能
+ * 搜到（搜索不走目录树）。
+ *
+ * 恢复策略，按可信度从高到低：
+ *   1. 有文件的目录：用文件真实路径往上找父目录，父目录名和某个目录名
+ *      对得上就认（`kvengine/src` → `src` 的父级是 `kvengine`）。
+ *   2. 认不出来的（空目录、散文件目录）一律挂回顶层，保证能看见、能点。
+ *   3. 颜色被写坏成 `"1.0"` 这种的，按调色板重新分配。
+ * 只要发现坏数据就先备份整库，再原地修，不删任何目录和文件。
+ */
+const DIR_PALETTE = [
+  '#5b8def', '#7b6cf6', '#c06be0', '#e86ba8', '#ef7b6b',
+  '#f0a44f', '#e0c04a', '#6cc08a', '#4fb8b8', '#6b8a9e',
+];
+
+const looksLikeColor = (c) => typeof c === 'string' && /^#[0-9a-f]{3,8}$/i.test(c.trim());
+
+function repairCourseTree() {
+  const courses = state?.courses || [];
+  if (courses.length < 2) return { repaired: 0 };
+
+  const ids = new Set(courses.map((c) => c.id));
+  /* 坏数据的特征：有目录声明了父级，但那个父级根本不存在。
+   * 注意「父子都在库里」时哪怕挂错层也不算坏 —— 只认「指向不存在的 id」，
+   * 免得把正常的深树误判成坏数据再打乱一次。 */
+  const dangling = courses.filter((c) => c.parentId && !ids.has(c.parentId));
+  const colorBroken = courses.filter((c) => !looksLikeColor(c.color));
+  if (!dangling.length && !colorBroken.length) return { repaired: 0 };
+
+  // 修之前先把整库备份一份，出问题还能拿回来
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const dir = path.join(app.getPath('userData'), 'db-backup');
+    fs.mkdirSync(dir, { recursive: true });
+    db.backupTo(path.join(dir, `vault-${stamp}.db`));
+  } catch (err) {
+    console.error('[repair] 备份失败，继续修复：', err.message);
+  }
+
+  /* 第 1 步：用文件路径推断父目录。
+   *
+   * 做法：对每个有文件的目录，把它文件的所在目录（`dirname`）当作「这个目录
+   * 在磁盘上的位置」，然后沿这个位置**逐层往上**找，第一个能对上库里某个
+   * 目录名的那一层，就是它的父目录。
+   *
+   * 为什么要逐层往上找而不是只看上一层：目录名和磁盘目录名经常对不上
+   * （「计组」的文件在 `D:\DeskBox\文档\jz`，上一层是 `文档`，再上一层是
+   * `DeskBox`，都不是库里的目录），只看上一层会漏掉一大半。
+   * 为什么要从「自己这层」起步：库里有两个都叫 `src` 的目录
+   * （`kvengine/src`、`edu-warning/src`），从文件位置往上撞第一个同名目录
+   * 会把 A 的父级认成 B 的父级。 */
+  const nameToIds = new Map();
+  for (const c of courses) {
+    const key = String(c.name || '').trim().toLowerCase();
+    if (!key) continue;
+    if (!nameToIds.has(key)) nameToIds.set(key, []);
+    nameToIds.get(key).push(c.id);
+  }
+
+  const parentVote = new Map(); // 子 id -> Map(候选父 id -> 票数)
+  for (const f of state.files || []) {
+    if (!f.courseId || !f.path) continue;
+    const selfDir = path.dirname(path.resolve(f.path));
+    const segs = selfDir.split(path.sep).filter(Boolean);
+    const selfName = String(
+      courses.find((c) => c.id === f.courseId)?.name || '',
+    ).trim().toLowerCase();
+
+    for (let i = segs.length - 1; i >= 0; i -= 1) {
+      const seg = segs[i].toLowerCase();
+      if (seg === selfName) continue; // 撞到自己这层，跳过继续往上
+      const cand = nameToIds.get(seg);
+      if (!cand) continue;
+      const pick = cand.find((id) => id !== f.courseId);
+      if (!pick) continue;
+      if (!parentVote.has(f.courseId)) parentVote.set(f.courseId, new Map());
+      const m = parentVote.get(f.courseId);
+      m.set(pick, (m.get(pick) || 0) + 1);
+      break;
+    }
+  }
+
+  /* 按票数挂父级。父级之间也要防环：A 认 B 当爹、B 又认 A 当爹的话，
+   * 两个都会从树上消失。这里用「挂之前先试走一遍」判断，而不是看谁先处理 ——
+   * 父目录在 courses 里通常排在子目录前面，按处理顺序判断会把正常的
+   * 父子关系全挡掉（第一版就是这么错的，结果 28 个目录全挂到了顶层）。 */
+  const parentOf = new Map(courses.map((c) => [c.id, c.parentId || null]));
+  const wouldCycle = (childId, parentId) => {
+    let cur = parentId;
+    for (let i = 0; i < 64 && cur; i += 1) {
+      if (cur === childId) return true;
+      cur = parentOf.get(cur) || null;
+    }
+    return false;
+  };
+
+  for (const c of courses) {
+    if (c.parentId && ids.has(c.parentId)) continue; // 本来就是好的
+    const votes = parentVote.get(c.id);
+    let best = null;
+    let bestN = 0;
+    if (votes) {
+      for (const [pid, n] of votes) {
+        if (pid === c.id) continue;
+        if (n <= bestN) continue;
+        if (wouldCycle(c.id, pid)) continue;
+        bestN = n;
+        best = pid;
+      }
+    }
+    c.parentId = best; // 推断不出来就挂顶层，至少看得见
+    parentOf.set(c.id, best);
+  }
+
+  // 断环兜底：往上走 64 层还到不了根，就当挂错了，提到顶层
+  const isCyclic = (c) => {
+    const seen = new Set();
+    let cur = c;
+    for (let i = 0; i < 64 && cur?.parentId; i += 1) {
+      if (seen.has(cur.id)) return true;
+      seen.add(cur.id);
+      cur = courses.find((x) => x.id === cur.parentId);
+    }
+    return false;
+  };
+  for (const c of courses) {
+    if (isCyclic(c)) c.parentId = null;
+  }
+
+  // 颜色被写坏（"1.0"、"1794658581565.0" 之类）：按调色板重新分配
+  let colorIdx = 0;
+  for (const c of courses) {
+    if (looksLikeColor(c.color)) continue;
+    c.color = DIR_PALETTE[colorIdx % DIR_PALETTE.length];
+    colorIdx += 1;
+  }
+
+  /* sortOrder 也可能被写成时间戳（错位时那列拿到了 createdAt），
+   * 这本身不影响显示（只影响排序），保持原样即可，不额外动它。 */
+
+  saveStateNow();
+  console.warn(`[repair] 目录树已修复：${dangling.length} 个目录重新挂载，${colorBroken.length} 个颜色重置`);
+  return { repaired: dangling.length, colors: colorBroken.length };
+}
+
 function loadState() {
   // 1) 首选数据库
   try {
@@ -228,6 +383,13 @@ function loadState() {
         settings: { ...DEFAULT_STATE().settings, ...(data.settings || {}) },
         version: STATE_VERSION,
       };
+      /* 目录树可能被旧版 writeAll 的字段错位写坏了（见 repairCourseTree）。
+       * 放在这里修：读完立刻纠正，后面所有界面都拿到干净的树。 */
+      try {
+        repairCourseTree();
+      } catch (err) {
+        console.error('[repair] 修复失败，按原数据继续：', err.message);
+      }
       return state;
     }
   } catch (err) {

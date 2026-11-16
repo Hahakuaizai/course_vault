@@ -37,6 +37,14 @@ const SKIP_FILES = new Set([
   'build.js', '启动.bat',
 ]);
 
+/**
+ * 算文件内容哈希。读不到返回 null。
+ *
+ * 调用方必须把 null 当作「算不出来」，不能当作「没有内容」——
+ * 见 diff() 里对 null 的处理：以前直接用 `a !== b` 比较，
+ * 两边都读失败（null === null）会被判成「内容相同」，文件被静默漏掉；
+ * 一边读失败也会判成「不同」，让检查结果飘忽不定。
+ */
 function hashFile(file) {
   try {
     return crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex');
@@ -45,12 +53,22 @@ function hashFile(file) {
   }
 }
 
-/** 递归收集目录里的代码文件（相对路径 → 绝对路径，路径统一用 /） */
-function collectCode(root, base = root, out = new Map()) {
+/**
+ * 递归收集目录里的代码文件（相对路径 → 绝对路径，路径统一用 /）。
+ *
+ * 读目录失败时**不再静默跳过**，而是记进 `unreadableDirs`。
+ * 以前直接 return：某个子目录因为权限/占用读不到，里面所有文件就都不在
+ * 比对范围内 —— 用户明明改了好几个文件，检查更新却只报一两个，
+ * 而且完全没有任何提示，非常难查。现在至少能把「哪些目录没读到」报上去。
+ */
+function collectCode(root, base = root, out = new Map(), unreadableDirs = null) {
   let entries;
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    if (unreadableDirs) {
+      unreadableDirs.push({ dir: path.relative(base, root).replace(/\\/g, '/') || '.', code: err.code || 'ERROR' });
+    }
     return out;
   }
   for (const e of entries) {
@@ -58,7 +76,7 @@ function collectCode(root, base = root, out = new Map()) {
     const full = path.join(root, e.name);
     if (e.isDirectory()) {
       if (SKIP_DIRS.has(e.name)) continue;
-      collectCode(full, base, out);
+      collectCode(full, base, out, unreadableDirs);
     } else if (e.isFile()) {
       if (SKIP_FILES.has(e.name)) continue;
       if (!SOURCE_EXT.has(path.extname(e.name).toLowerCase())) continue;
@@ -122,17 +140,34 @@ function createUpdater({
     if (!sourceDir) return { ok: false, reason: '尚未设置开发目录' };
     if (!fs.existsSync(sourceDir)) return { ok: false, reason: '开发目录不存在' };
 
-    const src = collectCode(sourceDir);
-    const dst = collectCode(appDir);
+    const unreadableDirs = [];
+    const src = collectCode(sourceDir, sourceDir, new Map(), unreadableDirs);
+    const dst = collectCode(appDir, appDir, new Map(), unreadableDirs);
 
     const changed = [];
     const added = [];
     const removed = [];
+    /* 读不到内容的文件单独记一份：不能混进 changed 也不能当成「相同」。
+     * 真实场景里多半是文件正被编辑器/杀软占用，等一会儿再检查就好了。 */
+    const unreadable = [];
 
     for (const [rel, full] of src) {
       const target = dst.get(rel);
-      if (!target) added.push(rel);
-      else if (hashFile(full) !== hashFile(target)) changed.push(rel);
+      if (!target) { added.push(rel); continue; }
+
+      const a = hashFile(full);
+      const b = hashFile(target);
+      if (a === null || b === null) {
+        /* 算不出哈希就当作「有变化」处理，让用户能点更新把它覆盖掉。
+         * 以前这里是 `a !== b` 直接比较：两边都是 null 时被判成「相同」，
+         * 文件被静默漏掉 —— 表现就是「改了好几个文件，只检测出一两个」。
+         * 宁可多报一个（更新时会重新复制，最坏结果就是内容没变），
+         * 也不要少报（用户以为更新完了，实际跑的还是旧代码）。 */
+        changed.push(rel);
+        unreadable.push(rel);
+        continue;
+      }
+      if (a !== b) changed.push(rel);
     }
     for (const rel of dst.keys()) {
       if (!src.has(rel)) removed.push(rel);
@@ -144,6 +179,8 @@ function createUpdater({
       added: added.sort(),
       removed: removed.sort(),
       total: changed.length + added.length + removed.length,
+      unreadable: unreadable.sort(),
+      unreadableDirs,
       version: readVersion(),
       sourceDir,
       appDir,

@@ -1,0 +1,558 @@
+/* ============================================================
+   页面动效 · Aurora v2 适配层
+   ------------------------------------------------------------
+   来源：aurora-win11-fx-v2.html 的「优化层」（在原始 Aurora 之上
+   叠加的那一层：Mica 极光背景、滑动指示器、卡片层次/扫光/倾斜、
+   搜索下划线、行悬停、开关 will-change 管理、焦点环强化）。
+
+   ★ 适配原则（和参考版的三点必要差异）
+
+   1. 配色不照抄。参考版是 Win11 冷蓝紫，这里的界面是暖纸白 +
+      陶土橙。所有颜色一律走项目已有的变量（--accent / --bg-* /
+      --line-* / --fg-*），深浅两套主题自动跟随，一处都不写死。
+      唯一例外是主题开关的焦点环：开关本体就是 Aurora 的紫色系，
+      环也用它的紫，和开关保持一套语言。
+
+   2. 选择器按本项目的 DOM 映射：
+        参考版 .nav（竖排导航）   → .nav、.settings-nav
+        参考版 .seg（无）         → .seg / .seg-btn（同思路补上滑块）
+        参考版 .card              → .card（文件/目录卡片）
+        参考版 .fl（最近文件行）  → .tree-row（侧栏目录树行）
+        参考版 .search            → .search
+        参考版 .sw（主题开关）    → .tsw（已在 theme-switch.css 里，
+                                     这里只补 v2 的增量：will-change
+                                     按需开启 + 双层焦点环）
+        参考版 .bars（存储条）    → 本项目没有条形统计组件，跳过
+
+   3. 指示器/滑块的位置全部由 page-motion.js 逐次量出来写
+      transform，CSS 只管过渡曲线。app.js 到处在切 .is-active，
+      JS 用 MutationObserver 盯类名变化自动跟随，不改 app.js
+      任何一行逻辑。
+
+   性能约定与 theme-switch.js 一致：只动画 transform / opacity，
+   不动画 blur / box-shadow / width / height（搜索下划线用
+   scaleX、指示器用 transform，都是合成层属性）。
+
+   减少动画：:root.no-motion（设置里的开关）和系统
+   prefers-reduced-motion 都在文件末尾统一关掉本层。
+   ============================================================ */
+
+:root {
+  --pm-spring: cubic-bezier(0.3, 1.35, 0.3, 1);
+  --pm-ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ============================================================
+   1. 主区 Mica 极光背景
+   参考版是三团蓝紫光在主区缓慢漂移。这里换成陶土橙的一团主光
+   + 一团暖灰的辅光，浓度压得很低（纸面上只留一点呼吸感）。
+   ::before 在 .main 上（.main 本来就是 position: relative）。
+   内容区 .content 自己是 relative，天然盖在光层之上；
+   工具栏是透明底，光从它身后透出来，正是想要的效果。
+   主题揭幕的克隆体 #appL 同样带 .main，这套样式自动生效，
+   两份界面的光层配色各自跟着自己的 data-theme 走。
+   ============================================================ */
+.main::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(560px 380px at 18% -6%,
+      color-mix(in srgb, var(--accent) 13%, transparent), transparent 65%),
+    radial-gradient(640px 460px at 88% 112%,
+      color-mix(in srgb, var(--accent-hover) 9%, transparent), transparent 65%),
+    radial-gradient(420px 320px at 72% 8%,
+      color-mix(in srgb, var(--fg-4) 7%, transparent), transparent 60%);
+  opacity: 0.55;
+
+  /* ★ 这里原本挂着 `animation: pmDrift 26s ease-in-out infinite alternate`，
+     让整块极光背景在 26 秒里向右下平移 3.4%、放大 5%，再荡回来。
+     本意是「纸面有呼吸感」，实际效果是用户什么都没做，深色主题下那团
+     暖色光斑的边界就一遍遍扫过内容区 —— 先从左往右、再从右往左，正是
+     用户反馈的「界面自己会光线横扫」。帧间差分实测：静置 60 秒，全屏
+     唯一在动的就是这一层（每帧差 9/255，范围覆盖整个主区）。
+
+     装饰性动画不该在没有触发源的时候自己动。背景改成完全静态，
+     光斑的位置和浓度不变，只是不再漂移。 */
+}
+.app[data-theme='dark'] .main::before { opacity: 0.75; }
+
+/* ============================================================
+   2. 滑动指示器（竖排导航 / 设置导航）
+   参考版把「每个按钮各自变色」换成「一块药丸在按钮之间滑」。
+   .pm-ind 由 JS 创建并定位：transform 管位置、height 管大小，
+   左缘有一条强调色短棒（沿用参考版 ::before 的做法）。
+   容器被 JS 打上 .pm-on 后，原 .is-active 的整块底色让位给
+   指示器，只保留文字强调色，避免两块底色叠在一起发脏。
+   拖拽悬停态（.drop-trash / .drop-top）是瞬时反馈，不让位。
+   ============================================================ */
+.nav,
+.settings-nav { position: relative; }
+
+.pm-ind {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 0;
+  border-radius: var(--radius-m);
+  background: var(--accent-soft);
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0;
+  will-change: transform;
+  transition:
+    transform 0.38s var(--pm-spring),
+    height 0.38s var(--pm-spring),
+    opacity 0.25s var(--pm-ease);
+}
+.pm-ind::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform: translateY(-50%);
+}
+.settings-nav .pm-ind { border-radius: var(--radius-s); }
+
+.nav-item,
+.snav-item { position: relative; z-index: 1; }
+
+.pm-on .nav-item.is-active,
+.pm-on .snav-item.is-active { background: transparent; }
+
+/* ============================================================
+   3. 分段控件滑块（工具栏筛选 / 搜索范围 / 设置里的分段按钮）
+   和竖排指示器同一思路，方向换成水平：.pm-pill 由 JS 按当前
+   .is-active 按钮的 offsetLeft / offsetWidth 定位。
+   .seg 本来就有 2px 内边距，药丸的 top/height 同样由 JS 量。
+   ============================================================ */
+.seg { position: relative; }
+
+.pm-pill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  border-radius: 6px;
+  background: var(--bg-4);
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0;
+  will-change: transform;
+  transition:
+    transform 0.34s var(--pm-spring),
+    width 0.34s var(--pm-spring),
+    height 0.34s var(--pm-spring),
+    opacity 0.25s var(--pm-ease);
+}
+.seg-btn { position: relative; z-index: 1; }
+.pm-on .seg-btn.is-active { background: transparent; }
+
+/* ============================================================
+   4. 文件卡片：入场、层次、扫光、悬停倾斜
+   - 入场沿用项目已有的 --i 错峰（app.js 渲染时写在 style 上），
+     只把轨迹加长、落点带一点回稳：translateY 16px → 0。
+   - 层次：补一条顶部内高光（Win11 卡片的做法），悬停时边框
+     染上强调色、阴影换成项目已有的 --card-shadow-hover。
+   - 扫光挂在缩略区 .card-thumb::after 上 —— .card 自己的
+     ::before/::after 已经被多选勾和选择框占用，不能抢。
+   - 倾斜只写 CSS 变量 --rx/--ry（JS 在 pointermove 里算，
+     上限 1.6°，和参考版一致），transform 在这里拼。
+     拖拽中 JS 不写变量，所以拖卡片时不会一边拖一边歪。
+   ============================================================ */
+.card {
+  animation: pmCardIn 0.5s var(--pm-ease) both;
+  animation-delay: calc(var(--i, 0) * 28ms);
+  box-shadow: var(--card-shadow), inset 0 1px 0 var(--line-1);
+}
+@keyframes pmCardIn {
+  from { opacity: 0; transform: translateY(16px) scale(0.98); }
+  60%  { opacity: 1; }
+  to   { opacity: 1; transform: none; }
+}
+
+.card:hover {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--line-2));
+  transform:
+    translateY(-3px)
+    perspective(720px)
+    rotateX(var(--rx, 0deg))
+    rotateY(var(--ry, 0deg));
+  transition:
+    border-color 0.22s var(--pm-ease),
+    transform 0.16s ease-out,
+    box-shadow 0.3s var(--pm-ease);
+}
+
+.card-thumb { position: relative; }
+.card-thumb::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(105deg,
+    transparent 42%,
+    color-mix(in srgb, var(--fg-1) 5%, transparent) 50%,
+    transparent 58%);
+  transform: translateX(-130%);
+}
+.card:hover .card-thumb::after {
+  transform: translateX(130%);
+  transition: transform 0.85s var(--pm-ease);
+}
+
+/* ============================================================
+   5. 搜索框：聚焦下划线 + 图标点亮
+   输入框本身已有「聚焦变宽 + 边框变色」，这里补参考版的
+   强调色下划线（scaleX 从左展开，合成层动画，不触发重排），
+   图标在聚焦时跟着点亮成强调色。
+   ============================================================ */
+.search::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 4px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.32s var(--pm-spring);
+  pointer-events: none;
+}
+.search:focus-within::after { transform: scaleX(1); }
+.search:focus-within svg { color: var(--accent); }
+
+/* ============================================================
+   6. 侧栏目录树行：悬停轻推 + 圆点放大
+   参考版「最近文件行」的悬停处理：整行向右让 2px、行首的点
+   放大。目录树行首正好有 .course-dot，映射天然成立。
+   ============================================================ */
+.tree-row {
+  transition:
+    background-color 0.18s var(--pm-ease),
+    color 0.18s var(--pm-ease),
+    transform 0.18s var(--pm-ease);
+}
+.tree-row:hover { transform: translateX(2px); }
+.course-dot { transition: transform 0.18s var(--pm-ease); }
+.tree-row:hover .course-dot { transform: scale(1.3); }
+
+/* ============================================================
+   7. 设置小开关：按压挤压 + 开启辉光
+   .switch 的弹簧曲线项目里已经有，这里补参考版旋钮的
+   「按下先缩一下」和开启态的一圈淡辉光（颜色走 --accent，
+   用 color-mix 压到三成多，不抢眼）。
+   ============================================================ */
+.switch.is-on {
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.switch:active::after { transform: scale(0.86); }
+.switch.is-on:active::after { transform: translateX(17px) scale(0.86); }
+
+/* ============================================================
+   8. 面板/弹窗入场：换成带回弹的落点
+   原 panelIn 是纯 ease-out 平滑进场。参考版的弹窗用
+   cubic-bezier(.2,1.1,.3,1) 带 10% 过冲，落点更「实」。
+   轨迹（scale .965 + 下移 12px）保持克制，毕竟是工具软件，
+   弹窗一天要开几十次。
+   ============================================================ */
+.modal,
+.preview { animation: pmPanelIn 0.38s cubic-bezier(0.2, 1.1, 0.3, 1) both; }
+@keyframes pmPanelIn {
+  from { opacity: 0; transform: scale(0.965) translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+.spane.is-active { animation: pmPaneIn 0.3s var(--pm-ease); }
+@keyframes pmPaneIn {
+  from { opacity: 0; transform: translateX(10px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ============================================================
+   9. 主题开关（.tsw）：v2 的两处增量
+   开关本体早就是 Aurora 的实现（见 theme-switch.css），
+   参考版 v2 相对原版在开关上只动了两处，这里补齐：
+   a) will-change 只在运动时开。原来 .tsw-halo / .tsw-knob /
+      .tsw-ig 等六层常年挂 will-change，静止时白占显存。
+      改成默认 auto，由 page-motion.js 在旋钮 style 变化时
+      给 .tsw 打 .is-moving，停 450ms 后摘掉。
+   b) 焦点环改双层（内圈贴边、外圈强调），键盘聚焦时更醒目。
+      颜色用开关自己的紫，和轨道/光弧同一套语言。
+   ============================================================ */
+.tsw-halo,
+.tsw-knob,
+.tsw-ig,
+.tsw-gw,
+.tsw-swp,
+.tsw-cor { will-change: auto; }
+.tsw.is-moving .tsw-halo,
+.tsw.is-moving .tsw-knob,
+.tsw.is-moving .tsw-ig,
+.tsw.is-moving .tsw-gw { will-change: transform; }
+.tsw.is-moving .tsw-swp,
+.tsw.is-moving .tsw-cor { will-change: transform, opacity; }
+
+.tsw:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--bg-1),
+    0 0 0 5.5px rgba(146, 124, 255, 0.8);
+}
+
+/* ============================================================
+   10. 减少动画：本层全部让路
+   styles.css 里 :root.no-motion 的全局规则已经把动画/过渡
+   压到近乎为零，这里再明确关掉持续漂移和滑块过渡，
+   保证指示器是「跳」到位置而不是滑过去。
+   ============================================================ */
+:root.no-motion .main::before { animation: none; }
+:root.no-motion .pm-ind,
+:root.no-motion .pm-pill { transition: none; }
+:root.no-motion .card:hover { transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .main::before { animation: none; }
+  .pm-ind,
+  .pm-pill { transition: none; }
+  .card:hover { transform: translateY(-3px); }
+  .card-thumb::after { display: none; }
+}
+
+/* ---------- 主题切换光线 ----------
+   一条 45° 的液态玻璃光带横穿窗口。**配色跟着目的地走**：
+
+     切到深色（to-dark）   月光白紫，像夜色从下往上漫上来  左下 ──▶ 右上
+     切到浅色（to-light）  阳光金黄，像天亮了照进来        右上 ──▶ 左下
+
+   ★ data-mode 描述「往哪边切」，不描述颜色
+   早先用 sun / moon 当 mode，结果配色和方向各挂一个 mode，想换配色
+   就得连方向一起换，一改就两头错。现在 mode 只有 to-dark / to-light
+   两个值，配色和方向都在这两个 mode 下各自定义好，改哪个都不会牵动
+   另一个。
+
+   ★ 为什么方向要反过来
+   揭幕的圆是从左上区域长出来的，光带顺着圆的行程扫过去，两段动画
+   读起来是一件连贯的事；反着扫会和圆打架。
+
+   ★ 线的方向和移动方向是垂直的
+   光带本身是一条 210vmax × 7vmax 的**横向**长条。`rotate(45deg)` 是
+   顺时针 45°，水平长条因此变成「左上 → 右下」的 "\" 方向 —— 这是线的
+   **延伸**方向。
+
+   它要**移动**的方向是垂直于线的，也就是 "/"（左下 ↔ 右上）：
+   rotate(45deg) 之后，元素的局部 y 轴正好指向左下。所以位移写
+   `translateY(±travel)`，正=往左下、负=往右上，不用手算像素比例。
+
+   ★ 为什么行程用 vmax 而不是百分比
+   translateY 的百分比相对**元素自身高度**（7vmax ≈ 90px），而这里需要
+   移动的距离是窗口对角线（1280×803 时约 1511px），差了一个数量级。
+   所以行程取 --travel: 130vmax，绝对单位，与元素高度无关。
+
+   ★ 混合模式为什么两套
+   切到深色时底色是 #1a1917，`screen` 会把金色叠成发光，正是阳光的效果。
+   切到浅色时底色是 #faf9f5（接近白），`screen` 叠什么都变白、`soft-light`
+   的染色又几乎为零 —— 两种都看不见紫。所以月光那套改用 `normal`，
+   直接盖一层冷白芯 + 紫雾上去。两层的分工写在下面各自的注释里。
+
+   ★ 什么时候扫
+   只在主题切换落定后、以及软件打开时。**静置时绝不自己动** ——
+   以前 .main::before 上挂过一个 26 秒漂移的动画，那才是用户看到的
+   「没人操作界面自己横扫」，已经在上面删掉了。 */
+.cv-sweep {
+  position: fixed; inset: 0; z-index: 400;
+  pointer-events: none; overflow: hidden; opacity: 0;
+}
+
+/* 光带本体。两片共用几何，只在配色和混合模式上分岔。
+
+   ★ 厚度（height）就是「光的粗细」
+   光带是横向长条，height 就是它的厚度 —— 它决定这道光看起来有多粗。
+   第一版取了 30vmax（1920 宽屏上约 576px），铺开就是一大片，用户的原话
+   是「不是光线，快成块了」。现在主光 7vmax（约 134px）、弥散 17vmax
+   （约 326px 但重度模糊），才是一道光的比例。 */
+.cv-sweep::before,
+.cv-sweep::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 210vmax;
+  height: var(--h);
+  margin: calc(var(--h) / -2) 0 0 -105vmax;
+  transform-origin: 50% 50%;
+  /* 45° = "\" 延伸方向；translateY 垂直于它，即 "/" 移动方向 */
+  transform: rotate(45deg) translateY(var(--travel));
+  will-change: transform, opacity;
+}
+
+/* ---------- 切到浅色：阳光金黄 ----------
+   白天来了，一束暖光从右上斜下来。浅色底是 #faf9f5（接近白），
+   screen 会把一切叠成白，所以这一套必须用 normal 直接盖色。
+
+   主光是一道有**实体感**的玻璃光带：沿厚度方向的剖面是
+     淡入 → 上边缘亮线 → 玻璃体 → 中心高光 → 玻璃体 → 下边缘亮线 → 淡出
+   两条亮线就是玻璃边缘的折射，中间那段层次是玻璃厚度里透出来的光。
+   边缘过渡只有 3%（约 3px），轮廓清楚；完全不用 filter: blur ——
+   一模糊就又变回「虚」的了。 */
+.cv-sweep[data-mode="to-light"]::before {
+  --h: 8.5vmax;
+  --travel: 130vmax;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(255, 198, 92, 0.14) 3%,
+    rgba(255, 224, 150, 0.62) 6%,
+    rgba(255, 248, 214, 0.98) 9%,      /* 上边缘：玻璃折射亮线 */
+    rgba(255, 210, 116, 0.62) 14%,
+    rgba(255, 192, 80, 0.46) 26%,
+    rgba(255, 220, 142, 0.80) 42%,
+    rgba(255, 250, 226, 1) 50%,     /* 中心：最亮的那道芯 */
+    rgba(255, 220, 142, 0.80) 58%,
+    rgba(255, 192, 80, 0.46) 74%,
+    rgba(255, 210, 116, 0.62) 86%,
+    rgba(255, 248, 214, 0.98) 91%,     /* 下边缘：对称的折射亮线 */
+    rgba(255, 224, 150, 0.62) 94%,
+    rgba(255, 198, 92, 0.14) 97%,
+    transparent 100%
+  );
+  /* 两端淡出：让这道光像从画面外射进来的一束，而不是一根被切断的棒子。
+     只淡 10%，中间八成是完整的一整片玻璃。 */
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
+  /* 玻璃边缘微微透出的一层暖辉，给光带一点「厚度」 */
+  filter: drop-shadow(0 0 18px rgba(255, 178, 56, 0.34));
+  mix-blend-mode: normal;
+}
+
+/* 液态层：玻璃体内部的高光斑 + 贯穿细芯。
+   高光斑让表面看起来是有起伏的液体，不是一块平板。 */
+.cv-sweep[data-mode="to-light"]::after {
+  --h: 11vmax;
+  --travel: 130vmax;
+  background:
+    /* 沿光带方向的几处凸起高光（不等距，读起来像液体表面） */
+    radial-gradient(ellipse 9vmax 46% at 26% 34%, rgba(255, 248, 214, 0.38), transparent 70%),
+    radial-gradient(ellipse 14vmax 40% at 47% 62%, rgba(255, 252, 232, 0.46), transparent 72%),
+    radial-gradient(ellipse 7vmax 38% at 63% 30%, rgba(255, 244, 200, 0.34), transparent 68%),
+    radial-gradient(ellipse 11vmax 44% at 81% 58%, rgba(255, 246, 216, 0.28), transparent 70%),
+    /* 中心那道贯穿的细芯，强化「光束」的指向性 */
+    linear-gradient(to bottom,
+      transparent 42%,
+      rgba(255, 252, 234, 0.40) 48%,
+      rgba(255, 254, 246, 0.52) 50%,
+      rgba(255, 252, 234, 0.40) 52%,
+      transparent 58%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%);
+  mix-blend-mode: normal;
+  opacity: 0.9;
+}
+
+/* ---------- 切到深色：月光白 + 紫 ----------
+   夜色漫上来。深色底是 #1a1917，screen 能把紫白叠成发光，
+   所以这一套用 screen，月光才有那种「从暗处透出来」的质感。
+
+   剖面结构和金色那套完全同构，只是配色换成冷白 + 紫：
+   边缘是紫的折射，中心是偏冷的月白。 */
+
+.cv-sweep[data-mode="to-dark"]::before {
+  --h: 8.5vmax;
+  --travel: 130vmax;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(158, 132, 255, 0.12) 3%,
+    rgba(200, 186, 255, 0.52) 6%,
+    rgba(244, 242, 255, 0.96) 9%,      /* 上边缘：紫白折射亮线 */
+    rgba(188, 172, 255, 0.60) 14%,
+    rgba(164, 144, 255, 0.44) 26%,
+    rgba(206, 194, 255, 0.76) 42%,
+    rgba(252, 251, 255, 1) 50%,     /* 中心：月白芯 */
+    rgba(206, 194, 255, 0.76) 58%,
+    rgba(164, 144, 255, 0.44) 74%,
+    rgba(188, 172, 255, 0.60) 86%,
+    rgba(244, 242, 255, 0.96) 91%,     /* 下边缘：对称折射亮线 */
+    rgba(200, 186, 255, 0.52) 94%,
+    rgba(158, 132, 255, 0.12) 97%,
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%);
+  filter: drop-shadow(0 0 18px rgba(150, 124, 255, 0.40));
+  mix-blend-mode: screen;
+}
+
+/* 液态层：同构 —— 玻璃体内的高光斑 + 贯穿细芯 */
+.cv-sweep[data-mode="to-dark"]::after {
+  --h: 11vmax;
+  --travel: 130vmax;
+  background:
+    radial-gradient(ellipse 9vmax 46% at 26% 34%, rgba(222, 214, 255, 0.34), transparent 70%),
+    radial-gradient(ellipse 14vmax 40% at 47% 62%, rgba(236, 232, 255, 0.42), transparent 72%),
+    radial-gradient(ellipse 7vmax 38% at 63% 30%, rgba(214, 204, 255, 0.30), transparent 68%),
+    radial-gradient(ellipse 11vmax 44% at 81% 58%, rgba(228, 222, 255, 0.24), transparent 70%),
+    linear-gradient(to bottom,
+      transparent 42%,
+      rgba(250, 249, 255, 0.36) 48%,
+      rgba(255, 255, 255, 0.46) 50%,
+      rgba(250, 249, 255, 0.36) 52%,
+      transparent 58%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%);
+  mix-blend-mode: screen;
+  opacity: 0.9;
+}
+
+.cv-sweep.go { opacity: 1; }
+
+/* 默认（切到深色）：左下 → 右上。
+   translateY 从 +travel 走到 -travel —— 45° 下 +Y 是左下，-Y 是右上。
+
+   ★ 时长 1150ms —— 跟着揭幕的实际时长，不是那个 800 常量
+   THEME_ANIM_MS 是 800，但那只是「标称」时长：揭幕真正结束的时刻由
+   旋钮弹簧的 knobArrived() 决定，实测在 1000~1150ms 之间浮动（弹簧
+   物理参数 SK=11.5 / SC=5.1 决定的收敛过程）。光带按 800ms 跑完，
+   就会比揭幕早收 200~350ms —— 用户的原话是「更新没正好到达终点」。
+   取 1150ms 覆盖实测的上界，两条动画的终点才对得上。
+   缓动沿用揭幕的 THEME_EASE（cubic-bezier(.5,0,.5,1)）。 */
+.cv-sweep.go::before { animation: cv-light-fwd 1150ms cubic-bezier(0.5, 0, 0.5, 1) 1 both; }
+.cv-sweep.go::after  { animation: cv-light-fwd-soft 1150ms cubic-bezier(0.5, 0, 0.5, 1) 1 both; }
+
+/* 切到浅色：方向反过来，右上 → 左下。
+   只换 animation-name，几何完全一样，方向靠关键帧反写。 */
+.cv-sweep[data-mode="to-light"].go::before { animation-name: cv-light-back; }
+.cv-sweep[data-mode="to-light"].go::after  { animation-name: cv-light-back-soft; }
+
+@keyframes cv-light-fwd {
+  from { transform: rotate(45deg) translateY(var(--travel)); opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  to   { transform: rotate(45deg) translateY(calc(var(--travel) * -1)); opacity: 0; }
+}
+@keyframes cv-light-fwd-soft {
+  from { transform: rotate(45deg) translateY(var(--travel)); }
+  to   { transform: rotate(45deg) translateY(calc(var(--travel) * -1)); }
+}
+@keyframes cv-light-back {
+  from { transform: rotate(45deg) translateY(calc(var(--travel) * -1)); opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  to   { transform: rotate(45deg) translateY(var(--travel)); opacity: 0; }
+}
+@keyframes cv-light-back-soft {
+  from { transform: rotate(45deg) translateY(calc(var(--travel) * -1)); }
+  to   { transform: rotate(45deg) translateY(var(--travel)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cv-sweep { display: none; }
+}

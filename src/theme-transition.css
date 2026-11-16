@@ -25,6 +25,39 @@
   will-change: clip-path;
 }
 
+/* ★ 克隆体必须自己解析一次 color。
+   `color` 是继承属性，而继承下来的是**计算值**：body 上写着
+   `color: var(--fg-1)`，在 :root 作用域里已经解析成浅色 #1f1e1d。
+   克隆体虽然带着 data-theme="dark" 让 --fg-1 变成 #f0ece4，但
+   它自己没有 color 声明，就照单全收 body 那个浅色 —— 深色底上
+   一堆文字全是深色，实测卡片标题 rgb(31,30,29) 压在
+   rgb(38,35,32) 的卡片上，等于看不见。
+   在 #appL 上重新写一次，变量就会用克隆体自己的作用域解析。
+   currentColor 的 svg 描边/填充也跟着一起对。 */
+#appL {
+  color: var(--fg-1);
+  background: var(--bg-1);
+}
+
+/* ★ 克隆体里禁止动画重播。
+   克隆是活的 DOM 副本，卡片上的入场动画（.card { animation: cardIn }）
+   一插入就重新从 0 开始跑 —— 原界面早就播完停在终态了，克隆体却
+   从 opacity:0 / scale(.985) / translateY(10px) 起步。两份 DOM 叠在
+   一起，露出来的半边卡片会比另一边小一圈、低 10px，看起来像「页面
+   错位」。实测差 1.5% 宽度、11px 高度。
+   把时长压到 0 并保留 fill-mode，动画立刻落在 100% 关键帧上，
+   与真实界面完全对齐。 */
+#appL,
+#appL *,
+#appL *::before,
+#appL *::after {
+  animation-duration: 0s !important;
+  animation-delay: 0s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+}
+
 /* ---------- 降级遮罩 ----------
    双份 DOM 建不起来（极端情况：克隆失败）时的纯色过渡。
    由 JS 临时创建、动画结束即移除，平时不在 DOM 里。 */

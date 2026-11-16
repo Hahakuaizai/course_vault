@@ -318,6 +318,7 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
   /* 上一次 kick 的时刻：用来发现「raf 标记卡住」的情况 */
   let lastKickAt = 0;
   let sx0 = 0;
+  let downPid = null;
   let p0 = 0;
   /* 拖动开始时的旋钮位置：松手时用来判断「拖了多远」 */
   let dragOrigin = 0;
@@ -680,7 +681,9 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
        圆心取开关中心的屏幕坐标，半径取「盖住整个窗口」所需的距离。 */
     if (revealActive()) {
       if (revealMoving()) revealStarted = true;
-      writeRevealAt(u, revealCx, revealCy, revealMaxR);
+      /* 圆心/半径由 app.js 的 writeThemeReveal 按参考版 waveClip
+         统一计算（锚点随 u 在左上区域移动），这里只报开关位置 */
+      writeRevealAt(u);
     }
 
     /* --- 斜向光带 --- */
@@ -1116,8 +1119,14 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
      ② 拖动要求 pointerdown 落在旋钮上（onKnob），点轨道拖不动。
         现在整个按钮都能拖，只有「按下时在旋钮上」才做按压变形。 */
   btn.addEventListener('pointerdown', (e) => {
+    /* 鼠标/触控按下不要抢焦点：否则开关会带着 :focus-visible 的
+       紫色光圈（theme-switch.css / page-motion.css 各有一套），
+       要点到别处失焦才消失。键盘 Tab 的焦点不受影响，光圈保留。
+       preventDefault 不拦 pointermove 和后续的 click 判定。 */
+    e.preventDefault();
     down = true;
     moved = false;
+    downPid = e.pointerId;
     onKnob = !!e.target.closest('.tsw-knob');
     sx0 = e.clientX;
     p0 = pos;
@@ -1131,6 +1140,20 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
        反正 pos 走到哪边，clipPath 就写到哪边，两份 DOM 都是齐的。 */
     const revealOk = beginReveal();
     if (window.__tswDebug) window.__tswDebugDown = { revealOk, appL: !!document.getElementById('appL') };
+    if (revealOk) {
+      /* ★ 把开关顶到揭幕层之上（lift 的原理见其注释）。
+         事件路径（设置面板里切换）靠 onPrepare/onStart 做这件事，
+         但开关自己的路径（pointerdown/toggle）不派发那两个事件，
+         以前就没人顶 —— 动画期间用户看到的是克隆体里冻住的开关
+         副本，真开关在克隆层底下动，观感是「页面切完了滑块才
+         开始动」+「拖的时候滑块不跟手、像卡住」。这里补上。 */
+      if (!lifted) lift();
+      /* 进 top layer 后指针捕获可能被浏览器丢掉，重新抓一次，
+         免得拖出按钮范围就跟丢 */
+      if (lifted && downPid != null) {
+        try { btn.setPointerCapture(downPid); } catch { /* 忽略 */ }
+      }
+    }
     kick();
   });
 
@@ -1185,35 +1208,31 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
    *   render()       每帧：写 clipPath（见上面 render 里的 revealActive 分支）
    *   endReveal()    弹簧到位那一刻：提交并销毁克隆体
    *
-   * 圆心和最大半径在 beginReveal 里算一次，之后每帧复用。
+   * 圆心和半径不在这里算：参考版的 waveClip 锚点在窗口左上区域
+   * （随 u 在 (115,115)↔(325,115) 之间移动），与开关在屏幕上的
+   * 位置无关，由 app.js 的 writeThemeReveal 统一按同式计算。
    */
   let revealOn = false;
   /* 揭幕是否真的开始推进过（旋钮动过）。见 revealMoving 的说明 */
   let revealStarted = false;
-  let revealCx = 0;
-  let revealCy = 0;
-  let revealMaxR = 0;
-  /* 建层时真实界面是哪个主题 —— 决定圆半径的方向：
-     真实是深色 → 克隆是浅色 → 圆越大浅色越多 → R = u
-     真实是浅色 → 克隆是深色 → 圆越大深色越多 → R = 1-u */
-  let revealBaseDark = true;
 
   const revealApi = () => window.__vaultThemeReveal || null;
   const revealActive = () => revealOn;
 
-  /** 按开关位置算「克隆体该露出多少」，再交给 app.js 写 clip-path */
-  function writeRevealAt(u, cx, cy, maxR) {
+  /** 把开关位置报给 app.js 写 clip-path。
+   *  克隆体永远是浅色层（见 app.js prepareThemeReveal），所以 u
+   *  本身就是「浅色露出多少」：0 = 全暗，1 = 全亮，不用再换算。 */
+  function writeRevealAt(u) {
     const api = revealApi();
     if (!api) return;
-    const cover = revealBaseDark ? u : 1 - u;
-    api.write(cover, cx, cy, maxR);
+    api.write(u);
   }
 
   function beginReveal() {
     if (revealOn) return true;
     const api = revealApi();
-    /* 目标主题不在这里定：克隆体固定是「当前主题的反面」，
-       圆半径 R 由 pos 决定，拖到哪边就是哪边。 */
+    /* 目标主题不在这里定死：拖到哪边算哪边，prepare 只负责把
+       「浅色层 + 底下的目标态」备好（见 app.js）。 */
     const cur = isDark() ? 'dark' : 'light';
     let ok = false;
     try {
@@ -1226,21 +1245,8 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
     }
     if (!ok) return false;
 
-    /* 圆心 = 开关中心（屏幕坐标）。参考版用开关中心，因为视觉上
-       就是「从开关里涌出来/被吸回去」。 */
-    const r = btn.getBoundingClientRect();
-    revealCx = r.left + r.width / 2;
-    revealCy = r.top + r.height / 2;
-    /* 半径要盖住窗口最远的角，多留 60px 余量 */
-    revealMaxR = Math.max(
-      Math.hypot(revealCx, revealCy),
-      Math.hypot(W - revealCx, revealCy),
-      Math.hypot(revealCx, H - revealCy),
-      Math.hypot(W - revealCx, H - revealCy),
-    ) + 60;
     revealOn = true;
     revealStarted = false;
-    revealBaseDark = cur === 'dark';
     return true;
   }
 
@@ -1250,6 +1256,11 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
     revealOn = false;
     const api = revealApi();
     if (api) api.finish(commit);
+    /* 开关自己路径的收尾（事件路径由 onEnd 做）：清掉待提升标志，
+       揭掉可能的隐身类，把顶起来的开关降回原位 */
+    pendingLift = false;
+    btn.classList.remove('is-veiled');
+    if (lifted) scheduleLower();
   }
 
   function up() {
@@ -1290,6 +1301,9 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
       if (typeof onToggle === 'function') onToggle();
       return;
     }
+    /* 同 pointerdown：先把开关顶到揭幕层之上再开弹簧，
+       不然整段动画里看见的都是克隆体里冻住的副本 */
+    if (!lifted) lift();
     setTarget(nextTarget);
   }
 
