@@ -13,6 +13,7 @@
   <link rel="stylesheet" href="theme-switch.css" />
   <link rel="stylesheet" href="page-motion.css" />
   <link rel="stylesheet" href="elastic-resize.css" />
+  <link rel="stylesheet" href="pet.css" />
   <link rel="stylesheet" href="boot-loader.css" />
 </head>
 <body>
@@ -702,6 +703,7 @@
         <nav class="settings-nav" id="settingsNav">
           <button class="snav-item is-active" data-pane="general">通用</button>
           <button class="snav-item" data-pane="appearance">外观</button>
+          <button class="snav-item" data-pane="pet">桌宠</button>
           <button class="snav-item" data-pane="import">导入</button>
           <button class="snav-item" data-pane="data">数据</button>
           <button class="snav-item" data-pane="guide">使用教程</button>
@@ -774,6 +776,41 @@
               </div>
               <button class="switch" id="swReduceMotion" data-key="reduceMotion"></button>
             </div>
+          </section>
+
+          <!-- 桌宠 -->
+          <section class="spane" data-pane="pet">
+            <div class="srow srow-stack">
+              <div class="srow-text">
+                <strong>选择桌宠</strong>
+                <small>界面右下角的像素小宠物，待机时它会自己随机做小动作，不会完全静止。选「不显示」就把它藏起来。</small>
+                <div class="pet-cards" id="petCards"></div>
+                <small class="pet-import-msg" id="petCustomInfo"></small>
+              </div>
+            </div>
+            <div class="srow srow-stack">
+              <div class="srow-text">
+                <strong>桌宠大小</strong>
+                <small>小 / 中 / 大三档预设，也可以选「自定义」自己拉滑块，改完立刻生效。</small>
+                <div class="seg seg-sm" id="petSizeSeg">
+                  <button class="seg-btn" data-size="small">小</button>
+                  <button class="seg-btn" data-size="medium">中</button>
+                  <button class="seg-btn" data-size="large">大</button>
+                  <button class="seg-btn" data-size="custom">自定义</button>
+                </div>
+                <div class="pet-size-custom" id="petSizeCustom" hidden>
+                  <input type="range" id="petSizeRange" min="40" max="200" step="2" />
+                  <span class="pet-size-val" id="petSizeVal">92px</span>
+                </div>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="srow-text">
+                <strong>玩法</strong>
+                <small>左键点它：随机做个动作 · 右键点它：菜单里选任意动作 · 按住拖动：把它拎到界面任意位置</small>
+              </div>
+            </div>
+            <input type="file" id="petImportFile" accept=".zip,application/zip" hidden />
           </section>
 
           <!-- 导入 -->
@@ -978,5 +1015,7 @@
   <script type="module" src="app.js"></script>
   <script type="module" src="page-motion.js"></script>
   <script type="module" src="elastic-resize.js"></script>
+  <script src="pets/packs.js"></script>
+  <script src="pet.js"></script>
 </body>
 </html>
