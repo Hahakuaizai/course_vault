@@ -65,7 +65,7 @@
   padding: 6px 10px;
   border-radius: 6px;
   white-space: nowrap;
-  cursor: pointer;
+  cursor: default;
 }
 
 .cv-pet-menu .mi:hover {
@@ -100,9 +100,15 @@
   white-space: nowrap;
 }
 
-/* 二级菜单：默认从右侧飞出，根菜单靠右时改从左侧 */
+/* 二级菜单：默认从右侧飞出，根菜单靠右时改从左侧。
+   显隐由 JS 控制（.sub-open 类，见 pet.js 的 wireSubMenus）：
+   纯 CSS :hover 在斜向往子菜单移动时容易断，JS 给同一层留了
+   700ms 宽限，指针进入子菜单或划回父项都会取消收起。 */
 .cv-pet-menu .sub {
-  display: none;
+  display: block;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.12s ease, visibility 0s linear 0.15s;
   position: absolute;
   left: 100%;
   top: -5px;
@@ -116,8 +122,10 @@
   box-shadow: 0 10px 32px rgba(31, 30, 29, 0.18), 0 2px 8px rgba(31, 30, 29, 0.10);
 }
 
-.cv-pet-menu .mi.has-sub:hover > .sub {
-  display: block;
+.cv-pet-menu .mi.has-sub.sub-open > .sub {
+  visibility: visible;
+  opacity: 1;
+  transition: opacity 0.12s ease, visibility 0s;
 }
 
 .cv-pet-menu.flip .sub {
@@ -142,7 +150,8 @@
   justify-content: flex-end;
   gap: 4px;
   width: 96px;
-  min-height: 96px;
+  /* 固定高度：不管预览图实际多大，每张卡都一样高，行与行对齐 */
+  height: 108px;
   padding: 8px 4px 7px;
   border-radius: var(--radius-m);
   border: 1.5px solid var(--line-2);
@@ -168,6 +177,11 @@
 .pet-card canvas {
   display: block;
   image-rendering: pixelated;
+  /* 预览区高度封顶：各包帧尺寸不一、加载失败时 canvas 有默认
+     300×150，都不能把卡片撑高；等比缩放不变形 */
+  max-width: 84px;
+  max-height: 58px;
+  object-fit: contain;
 }
 
 .pet-card-icon {

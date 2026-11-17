@@ -1784,6 +1784,16 @@ function clearSelection() {
   updateSelBar();
 }
 
+/* 多选模式开关（顶层函数：工具栏按钮、Ctrl+M 和 Esc 退出都要用）。
+   关模式时顺带清空已选。 */
+function setSelectMode(on) {
+  S.selectMode = on;
+  $('#btnSelectMode').classList.toggle('is-active', on);
+  document.body.classList.toggle('select-mode', on);
+  if (!on) clearSelection();
+  renderMain();
+}
+
 /**
  * 把若干条目放进软件内剪贴板。
  * cut=true 表示剪切（粘贴后从原位置移走），false 表示复制。
@@ -3566,7 +3576,9 @@ const openCtxMenus = [];
 /** 关掉某个菜单以及它右边的所有子菜单 */
 function closeCtxFrom(index) {
   while (openCtxMenus.length > index) {
-    openCtxMenus.pop().el.remove();
+    const entry = openCtxMenus.pop();
+    if (entry.subCloseTimer) clearTimeout(entry.subCloseTimer);
+    entry.el.remove();
   }
 }
 
@@ -3822,8 +3834,10 @@ function showCtx(x, y, items, depth = 0) {
     el.style.top = `${Math.min(y, Math.max(8, window.innerHeight - h - 8))}px`;
   } else {
     const pr = openCtxMenus[depth - 1].el.getBoundingClientRect();
-    let left = pr.right + 4;
-    if (left + w > window.innerWidth - 8) left = pr.left - w - 4;
+    /* 和父菜单重叠 2px 而不是留 4px 缝：指针横着进子菜单时
+       中间没有「不属于任何菜单」的死区，悬停不会断 */
+    let left = pr.right - 2;
+    if (left + w > window.innerWidth - 8) left = pr.left - w + 2;
     el.style.left = `${Math.max(8, left)}px`;
     // 竖直方向对齐触发它的那个条目（y 由 mouseover 传进来），再夹进视口
     const top = Math.min(y, window.innerHeight - h - 8);
@@ -3831,6 +3845,16 @@ function showCtx(x, y, items, depth = 0) {
   }
 
   const entry = { el, x, y };
+
+  /* 防消失机制：划过普通条目时不立刻收子菜单，先留 700ms 宽限；
+     宽限内指针进入子菜单（更深层菜单的 mouseover 会取消所有祖先
+     的待收起计时）或划回带子菜单的条目，就不收了。这样鼠标斜着
+     往子菜单移动、途中蹭过邻项时，子菜单不会闪没。 */
+  entry.subCloseTimer = 0;
+  entry.cancelSubClose = () => {
+    clearTimeout(entry.subCloseTimer);
+    entry.subCloseTimer = 0;
+  };
 
   /** 在某一项右边展开它的子菜单 */
   const openSub = (btn, item) => {
@@ -3849,6 +3873,12 @@ function showCtx(x, y, items, depth = 0) {
       delete el.dataset.openSub;
       el.querySelectorAll('.is-sub-open').forEach((b) => b.classList.remove('is-sub-open'));
     }
+  };
+
+  /** 延迟收起子菜单（防消失，见 entry.cancelSubClose 处的说明） */
+  const scheduleCloseSub = () => {
+    entry.cancelSubClose();
+    entry.subCloseTimer = setTimeout(closeSub, 700);
   };
 
   el.addEventListener('click', (e) => {
@@ -3873,15 +3903,20 @@ function showCtx(x, y, items, depth = 0) {
 
   // 悬停展开子菜单
   el.addEventListener('mouseover', (e) => {
+    // 指针在本菜单（或更深层菜单）里活动时，先取消所有祖先菜单
+    // 待执行的「收起子菜单」计时——这是防消失的关键一环
+    for (let d = 0; d < depth; d++) openCtxMenus[d]?.cancelSubClose?.();
     const btn = e.target.closest('.ctx-item');
     if (!btn) return;
     const item = actionable[Number(btn.dataset.i)];
     if (!item?.children) {
-      // 移到普通条目上时，把它右边展开的子菜单收掉；
-      // 同时清掉展开标记，否则再划回原来那一项时因为「已经展开过」而不弹了
-      closeSub();
+      // 移到普通条目上时，延迟收掉右边展开的子菜单（不立即收，
+      // 给斜向移动留宽限）；同时清掉展开标记的时机也随之推迟，
+      // 否则再划回原来那一项时因为「已经展开过」而不弹了
+      scheduleCloseSub();
       return;
     }
+    entry.cancelSubClose();
     if (el.dataset.openSub === String(btn.dataset.i)) return; // 已经展开了
     openSub(btn, item);
   });
@@ -4461,7 +4496,13 @@ function handleEscape() {
   if (!$('#importModal').hidden) { $('#importModal').hidden = true; return; }
   if (!$('#shortcutsModal').hidden) { $('#shortcutsModal').hidden = true; return; }
   if (!$('#settingsModal').hidden) { $('#settingsModal').hidden = true; return; }
-  if (!$('#courseModal').hidden) { $('#courseModal').hidden = true; }
+  if (!$('#courseModal').hidden) { $('#courseModal').hidden = true; return; }
+  /* 什么弹窗都没开时：多选模式开着 → Esc 直接退出多选模式
+     （setSelectMode(false) 会顺带清空已选，哪怕只选了一个）；
+     普通状态下选了不止一个条目 → Esc 清空多选。单个条目的
+     普通选中不处理，免得误伤平时的点选状态。 */
+  if (S.selectMode) { setSelectMode(false); return; }
+  if (S.selected.size + S.selectedDirs.size > 1) clearSelection();
 }
 
 /* ============================================================
@@ -4993,14 +5034,7 @@ function bindEvents() {
   };
   $('#btnBack').addEventListener('click', goUp);
 
-  /* 多选模式开关 */
-  const setSelectMode = (on) => {
-    S.selectMode = on;
-    $('#btnSelectMode').classList.toggle('is-active', on);
-    document.body.classList.toggle('select-mode', on);
-    if (!on) clearSelection();
-    renderMain();
-  };
+  /* 多选模式开关（实现在顶层 setSelectMode） */
   $('#btnSelectMode').addEventListener('click', () => setSelectMode(!S.selectMode));
 
   /* 卡片（文件夹和文件都算）：普通模式单击进入/打开；多选模式单击选择 */
@@ -5018,6 +5052,24 @@ function bindEvents() {
       return;
     }
     const key = cardKey(card);
+
+    /* 点中卡片左上角的选中圆圈（多选模式的圆圈在 top/left 8px、
+       16×16，命中范围放宽到 4–28px）：像复选框一样切换这一个
+       的选中——已选的点掉取消，没选的点上加入——而不是走下面
+       多选模式的「只选这一个」。 */
+    if (S.selectMode) {
+      const r = card.getBoundingClientRect();
+      const bx = e.clientX - r.left;
+      const by = e.clientY - r.top;
+      if (bx >= 4 && bx <= 28 && by >= 4 && by <= 28) {
+        if (hasKey(key)) removeKey(key);
+        else addKey(key);
+        S.anchor = { id: key, list: 'grid' };
+        syncSelectedClass();
+        updateSelBar();
+        return;
+      }
+    }
 
     // 普通模式且没按修饰键：文件打开预览，文件夹进入
     const plain = !e.shiftKey && !e.ctrlKey && !e.metaKey;

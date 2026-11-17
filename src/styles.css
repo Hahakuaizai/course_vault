@@ -2545,6 +2545,8 @@ kbd {
   gap: 9px;
   width: 100%;
   padding: 7px 10px;
+  /* 菜单项上用箭头光标（全局 button 是手形，菜单里不合适） */
+  cursor: default;
   /* 同心圆角：菜单外圆角 10px（--radius-m）− 内边距 5px = 5px */
   border-radius: 5px;
   font-size: 12.4px;

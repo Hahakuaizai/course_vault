@@ -14,9 +14,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-/** 会被同步的文件类型 */
+/** 会被同步的文件类型。
+ * .webp 必须在名单里：桌宠「蓝发小女仆」的 114 张精灵图就是 .webp，
+ * 漏了它，检查更新会静默跳过所有 webp —— 不报新增、也不复制，
+ * 表现就是「宠物数据在、图片永远加载失败」，极难排查。 */
 const SOURCE_EXT = new Set([
   '.js', '.css', '.html', '.json', '.md', '.bat', '.ico', '.png', '.svg',
+  '.webp',
 ]);
 
 /** 不参与同步的目录 */

@@ -174,6 +174,13 @@
       armIdle(2500 + Math.random() * 2000);
       idleWatcher = setInterval(() => {
         try {
+          /* 自愈：dragStart 后迟迟等不到 dragStop（命令丢失等），
+             又没有本地按下在进行，3 秒后自动退出拖动态 */
+          if (dragging && !down && cmdDragAt && Date.now() - cmdDragAt > 3000) {
+            dragging = false;
+            cmdDragAt = 0;
+            play('idle', 'base');
+          }
           if (dragging) return;
           if (!pack) return;
           if (!isIdleNow()) return;
@@ -223,6 +230,7 @@
 
   function applyConfig(next) {
     cfg = Object.assign(cfg, next || {});
+    if (pet && pet.debug) pet.debug('config pet=' + cfg.pet);
     stopCurrent();
     for (const u of blobURLs) URL.revokeObjectURL(u);
     blobURLs = [];
@@ -254,8 +262,14 @@
   /* ---------------- 指针：点击随机动作，拖动挪窗口 ---------------- */
 
   let down = null;
+  let cmdDragAt = 0; // 最近一次收到 dragStart 的时间（看门狗自愈用）
   canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
+    if (pet && pet.debug) pet.debug('pointerdown pack=' + (pack && pack.id) + ' dragging=' + dragging);
+    /* 每次按下都从干净状态开始：万一拖动态因为某次命令丢失
+       卡住了，这一下就能把它清掉，不会越点越没反应 */
+    dragging = false;
+    cmdDragAt = 0;
     down = { sx: e.screenX, sy: e.screenY, lx: e.screenX, ly: e.screenY, moved: false };
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 抓不到也不影响 */ }
   });
@@ -275,6 +289,7 @@
   const endPointer = (e) => {
     if (!down) return;
     const wasDrag = down.moved;
+    if (pet && pet.debug) pet.debug('pointerup drag=' + wasDrag);
     down = null;
     if (wasDrag) {
       dragging = false;
@@ -308,6 +323,7 @@
 
   canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+    if (pet && pet.debug) pet.debug('contextmenu pack=' + (pack && pack.id));
     if (!pet || !pack) return;
     const used = new Set();
     const groups = [];
@@ -344,8 +360,9 @@
     /* 主窗口里把宠物拖出边界时，拖动态由主进程在这边点火/收尾 */
     if (pet.onCommand) pet.onCommand((cmd) => {
       if (!cmd) return;
-      if (cmd.type === 'dragStart') { dragging = true; play(dragAnimName(), 'base'); }
-      else if (cmd.type === 'dragStop') { dragging = false; play('idle', 'base'); }
+      if (pet.debug) pet.debug('cmd ' + cmd.type);
+      if (cmd.type === 'dragStart') { dragging = true; cmdDragAt = Date.now(); play(dragAnimName(), 'base'); }
+      else if (cmd.type === 'dragStop') { dragging = false; cmdDragAt = 0; play('idle', 'base'); }
     });
   }
 })();

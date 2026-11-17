@@ -139,6 +139,10 @@ contextBridge.exposeInMainWorld('vault', {
     dragOut: (p) => ipcRenderer.send('pet:drag-out', p),
     dragMove: (p) => ipcRenderer.send('pet:drag-move', p),
     dragEndOut: (p) => ipcRenderer.send('pet:drag-end-out', p),
+    debug: (msg) => ipcRenderer.send('pet:debug', String(msg)),
+    /* 桌宠配置存 userData/pet-config.json（localStorage 跨重启不可靠） */
+    saveConfig: (text) => ipcRenderer.send('pet:config-save', String(text)),
+    loadConfig: () => invoke('pet:config-load'),
     onCommand: (fn) => {
       const h = (_e, cmd) => fn(cmd);
       ipcRenderer.on('pet:command', h);

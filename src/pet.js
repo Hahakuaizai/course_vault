@@ -53,18 +53,55 @@
 
   /* ---------------- 设置 ---------------- */
 
+  /* 配置的权威副本在 userData/pet-config.json（主进程文件）：
+     实测这台机器上 localStorage 跨重启不可靠——每次启动读到的
+     都是默认值（pet-debug.log 里 petboot 与 petsave 对照确认），
+     而同目录的文件（pet-window.json、日志）一直正常。所以保存
+     走文件（见 saveCfg / pet-main 的 pet:config-* 通道），
+     localStorage 只留作同会话内的兜底。 */
+  function normalizeCfg(c) {
+    const dflt = { pet: 'kunkun', pos: null, customName: '', size: 'medium', sizePx: 92, mode: 'inside', perPet: {} };
+    const out = Object.assign(dflt, c || {});
+    /* 每只宠物的大小/位置分开存（perPet[宠物id] = {size, sizePx, pos}）：
+       每只宠物的基础大小不一样，共用一套设置来回切换就得反复调。
+       顶层的 size/sizePx/pos 是旧版的共用设置，只作迁移种子：
+       第一次升级时把它们记到当前宠物名下，之后不再读它们。 */
+    if (!out.perPet || typeof out.perPet !== 'object' || Array.isArray(out.perPet)) out.perPet = {};
+    if (!out.perPet[out.pet]) {
+      out.perPet[out.pet] = { size: out.size || 'medium', sizePx: out.sizePx || 92, pos: out.pos || null };
+    }
+    return out;
+  }
   function loadCfg() {
-    const dflt = { pet: 'kunkun', pos: null, customName: '', size: 'medium', sizePx: 92, mode: 'inside' };
-    try { return Object.assign(dflt, JSON.parse(localStorage.getItem(LS_KEY) || '{}')); }
-    catch { return dflt; }
+    let c;
+    try { c = JSON.parse(localStorage.getItem(LS_KEY) || '{}'); }
+    catch { c = {}; }
+    return normalizeCfg(c);
   }
   let cfg = loadCfg();
   function saveCfg() {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)); } catch { /* 存不下就算了 */ }
+    const text = JSON.stringify(cfg);
+    try { localStorage.setItem(LS_KEY, text); } catch { /* 存不下就算了 */ }
+    const vp = vaultPet();
+    if (vp && vp.saveConfig) { try { vp.saveConfig(text); } catch { /* 主进程没接上就算了 */ } }
+  }
+  /* 当前宠物的独立设置（没单独存过的宠物用默认值） */
+  function petCfg() {
+    const p = cfg.perPet[cfg.pet] || {};
+    return { size: p.size || 'medium', sizePx: p.sizePx || 92, pos: p.pos || null };
+  }
+  function setPetCfg(patch) {
+    cfg.perPet[cfg.pet] = Object.assign(petCfg(), patch);
+    saveCfg();
+    /* 【临时诊断】每次保存把当前宠物的设置写进 pet-debug.log，
+       用来核对「退出后没保存」到底丢在哪一步 */
+    const vp = vaultPet();
+    if (vp && vp.debug) vp.debug('petsave ' + cfg.pet + ' ' + JSON.stringify(cfg.perPet[cfg.pet]));
   }
   function targetH() {
-    if (cfg.size === 'custom') return Math.min(200, Math.max(40, cfg.sizePx || 92));
-    return SIZE_PRESETS[cfg.size] || 92;
+    const p = petCfg();
+    if (p.size === 'custom') return Math.min(200, Math.max(40, p.sizePx || 92));
+    return SIZE_PRESETS[p.size] || 92;
   }
   function builtinLabel(id) {
     const b = BUILTINS.find((x) => x.id === id);
@@ -346,9 +383,10 @@
   }
 
   function applyPos() {
-    if (!stage || !cfg.pos) return;
+    const pc = petCfg();
+    if (!stage || !pc.pos) return;
     const r = stage.getBoundingClientRect();
-    const p = clampPos(cfg.pos.x, cfg.pos.y, r.width, r.height);
+    const p = clampPos(pc.pos.x, pc.pos.y, r.width, r.height);
     stage.style.left = p.x + 'px';
     stage.style.top = p.y + 'px';
     stage.style.right = 'auto';
@@ -369,8 +407,12 @@
     if (name) play(name, 'once');
   }
 
-  /* 拖出窗口后的收尾：先按桌面模式落地；若主进程判定落点其实
-     在窗口内，会再发 dockInside 命令切回来（同一瞬间完成） */
+  /* 拖出窗口后松手：落点算数由主进程裁决，这里只发 dragEndOut
+     并做本地清理，不再抢先切桌面模式。以前抢先 applyPet 打开外部
+     窗口、又和主进程的收回（dockInside）撞车：收回先把窗口关了，
+     抢先发出的 openExternal 随后到、又把窗口开出来，界面状态和
+     实际窗口就此对不上（幽灵窗口不听指挥）。现在主进程二选一回话：
+     落在窗口内 → dockInside 命令；落在外面 → stayOut 命令。 */
   function finishDragOut(screenX, screenY) {
     dragging = false;
     if (stage) {
@@ -379,10 +421,7 @@
     }
     const vp = vaultPet();
     if (vp && vp.dragEndOut) vp.dragEndOut({ screenX, screenY });
-    cfg.mode = 'desktop';
-    saveCfg();
-    syncSettingsUI();
-    applyPet();
+    if (pack) play('idle', 'base');
   }
 
   function bindPointer() {
@@ -427,7 +466,13 @@
           screenX: e.screenX, screenY: e.screenY,
         };
         stage.style.visibility = 'hidden';
-        buildExternalCfg().then((c) => vp.dragOut(Object.assign(geo, { cfg: c }))).catch(() => {});
+        const pc = petCfg();
+        if (externalCfgCache && externalCfgCache.pet === cfg.pet
+          && externalCfgCache.size === pc.size && externalCfgCache.sizePx === pc.sizePx) {
+          vp.dragOut(Object.assign(geo, { cfg: externalCfgCache }));
+        } else {
+          buildExternalCfg().then((c) => { externalCfgCache = c; vp.dragOut(Object.assign(geo, { cfg: c })); }).catch(() => {});
+        }
         return;
       }
       const p = clampPos(down.rect.left + dx, down.rect.top + dy, down.rect.width, down.rect.height);
@@ -447,8 +492,7 @@
         dragging = false;
         stage.classList.remove('cv-pet-dragging');
         const r = stage.getBoundingClientRect();
-        cfg.pos = { x: Math.round(r.left), y: Math.round(r.top) };
-        saveCfg();
+        setPetCfg({ pos: { x: Math.round(r.left), y: Math.round(r.top) } });
         play('idle', 'base');
       } else {
         clickAction(e);
@@ -509,6 +553,42 @@
     return s;
   }
 
+  /* 子菜单显隐由 JS 控制（纯 CSS :hover 在斜向移动时容易断）：
+     同一层共用一个收起计时——进入带子菜单的条目就展开它并取消
+     本层待收起；进入普通条目或离开父条目，700ms 后才收起本层
+     展开中的子菜单。从条目移进它自己的子菜单不算离开（子菜单
+     是条目的子元素，pointerleave 不触发），700ms 也足够斜着
+     划过邻项再进入子菜单。 */
+  function wireSubMenus(root) {
+    const closeIn = (parent) => {
+      parent.querySelectorAll(':scope > .mi.has-sub.sub-open').forEach((o) => {
+        o.classList.remove('sub-open');
+        o.querySelectorAll('.sub-open').forEach((d) => d.classList.remove('sub-open'));
+      });
+    };
+    const armClose = (parent) => {
+      clearTimeout(parent._petSubTimer);
+      parent._petSubTimer = setTimeout(() => closeIn(parent), 700);
+    };
+    root.querySelectorAll('.mi.has-sub').forEach((mi) => {
+      const parent = mi.parentElement;
+      mi.addEventListener('pointerenter', () => {
+        clearTimeout(parent._petSubTimer);
+        parent.querySelectorAll(':scope > .mi.has-sub.sub-open').forEach((o) => {
+          if (o !== mi) {
+            o.classList.remove('sub-open');
+            o.querySelectorAll('.sub-open').forEach((d) => d.classList.remove('sub-open'));
+          }
+        });
+        mi.classList.add('sub-open');
+      });
+      mi.addEventListener('pointerleave', () => armClose(parent));
+    });
+    root.querySelectorAll('.mi:not(.has-sub)').forEach((mi) => {
+      mi.addEventListener('pointerenter', () => armClose(mi.parentElement));
+    });
+  }
+
   /* 播放动作：三级菜单 — 分组（模式）一层，组内动作再一层 */
   function buildActionsSub() {
     const root = subMenu(true);
@@ -554,12 +634,13 @@
 
   function buildSizeSub() {
     const sub = subMenu(false);
-    const item = (key, label) => menuItem(label, { tick: cfg.size === key, onClick: () => setSize(key) });
+    const curSize = petCfg().size;
+    const item = (key, label) => menuItem(label, { tick: curSize === key, onClick: () => setSize(key) });
     sub.appendChild(item('small', '小'));
     sub.appendChild(item('medium', '中'));
     sub.appendChild(item('large', '大'));
     sub.appendChild(menuItem('自定义（' + targetH() + 'px）', {
-      tick: cfg.size === 'custom',
+      tick: curSize === 'custom',
       onClick: () => { setSize('custom'); showSizePop(); },
     }));
     return sub;
@@ -599,14 +680,12 @@
     range.min = '40';
     range.max = '200';
     range.step = '2';
-    range.value = String(cfg.sizePx || 92);
+    range.value = String(petCfg().sizePx || 92);
     const val = document.createElement('span');
     val.className = 'cv-pet-sizepop-val';
     val.textContent = range.value + 'px';
     range.addEventListener('input', () => {
-      cfg.sizePx = Number(range.value) || 92;
-      if (cfg.size !== 'custom') cfg.size = 'custom';
-      saveCfg();
+      setPetCfg({ sizePx: Number(range.value) || 92, size: 'custom' });
       val.textContent = range.value + 'px';
       if (cur && pack) sizeStage(cur.anim);
       syncSettingsUI();
@@ -657,6 +736,7 @@
     menuEl.style.left = left + 'px';
     menuEl.style.top = top + 'px';
     if (window.innerWidth - left - mw < 190) menuEl.classList.add('flip');
+    wireSubMenus(menuEl);
     document.addEventListener('pointerdown', onDocDown, true);
     document.addEventListener('keydown', onMenuKey, true);
   }
@@ -673,8 +753,7 @@
   /* ---------------- 大小 ---------------- */
 
   function setSize(key) {
-    cfg.size = key;
-    saveCfg();
+    setPetCfg({ size: key });
     syncSettingsUI();
     if (cur && pack) sizeStage(cur.anim);
     syncExternal();
@@ -715,7 +794,8 @@
   }
 
   async function buildExternalCfg() {
-    const out = { pet: cfg.pet, size: cfg.size, sizePx: cfg.sizePx, customName: cfg.customName, custom: null };
+    const pc = petCfg();
+    const out = { pet: cfg.pet, size: pc.size, sizePx: pc.sizePx, customName: cfg.customName, custom: null };
     if (cfg.pet === 'custom') {
       const parsed = await getCustom();
       if (parsed) {
@@ -727,16 +807,27 @@
     return out;
   }
 
+  /* 外部配置缓存：拖出交接要在 pointermove 里同步发出 dragOut，
+     不能等 buildExternalCfg 的异步结果——慢一拍时松手先到，
+     dragEndOut 会因「还没有窗口」被主进程丢弃，落点裁决丢失，
+     两边状态从此对不上。缓存随 openExternal/syncExternal 刷新，
+     拖出时对不上当前宠物/大小就回退到异步构建。 */
+  let externalCfgCache = null;
+
   async function openExternal() {
     const vp = vaultPet();
     if (!vp) return;
-    try { await vp.openExternal(await buildExternalCfg()); } catch { /* 主进程没接上就先这样 */ }
+    try {
+      const c = await buildExternalCfg();
+      externalCfgCache = c;
+      await vp.openExternal(c);
+    } catch { /* 主进程没接上就先这样 */ }
   }
 
   function syncExternal() {
     const vp = vaultPet();
     if (!vp || cfg.mode !== 'desktop' || cfg.pet === 'none') return;
-    buildExternalCfg().then((c) => vp.syncExternal(c)).catch(() => {});
+    buildExternalCfg().then((c) => { externalCfgCache = c; vp.syncExternal(c); }).catch(() => {});
   }
 
   async function closeExternal() {
@@ -842,6 +933,18 @@
     if (!wrap) return;
     stopPreviews();
     wrap.innerHTML = '';
+    try {
+      await buildCardsInner(wrap);
+    } catch (err) {
+      /* 【临时诊断】建卡片出错要留记录（以前是静默失败，只剩空区域） */
+      const vp = vaultPet();
+      if (vp && vp.debug) vp.debug('buildCards ERROR: ' + (err && err.message));
+    }
+    const vp2 = vaultPet();
+    if (vp2 && vp2.debug) vp2.debug('buildCards: done children=' + wrap.children.length);
+  }
+
+  async function buildCardsInner(wrap) {
     for (const b of BUILTINS) {
       const pk = (window.CVPacks || {})[b.id];
       const card = petCard(b.id, b.label);
@@ -910,16 +1013,17 @@
 
   function syncSettingsUI() {
     syncCards();
+    const pc = petCfg();
     document.querySelectorAll('#petSizeSeg .seg-btn').forEach((b) =>
-      b.classList.toggle('is-active', b.dataset.size === cfg.size));
+      b.classList.toggle('is-active', b.dataset.size === pc.size));
     document.querySelectorAll('#petModeSeg .seg-btn').forEach((b) =>
       b.classList.toggle('is-active', b.dataset.mode === cfg.mode));
     const box = document.querySelector('#petSizeCustom');
     const range = document.querySelector('#petSizeRange');
     const val = document.querySelector('#petSizeVal');
-    if (box) box.hidden = cfg.size !== 'custom';
-    if (range) range.value = String(cfg.sizePx || 92);
-    if (val) val.textContent = String(cfg.sizePx || 92) + 'px';
+    if (box) box.hidden = pc.size !== 'custom';
+    if (range) range.value = String(pc.sizePx || 92);
+    if (val) val.textContent = String(pc.sizePx || 92) + 'px';
   }
 
   /* ---------------- 导入 / 移除自定义包 ---------------- */
@@ -990,9 +1094,7 @@
     });
     const range = document.querySelector('#petSizeRange');
     if (range) range.addEventListener('input', () => {
-      cfg.sizePx = Number(range.value) || 92;
-      if (cfg.size !== 'custom') cfg.size = 'custom';
-      saveCfg();
+      setPetCfg({ sizePx: Number(range.value) || 92, size: 'custom' });
       syncSettingsUI();
       if (cur && pack) sizeStage(cur.anim);
     });
@@ -1020,6 +1122,11 @@
   function init() {
     bindSettings();
     syncSettingsUI();
+    /* 宠物脚本是首屏后才加载的：万一设置窗在脚本到位前就已经
+       打开了，MutationObserver 等不到 hidden 变化，卡片区会一直
+       空着 — 这里补一发：窗已经开着就立刻建卡片 */
+    const modal0 = document.querySelector('#settingsModal');
+    if (modal0 && !modal0.hidden) buildCards();
     /* 外部窗口右键菜单里的选择由主进程转回来，在这里统一执行 */
     const vp = vaultPet();
     if (vp && vp.onExternalCommand) {
@@ -1032,7 +1139,15 @@
           /* 桌面上的宠物被拖回窗口内松手（或点了「切回软件内显示」）：
              主进程已把屏幕坐标换算成窗口内坐标，并关掉了外部窗口 */
           cfg.mode = 'inside';
-          if (Number.isFinite(cmd.x) && Number.isFinite(cmd.y)) cfg.pos = { x: cmd.x, y: cmd.y };
+          if (Number.isFinite(cmd.x) && Number.isFinite(cmd.y)) setPetCfg({ pos: { x: cmd.x, y: cmd.y } });
+          saveCfg();
+          syncSettingsUI();
+          applyPet();
+        }
+        else if (cmd.type === 'stayOut') {
+          /* 从软件内把宠物拖出、在窗口外松手：主进程确认它留在
+             桌面上，这里才正式切到桌面模式（见 finishDragOut） */
+          cfg.mode = 'desktop';
           saveCfg();
           syncSettingsUI();
           applyPet();
@@ -1040,8 +1155,34 @@
         else if (cmd.type === 'openSettings') openPetSettings();
       });
     }
+    /* 【临时诊断】启动时把读到的每只宠物设置写进 pet-debug.log，
+       和 petsave 对照就能看出设置是没存下还是没读出来 */
+    if (vp && vp.debug) vp.debug('petboot pet=' + cfg.pet + ' mode=' + cfg.mode + ' perPet=' + JSON.stringify(cfg.perPet));
     applyPet();
+    /* 再把文件里的权威配置读回来覆盖（localStorage 在这台机器上
+       跨重启会丢，见 loadCfg 上方说明）：读到就以它为准刷新一遍 */
+    if (vp && vp.loadConfig) {
+      vp.loadConfig().then((text) => {
+        if (!text) return;
+        let fileCfg = null;
+        try { fileCfg = JSON.parse(text); } catch { /* 文件坏了就当没有 */ }
+        if (!fileCfg || typeof fileCfg !== 'object') return;
+        cfg = normalizeCfg(fileCfg);
+        if (vp.debug) vp.debug('petboot-file pet=' + cfg.pet + ' perPet=' + JSON.stringify(cfg.perPet));
+        syncSettingsUI();
+        applyPet();
+      }).catch(() => {});
+    }
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
-  else init();
+  /* 【临时诊断】init 出错也要留下记录，不能静默死掉 */
+  const safeInit = () => {
+    const vp = vaultPet();
+    if (vp && vp.debug) vp.debug('petinit: begin pet=' + cfg.pet + ' packs=' + (window.CVPacks ? Object.keys(window.CVPacks).length : 'NONE'));
+    try { init(); }
+    catch (err) {
+      if (vp && vp.debug) vp.debug('petinit ERROR: ' + (err && err.message));
+    }
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', safeInit);
+  else safeInit();
 })();
