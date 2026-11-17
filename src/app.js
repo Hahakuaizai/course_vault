@@ -3836,12 +3836,23 @@ function showCtx(x, y, items, depth = 0) {
     const pr = openCtxMenus[depth - 1].el.getBoundingClientRect();
     /* 和父菜单重叠 2px 而不是留 4px 缝：指针横着进子菜单时
        中间没有「不属于任何菜单」的死区，悬停不会断 */
-    let left = pr.right - 2;
-    if (left + w > window.innerWidth - 8) left = pr.left - w + 2;
-    el.style.left = `${Math.max(8, left)}px`;
+    el.style.left = `${pr.right - 2}px`;
     // 竖直方向对齐触发它的那个条目（y 由 mouseover 传进来），再夹进视口
     const top = Math.min(y, window.innerHeight - h - 8);
     el.style.top = `${Math.max(8, top)}px`;
+    /* 子菜单定位：向右放不下时翻到父菜单左侧；但翻过去会压住更
+       上层祖先菜单时不翻，改贴视口边缘。已打开的菜单【绝不移动】
+       ——平移父菜单会让指针下的条目滑走、悬停目标突变，子菜单
+       就会无故消失（上一版级联平移的教训）。 */
+    if (el.offsetLeft + w > window.innerWidth - 8) {
+      const flipped = pr.left - w + 2;
+      const hitsAncestor = openCtxMenus.slice(0, Math.max(0, depth - 1)).some((mm) => {
+        const r = mm.el.getBoundingClientRect();
+        return flipped < r.right - 4 && flipped + w > r.left + 4;
+      });
+      el.style.left = `${(!hitsAncestor && flipped >= 8) ? flipped
+        : ((pr.left + pr.right) / 2 > window.innerWidth / 2 ? window.innerWidth - 8 - w : 8)}px`;
+    }
   }
 
   const entry = { el, x, y };

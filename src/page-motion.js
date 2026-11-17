@@ -209,11 +209,11 @@ initSwitchWatch();
    现在改成：驱动方（开关的 render、设置面板的 rAF）每帧把当前 u 交给
    set()，由它算出 p / A 写进 CSS 变量。pos 不动 → u 不动 → 光冻结。
 
-   ★ 三个驱动方，同一套 set()
+   ★ 两个驱动方，同一套 set()
      · 开关拖动 / 点击   theme-switch.js 的 render()，u 就是 pos（弹簧驱动）
      · 设置面板 / 跟随系统 app.js 的 animateThemeSwitch()，u 由 rAF 推
-     · 开屏            本文件自己 rAF 推一遍（下面那段），借同一个 set()
-   所以三种路径的观感完全一致，只是 u 的来源不同。
+   所以两种路径的观感完全一致，只是 u 的来源不同。
+   （原来还有第三个「开屏自跑一遍」，用户没切主题光也扫，已去掉。）
 
    ★ 只在有事情发生时动
    以前这里还挂过「空闲时每 18 秒扫一次」的定时器，用户什么都没做
@@ -240,6 +240,7 @@ function initSweep() {
      而不是和页面一模一样地平移。见下面 set() 的注释。 */
   let targetU = null;
   let curU = null;
+  let velU = 0; // 光的当前速度（二阶弹簧用，见 loop）
   let dragging = false;
   let wantIdle = false;
   let raf = 0;
@@ -270,6 +271,7 @@ function initSweep() {
     lastA = NaN;
     targetU = null;
     curU = null;
+    velU = 0;
     el.style.setProperty('--p', '-14');
     el.style.setProperty('--a', '0');
   }
@@ -308,15 +310,26 @@ function initSweep() {
     const dt = Math.min(64, Math.max(1, t - lastT)) / 1000;
     lastT = t;
 
-    /* 一阶趋近（指数平滑）。时间常数的两个取值就是「光比页面慢多少」：
-       · 拖动中 70ms —— 必须跟手。用户拖着滑块，光要是明显落在后面，
-         会觉得是卡顿而不是柔和。
-       · 松手后 / 设置面板 240ms —— 这就是用户要的「比动画慢一点点」。
-         揭幕约 1.4s，光会晚 200ms 左右才到位，收尾也因此更缓。 */
-    const tau = dragging ? 0.07 : 0.24;
-    const k = 1 - Math.exp(-dt / tau);
-    curU += (targetU - curU) * k;
-    if (Math.abs(targetU - curU) < 0.0008) curU = targetU;
+    /* 二阶弹簧（近临界阻尼）驱动：光有自己的速度 —— 起步缓缓加速、
+       中段匀速、接近目标自动减速停稳，天然的变速（慢→快→慢），
+       比原来的一阶指数追赶舒缓得多，收尾也不会戛然而止。
+       · 拖动中弹簧调硬（omega 30），光紧跟开关、不能拖沓；
+       · 松手后 / 设置面板调软（omega 6），整段横扫约 2 秒，
+         光晚约 300ms 起步、到位后柔和收住。 */
+    const omega = dragging ? 30 : 6.0;
+    const zeta = dragging ? 1.0 : 1.05;
+    let rest = dt;
+    while (rest > 0) {
+      const h = Math.min(rest, 1 / 120);
+      rest -= h;
+      const f = -omega * omega * (curU - targetU) - 2 * zeta * omega * velU;
+      velU += f * h;
+      curU += velU * h;
+    }
+    if (Math.abs(targetU - curU) < 0.0008 && Math.abs(velU) < 0.004) {
+      curU = targetU;
+      velU = 0;
+    }
     paint(curU);
 
     if (curU !== targetU) {
@@ -361,7 +374,7 @@ function initSweep() {
     dragging = !!isDrag;
     /* 首次（或刚从 hide 里恢复）：直接把光的起点对齐到 u，
        不要让光从上一次结束的位置飞过来。 */
-    if (curU === null) curU = clamp01(u);
+    if (curU === null) { curU = clamp01(u); velU = 0; }
     targetU = clamp01(u);
     wantIdle = false;
     kick();
@@ -385,34 +398,8 @@ function initSweep() {
     el.dataset.mode = mode;
   });
 
-  /* 开屏那一下：没有拖动过程，自己用 rAF 从一端推到另一端。
-     只是「借」同一个 set()，和真切换完全同构，区别只在 u 来自时间。
-     用 smoothstep 而不是线性：开屏没人跟手，柔一点更好看。
-
-     ★ 注意这里要等 set() 的平滑追上来再宣告结束
-     现在 set() 只更新「目标」，光由内部的 rAF 慢慢追上。如果按时间
-     一到就 hide()，光会停在还差一截的位置然后被清空。所以留一段余量
-     让平滑收尾（240ms 时间常数下大约 3 倍才追到 95%）。 */
-  setTimeout(() => {
-    if (reduceMotion()) return;
-    const dark = document.documentElement.dataset.theme === 'dark';
-    /* 当前是深色 = 刚从浅色切过来：u 从 1 走到 0，配色 to-dark。
-       当前是浅色则反过来。 */
-    const m = dark ? 'to-dark' : 'to-light';
-    const from = dark ? 1 : 0;
-    const to = dark ? 0 : 1;
-    const t0 = performance.now();
-    /* 1600ms：和真切换那条路径的节奏对齐（开关弹簧现在约 1.5s）。
-       以前是 1150ms，用户连着三轮都说快，这里一起放慢。 */
-    const DUR = 1600;
-    const tick = () => {
-      const q = Math.min(1, (performance.now() - t0) / DUR);
-      const e = q * q * (3 - 2 * q);
-      set(from + (to - from) * e, m);
-      if (q < 1) requestAnimationFrame(tick);
-      else setTimeout(hide, 700);
-    };
-    requestAnimationFrame(tick);
-  }, 900);
+  /* 开屏自动横扫已去掉：以前这里有个 900ms 后自跑一遍的「开屏那
+     一下」，用户每次进软件、没切主题也会看到光扫过一遍，亮暗模式
+     都如此，反馈像故障。光只在真正切换主题时由驱动方带动。 */
 }
 initSweep();

@@ -113,8 +113,9 @@
   left: 100%;
   top: -5px;
   min-width: 168px;
-  max-height: 336px;
+  max-height: min(336px, calc(100vh - 8px));
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 4px;
   background: var(--bg-2);
   border: 1px solid var(--line-2);
@@ -131,6 +132,13 @@
 .cv-pet-menu.flip .sub {
   left: auto;
   right: 100%;
+}
+
+/* 子菜单打开时由 JS 按视口坐标固定定位（见 pet.js 的 placeSub）：
+   不再受父菜单滚动/裁剪影响，也不会压住父菜单 */
+.cv-pet-menu .sub.positioned {
+  position: fixed;
+  z-index: 302;
 }
 
 /* ---------- 设置页的桌宠选择卡片 ---------- */
@@ -231,10 +239,11 @@
   display: none;
 }
 
-/* 动作菜单的分组层不滚动、不裁剪，第三级才能完整飞出 */
+/* 动作菜单的分组层：限高可滚（三级菜单是固定定位，不会被它裁剪） */
 .cv-pet-menu .sub.flat {
-  overflow: visible;
-  max-height: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  max-height: calc(100vh - 8px);
 }
 
 /* ---------- 桌宠大小 ---------- */

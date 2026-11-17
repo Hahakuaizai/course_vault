@@ -27,7 +27,7 @@
     thinking: '思考', typing: '打字', building: '建造', conducting: '指挥',
     compacting: '整理压缩', carrying: '搬东西', notification: '提醒', passed: '搞定',
     happy: '开心', error: '出错了', sleeping: '睡觉', waking: '醒来',
-    'roam-hop': '蹦跶', swim: '游泳', basketball: '打篮球',
+    'roam-hop': '蹦跶', swim: '游泳', basketball: '打篮球', dribble: '运球', 'idle-ball': '玩球', 'ball-show': '耍球表演',
     'react-left': '戳左边', 'react-right': '戳右边', 'react-double': '连着戳',
     'react-drag': '被拎起来', drag: '被拎起来', tickle: '挠痒痒',
     coffee: '喝咖啡', music: '听音乐', reading: '看书',
@@ -560,20 +560,71 @@
      是条目的子元素，pointerleave 不触发），700ms 也足够斜着
      划过邻项再进入子菜单。 */
   function wireSubMenus(root) {
+    /* 子菜单用固定定位，但【绝不移动已经打开的菜单】——上一版的
+       级联平移会把父菜单从指针下面挪走：条目滑走点不到、悬停目标
+       突变还会让子菜单无故消失。定位规则：先向右展开；放不下翻到
+       条目左侧，但翻过去会压住更上层祖先菜单（比如根菜单）时不翻，
+       改贴视口边缘（只和直接父级少量重叠）；纵向同样夹进视口。 */
+    const placeSub = (mi, sub) => {
+      if (!sub) return;
+      sub.classList.add('positioned');
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const pr = mi.getBoundingClientRect();
+      const w = sub.offsetWidth, h = sub.offsetHeight;
+      let x = pr.right - 2;
+      if (x + w > vw - 4) {
+        const flipped = pr.left - w + 2;
+        // 翻到左侧会不会压住祖先菜单（跳过直接父级菜单本身）
+        let hits = false;
+        let node = mi.parentElement, parentSkipped = false;
+        while (node && !hits) {
+          const isMenu = node === root || (node.classList && node.classList.contains('sub'));
+          if (isMenu) {
+            if (!parentSkipped) parentSkipped = true;
+            else {
+              const r = node.getBoundingClientRect();
+              if (flipped < r.right - 4 && flipped + w > r.left + 4) hits = true;
+            }
+            if (node === root) break;
+          }
+          node = node.parentElement;
+        }
+        x = (!hits && flipped >= 4) ? flipped
+          : ((pr.left + pr.right) / 2 > vw / 2 ? vw - 4 - w : 4);
+      }
+      x = Math.max(4, Math.min(x, Math.max(4, vw - 4 - w)));
+      let y = pr.top - 5;
+      if (y + h > vh - 4) y = vh - 4 - h;
+      if (y < 4) y = 4;
+      sub.style.left = x + 'px';
+      sub.style.top = y + 'px';
+    };
     const closeIn = (parent) => {
       parent.querySelectorAll(':scope > .mi.has-sub.sub-open').forEach((o) => {
         o.classList.remove('sub-open');
         o.querySelectorAll('.sub-open').forEach((d) => d.classList.remove('sub-open'));
       });
     };
+    /* 待收起计时按父级各存一份；指针落到任何子菜单面板自身
+       （边距、滚动条、分隔区这类「空白处」）时，把所有待收起计时
+       一并取消——斜着移向子菜单时不会再被半路收掉。 */
+    const armedParents = new Set();
     const armClose = (parent) => {
       clearTimeout(parent._petSubTimer);
+      armedParents.add(parent);
       parent._petSubTimer = setTimeout(() => closeIn(parent), 700);
     };
+    root.addEventListener('pointerover', (e) => {
+      if (e.target.closest && e.target.closest('.sub') && !e.target.closest('.mi')) {
+        armedParents.forEach((p) => clearTimeout(p._petSubTimer));
+        armedParents.clear();
+      }
+    });
     root.querySelectorAll('.mi.has-sub').forEach((mi) => {
       const parent = mi.parentElement;
       mi.addEventListener('pointerenter', () => {
         clearTimeout(parent._petSubTimer);
+        armedParents.delete(parent);
         parent.querySelectorAll(':scope > .mi.has-sub.sub-open').forEach((o) => {
           if (o !== mi) {
             o.classList.remove('sub-open');
@@ -581,6 +632,7 @@
           }
         });
         mi.classList.add('sub-open');
+        placeSub(mi, mi.querySelector(':scope > .sub'));
       });
       mi.addEventListener('pointerleave', () => armClose(parent));
     });
