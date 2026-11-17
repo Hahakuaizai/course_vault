@@ -12,6 +12,7 @@ const { spawn, execFileSync, execFile } = require('node:child_process');
 const db = require('./db');
 const { createUpdater } = require('./updater');
 const folderCover = require('./src/folder-cover-main');
+const petMain = require('./src/pet-main');
 
 const isDev = process.argv.includes('--dev');
 
@@ -3960,6 +3961,13 @@ if (Test-Path $owp) {
     ipcMain,
     app,
     getCourses: () => state?.courses || [],
+  });
+
+  /* --- 桌宠桌面模式（独立模块，外部窗口位置独立存储） --- */
+  petMain.register({
+    ipcMain,
+    app,
+    getWin: () => win,
   });
 
   ipcMain.handle('update:restart', () => {

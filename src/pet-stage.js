@@ -15,6 +15,7 @@
     { id: 'deepy', label: '像素鲸鱼' },
     { id: 'clawd', label: '克码人生' },
     { id: 'kunkun', label: '坤坤' },
+    { id: 'maid', label: '蓝发小女仆' },
   ];
   const SIZE_PRESETS = { small: 64, medium: 92, large: 128 };
   const ANIM_LABELS = {
@@ -87,6 +88,7 @@
 
   function frameList(anim, img) {
     if (Array.isArray(anim.frames) && anim.frames.length) return anim.frames;
+    if (anim.count) return Array.from({ length: anim.count }, (_, i) => ({ i, ms: anim.ms || 140 }));
     const rows = img && img.naturalHeight ? Math.max(1, Math.round(img.naturalHeight / anim.frameH)) : 1;
     const n = (anim.cols || 1) * rows;
     return Array.from({ length: n }, (_, i) => ({ i, ms: 140 }));
@@ -156,6 +158,10 @@
       a.frameW, a.frameH, 0, 0, a.frameW, a.frameH);
   }
 
+  function isIdleNow() {
+    return !!cur && cur.name === 'idle';
+  }
+
   /* ---------------- 待机随机动作（看门狗，与 pet.js 同构） ---------------- */
 
   let nextIdleAt = 0;
@@ -168,8 +174,9 @@
       armIdle(2500 + Math.random() * 2000);
       idleWatcher = setInterval(() => {
         try {
-          if (!pack || dragging) return;
-          if (!cur || cur.name !== 'idle') return;
+          if (dragging) return;
+          if (!pack) return;
+          if (!isIdleNow()) return;
           if (Date.now() < nextIdleAt) return;
           const pick = pickIdleAction();
           if (pick) play(pick, 'once');
@@ -250,7 +257,7 @@
   canvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     down = { sx: e.screenX, sy: e.screenY, lx: e.screenX, ly: e.screenY, moved: false };
-    try { canvas.setPointerCapture(e.pointerId); } catch { /* 抓不到也不影响 */ }
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 抓不到也不影响 */ }
   });
   canvas.addEventListener('pointermove', (e) => {
     if (!down) return;
@@ -271,7 +278,8 @@
     down = null;
     if (wasDrag) {
       dragging = false;
-      if (pet) pet.dragEnd();
+      /* 带上松手时的指针屏幕坐标：落在主窗口范围内 → 主进程把它收回软件内 */
+      if (pet) pet.dragEnd({ screenX: e.screenX, screenY: e.screenY });
       play('idle', 'base');
     } else if (pack) {
       const r = canvas.getBoundingClientRect();
@@ -287,9 +295,13 @@
     }
   };
   canvas.addEventListener('pointerup', endPointer);
-  canvas.addEventListener('pointercancel', () => {
+  canvas.addEventListener('pointercancel', (e) => {
     down = null;
-    if (dragging) { dragging = false; if (pet) pet.dragEnd(); play('idle', 'base'); }
+    if (dragging) {
+      dragging = false;
+      if (pet) pet.dragEnd({ screenX: e.screenX || -9999, screenY: e.screenY || -9999 });
+      play('idle', 'base');
+    }
   });
 
   /* ---------------- 右键：组装菜单模型给主进程弹原生菜单 ---------------- */
@@ -306,6 +318,9 @@
         .map((n) => { used.add(n); return { id: n, label: ANIM_LABELS[n] || n }; });
       if (items.length) groups.push({ label: title, items });
     };
+    if (pack.groups) {
+      for (const [title, list] of Object.entries(pack.groups)) addGroup(title, list);
+    }
     for (const st of STATE_ORDER) {
       if (states[st]) addGroup(STATE_LABELS[st] || st, states[st]);
     }
@@ -326,5 +341,11 @@
   if (pet) {
     pet.onConfig((next) => applyConfig(next));
     pet.onPlay((name) => play(name, name === 'idle' ? 'base' : 'once'));
+    /* 主窗口里把宠物拖出边界时，拖动态由主进程在这边点火/收尾 */
+    if (pet.onCommand) pet.onCommand((cmd) => {
+      if (!cmd) return;
+      if (cmd.type === 'dragStart') { dragging = true; play(dragAnimName(), 'base'); }
+      else if (cmd.type === 'dragStop') { dragging = false; play('idle', 'base'); }
+    });
   }
 })();

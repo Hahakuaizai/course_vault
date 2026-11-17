@@ -16,6 +16,7 @@
     { id: 'deepy', label: '像素鲸鱼' },
     { id: 'clawd', label: '克码人生' },
     { id: 'kunkun', label: '坤坤' },
+    { id: 'maid', label: '蓝发小女仆' },
   ];
   /* 大小三档是「内容高度」的目标像素，自定义在 40–200 之间拉滑块 */
   const SIZE_PRESETS = { small: 64, medium: 92, large: 128 };
@@ -206,6 +207,7 @@
 
   function frameList(anim, img) {
     if (Array.isArray(anim.frames) && anim.frames.length) return anim.frames;
+    if (anim.count) return Array.from({ length: anim.count }, (_, i) => ({ i, ms: anim.ms || 140 }));
     const rows = img && img.naturalHeight ? Math.max(1, Math.round(img.naturalHeight / anim.frameH)) : 1;
     const n = (anim.cols || 1) * rows;
     return Array.from({ length: n }, (_, i) => ({ i, ms: 140 }));
@@ -271,6 +273,10 @@
     ctx.drawImage(img, sx, sy, a.frameW, a.frameH, 0, 0, a.frameW, a.frameH);
   }
 
+  function isIdleNow() {
+    return !!cur && cur.name === 'idle';
+  }
+
   /* ---------------- 待机随机动作（自检式调度） ----------------
      不用链式 setTimeout：一旦某环异常，链会静默断掉、宠物再也不动。
      改成每 500ms 自检一次的看门狗 + 到点时间戳，怎么都死不了。 */
@@ -285,8 +291,9 @@
       armIdle(2500 + Math.random() * 2000); // 开局先动一次，确认是活的
       idleWatcher = setInterval(() => {
         try {
-          if (!pack || dragging || document.hidden) return;
-          if (!cur || cur.name !== 'idle') return;
+          if (dragging || document.hidden) return;
+          if (!pack) return;
+          if (!isIdleNow()) return;
           if (Date.now() < nextIdleAt) return;
           const pick = pickIdleAction();
           if (pick) play(pick, 'once');
@@ -362,12 +369,28 @@
     if (name) play(name, 'once');
   }
 
+  /* 拖出窗口后的收尾：先按桌面模式落地；若主进程判定落点其实
+     在窗口内，会再发 dockInside 命令切回来（同一瞬间完成） */
+  function finishDragOut(screenX, screenY) {
+    dragging = false;
+    if (stage) {
+      stage.classList.remove('cv-pet-dragging');
+      stage.style.visibility = '';
+    }
+    const vp = vaultPet();
+    if (vp && vp.dragEndOut) vp.dragEndOut({ screenX, screenY });
+    cfg.mode = 'desktop';
+    saveCfg();
+    syncSettingsUI();
+    applyPet();
+  }
+
   function bindPointer() {
     let down = null;
     stage.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       closeMenu();
-      down = { x: e.clientX, y: e.clientY, moved: false, rect: stage.getBoundingClientRect() };
+      down = { x: e.clientX, y: e.clientY, moved: false, out: false, rect: stage.getBoundingClientRect() };
       try { stage.setPointerCapture(e.pointerId); } catch { /* 抓不到也不影响拖动 */ }
     });
     stage.addEventListener('pointermove', (e) => {
@@ -380,19 +403,47 @@
         stage.classList.add('cv-pet-dragging');
         play(dragAnimName(), 'base');
       }
-      if (down.moved) {
-        const p = clampPos(down.rect.left + dx, down.rect.top + dy, down.rect.width, down.rect.height);
-        stage.style.left = p.x + 'px';
-        stage.style.top = p.y + 'px';
-        stage.style.right = 'auto';
-        stage.style.bottom = 'auto';
+      if (!down.moved) return;
+      if (down.out) {
+        /* 已交接给桌面窗口：后续移动发屏幕坐标给主进程挪窗口 */
+        const vp = vaultPet();
+        if (vp && vp.dragMove) {
+          vp.dragMove({ screenX: e.screenX, screenY: e.screenY, grabDX: down.grabDX, grabDY: down.grabDY });
+        }
+        return;
       }
+      const vp = vaultPet();
+      const outside = e.clientX < -4 || e.clientY < -4 ||
+        e.clientX > window.innerWidth + 4 || e.clientY > window.innerHeight + 4;
+      if (outside && vp && vp.dragOut) {
+        /* 拖出窗口边界：把宠物交接给桌面置顶小窗口，它不受本窗口
+           边界限制，能停在桌面和任何软件上方；本窗口这只先藏起来 */
+        down.out = true;
+        down.grabDX = down.x - down.rect.left;
+        down.grabDY = down.y - down.rect.top;
+        const geo = {
+          grabDX: down.grabDX, grabDY: down.grabDY,
+          w: Math.round(down.rect.width), h: Math.round(down.rect.height),
+          screenX: e.screenX, screenY: e.screenY,
+        };
+        stage.style.visibility = 'hidden';
+        buildExternalCfg().then((c) => vp.dragOut(Object.assign(geo, { cfg: c }))).catch(() => {});
+        return;
+      }
+      const p = clampPos(down.rect.left + dx, down.rect.top + dy, down.rect.width, down.rect.height);
+      stage.style.left = p.x + 'px';
+      stage.style.top = p.y + 'px';
+      stage.style.right = 'auto';
+      stage.style.bottom = 'auto';
     });
     const end = (e) => {
       if (!down) return;
       const wasDrag = down.moved;
+      const wasOut = down.out;
       down = null;
-      if (wasDrag) {
+      if (wasOut) {
+        finishDragOut(e.screenX, e.screenY);
+      } else if (wasDrag) {
         dragging = false;
         stage.classList.remove('cv-pet-dragging');
         const r = stage.getBoundingClientRect();
@@ -404,9 +455,11 @@
       }
     };
     stage.addEventListener('pointerup', end);
-    stage.addEventListener('pointercancel', () => {
+    stage.addEventListener('pointercancel', (e) => {
+      const wasOut = down && down.out;
       down = null;
-      if (dragging) { dragging = false; stage.classList.remove('cv-pet-dragging'); play('idle', 'base'); }
+      if (wasOut) finishDragOut(e.screenX || -9999, e.screenY || -9999);
+      else if (dragging) { dragging = false; stage.classList.remove('cv-pet-dragging'); play('idle', 'base'); }
     });
   }
 
@@ -472,6 +525,10 @@
       }
       root.appendChild(menuItem(title, { sub: g }));
     };
+    /* 包自带分组（女仆按待机/工作/互动…分）优先，其次按应用状态分 */
+    if (pack.groups) {
+      for (const [title, list] of Object.entries(pack.groups)) addGroup(title, list);
+    }
     const states = pack.states || {};
     for (const st of STATE_ORDER) {
       if (states[st]) addGroup(STATE_LABELS[st] || st, states[st]);
@@ -501,18 +558,82 @@
     sub.appendChild(item('small', '小'));
     sub.appendChild(item('medium', '中'));
     sub.appendChild(item('large', '大'));
-    sub.appendChild(item('custom', '自定义（' + targetH() + 'px）'));
+    sub.appendChild(menuItem('自定义（' + targetH() + 'px）', {
+      tick: cfg.size === 'custom',
+      onClick: () => { setSize('custom'); showSizePop(); },
+    }));
     return sub;
+  }
+
+  /* ---------------- 自定义大小的浮动滑块（右键菜单点「自定义」时弹） ---------------- */
+
+  let sizePop = null;
+
+  function closeSizePop() {
+    if (!sizePop) return;
+    sizePop.remove();
+    sizePop = null;
+    document.removeEventListener('pointerdown', onSizePopDown, true);
+    document.removeEventListener('keydown', onSizePopKey, true);
+  }
+  function onSizePopDown(e) {
+    if (sizePop && !sizePop.contains(e.target)) closeSizePop();
+  }
+  function onSizePopKey(e) {
+    if (e.key === 'Escape') closeSizePop();
+  }
+
+  function showSizePop() {
+    closeSizePop();
+    if (!stage || cfg.pet === 'none' || cfg.mode === 'desktop') return;
+    sizePop = document.createElement('div');
+    sizePop.className = 'cv-pet-sizepop';
+    const label = document.createElement('div');
+    label.className = 'cv-pet-sizepop-label';
+    label.textContent = '桌宠大小（拖动即时生效）';
+    sizePop.appendChild(label);
+    const row = document.createElement('div');
+    row.className = 'cv-pet-sizepop-row';
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = '40';
+    range.max = '200';
+    range.step = '2';
+    range.value = String(cfg.sizePx || 92);
+    const val = document.createElement('span');
+    val.className = 'cv-pet-sizepop-val';
+    val.textContent = range.value + 'px';
+    range.addEventListener('input', () => {
+      cfg.sizePx = Number(range.value) || 92;
+      if (cfg.size !== 'custom') cfg.size = 'custom';
+      saveCfg();
+      val.textContent = range.value + 'px';
+      if (cur && pack) sizeStage(cur.anim);
+      syncSettingsUI();
+      syncExternal();
+    });
+    row.appendChild(range);
+    row.appendChild(val);
+    sizePop.appendChild(row);
+    document.body.appendChild(sizePop);
+    const sr = stage.getBoundingClientRect();
+    const pw = sizePop.offsetWidth;
+    const ph = sizePop.offsetHeight;
+    sizePop.style.left = Math.min(Math.max(4, sr.right - pw), Math.max(4, window.innerWidth - pw - 4)) + 'px';
+    sizePop.style.top = Math.max(4, sr.top - ph - 8) + 'px';
+    document.addEventListener('pointerdown', onSizePopDown, true);
+    document.addEventListener('keydown', onSizePopKey, true);
   }
 
   function openMenu(x, y) {
     closeMenu();
+    closeSizePop();
     if (!pack) return;
     menuEl = document.createElement('div');
     menuEl.className = 'cv-pet-menu';
     const head = document.createElement('div');
     head.className = 'mhead';
-    head.textContent = builtinLabel(cfg.pet) || pack.name || '桌宠';
+    head.textContent = builtinLabel(cfg.pet) || (pack && pack.name) || '桌宠';
     menuEl.appendChild(head);
     menuEl.appendChild(menuItem('播放动作', { sub: buildActionsSub() }));
     const sep1 = document.createElement('div');
@@ -520,6 +641,9 @@
     menuEl.appendChild(sep1);
     menuEl.appendChild(menuItem('更换宠物', { sub: buildPetSub() }));
     menuEl.appendChild(menuItem('桌宠大小', { sub: buildSizeSub() }));
+    if (cfg.mode === 'inside') {
+      menuEl.appendChild(menuItem('放到桌面上', { onClick: () => setMode('desktop') }));
+    }
     const sep2 = document.createElement('div');
     sep2.className = 'sep';
     menuEl.appendChild(sep2);
@@ -554,6 +678,15 @@
     syncSettingsUI();
     if (cur && pack) sizeStage(cur.anim);
     syncExternal();
+  }
+
+  /* 显示位置切换（设置页分段控件、右键菜单、外部命令共用入口） */
+  function setMode(m) {
+    if (cfg.mode === m) return;
+    cfg.mode = m;
+    saveCfg();
+    syncSettingsUI();
+    applyPet();
   }
 
   /* ---------------- 宠物切换与加载 ---------------- */
@@ -615,6 +748,7 @@
   async function applyPet() {
     stopCurrent();
     closeMenu();
+    closeSizePop();
     for (const u of blobURLs) URL.revokeObjectURL(u);
     blobURLs = [];
     images = new Map();
@@ -852,11 +986,7 @@
     const modeSeg = document.querySelector('#petModeSeg');
     if (modeSeg) modeSeg.addEventListener('click', (e) => {
       const b = e.target.closest('.seg-btn');
-      if (!b || b.dataset.mode === cfg.mode) return;
-      cfg.mode = b.dataset.mode;
-      saveCfg();
-      syncSettingsUI();
-      applyPet();
+      if (b) setMode(b.dataset.mode);
     });
     const range = document.querySelector('#petSizeRange');
     if (range) range.addEventListener('input', () => {
@@ -897,12 +1027,17 @@
         if (!cmd) return;
         if (cmd.type === 'setPet') setPet(cmd.id);
         else if (cmd.type === 'setSize') setSize(cmd.key);
-        else if (cmd.type === 'setMode') {
-          cfg.mode = cmd.mode;
+        else if (cmd.type === 'setMode') setMode(cmd.mode);
+        else if (cmd.type === 'dockInside') {
+          /* 桌面上的宠物被拖回窗口内松手（或点了「切回软件内显示」）：
+             主进程已把屏幕坐标换算成窗口内坐标，并关掉了外部窗口 */
+          cfg.mode = 'inside';
+          if (Number.isFinite(cmd.x) && Number.isFinite(cmd.y)) cfg.pos = { x: cmd.x, y: cmd.y };
           saveCfg();
           syncSettingsUI();
           applyPet();
-        } else if (cmd.type === 'openSettings') openPetSettings();
+        }
+        else if (cmd.type === 'openSettings') openPetSettings();
       });
     }
     applyPet();

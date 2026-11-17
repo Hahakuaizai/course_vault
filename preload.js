@@ -119,6 +119,43 @@ contextBridge.exposeInMainWorld('vault', {
   /** 文件夹封面：单一通道，按 op 分发（见 src/folder-cover-main.js） */
   cover: (msg) => invoke('cover:action', msg),
 
+  /** 桌宠桌面模式（见 src/pet-main.js）：主窗口负责开/关外部窗口与同步
+   *  配置；外部窗口（pet-stage）回传拖动、尺寸与右键菜单模型。 */
+  pet: {
+    openExternal: (cfg) => invoke('pet:external-open', cfg),
+    closeExternal: () => invoke('pet:external-close'),
+    syncExternal: (cfg) => ipcRenderer.send('pet:external-config', cfg),
+    onExternalCommand: (fn) => {
+      const h = (_e, cmd) => fn(cmd);
+      ipcRenderer.on('pet:external-command', h);
+      return () => ipcRenderer.removeListener('pet:external-command', h);
+    },
+    moveBy: (dx, dy) => ipcRenderer.send('pet:move-by', { dx, dy }),
+    dragEnd: (p) => ipcRenderer.send('pet:drag-end', p),
+    resize: (w, h) => ipcRenderer.send('pet:resize', { w, h }),
+    contextMenu: (model) => ipcRenderer.send('pet:context-menu', model),
+    /** 拖出交接：主窗口里的宠物拖出边界后，把几何与配置发给主进程，
+     *  后续移动/松手继续转发（见 src/pet-main.js 的 pet:drag-* 通道） */
+    dragOut: (p) => ipcRenderer.send('pet:drag-out', p),
+    dragMove: (p) => ipcRenderer.send('pet:drag-move', p),
+    dragEndOut: (p) => ipcRenderer.send('pet:drag-end-out', p),
+    onCommand: (fn) => {
+      const h = (_e, cmd) => fn(cmd);
+      ipcRenderer.on('pet:command', h);
+      return () => ipcRenderer.removeListener('pet:command', h);
+    },
+    onConfig: (fn) => {
+      const h = (_e, cfg) => fn(cfg);
+      ipcRenderer.on('pet:config', h);
+      return () => ipcRenderer.removeListener('pet:config', h);
+    },
+    onPlay: (fn) => {
+      const h = (_e, name) => fn(name);
+      ipcRenderer.on('pet:play', h);
+      return () => ipcRenderer.removeListener('pet:play', h);
+    },
+  },
+
   win: {
     minimize: () => invoke('win:minimize'),
     maximize: () => invoke('win:maximize'),

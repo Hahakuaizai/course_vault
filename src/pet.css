@@ -23,6 +23,18 @@
   cursor: grabbing;
 }
 
+#cvPet video {
+  display: block;
+}
+
+.pet-card video {
+  display: block;
+  height: 62px;
+  width: auto;
+  max-width: 86px;
+  object-fit: contain;
+}
+
 #cvPet canvas {
   display: block;
   image-rendering: pixelated;
@@ -233,4 +245,43 @@
   font-size: 12px;
   color: var(--fg-2);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 右键菜单点「自定义」时弹出的浮动大小滑块 ---------- */
+
+.cv-pet-sizepop {
+  position: fixed;
+  z-index: 300;
+  width: 228px;
+  padding: 10px 12px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+.cv-pet-sizepop-label {
+  font-size: 12px;
+  color: var(--fg-2);
+  margin-bottom: 6px;
+}
+
+.cv-pet-sizepop-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cv-pet-sizepop-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.cv-pet-sizepop-val {
+  font-size: 12px;
+  color: var(--fg-1);
+  font-variant-numeric: tabular-nums;
+  min-width: 38px;
+  text-align: right;
 }
