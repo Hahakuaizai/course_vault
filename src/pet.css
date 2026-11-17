@@ -8,7 +8,10 @@
   position: fixed;
   right: 28px;
   bottom: 28px;
-  z-index: 40;
+  /* 50：必须高于主题揭幕克隆层 #appL 的 45（否则切换主题时宠物被
+     整屏克隆层盖住，动画结束才重现，闪零点几秒），
+     同时低于弹窗层的 60，保证设置等弹窗仍能盖住宠物 */
+  z-index: 50;
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;

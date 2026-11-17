@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>桌宠</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    overflow: hidden;
+    height: 100%;
+  }
+  body {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    cursor: grab;
+  }
+  canvas:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+<canvas id="petCv"></canvas>
+<script src="pets/packs.js"></script>
+<script src="pet-stage.js"></script>
+</body>
+</html>

@@ -53,7 +53,7 @@
   /* ---------------- 设置 ---------------- */
 
   function loadCfg() {
-    const dflt = { pet: 'kunkun', pos: null, customName: '', size: 'medium', sizePx: 92 };
+    const dflt = { pet: 'kunkun', pos: null, customName: '', size: 'medium', sizePx: 92, mode: 'inside' };
     try { return Object.assign(dflt, JSON.parse(localStorage.getItem(LS_KEY) || '{}')); }
     catch { return dflt; }
   }
@@ -553,6 +553,7 @@
     saveCfg();
     syncSettingsUI();
     if (cur && pack) sizeStage(cur.anim);
+    syncExternal();
   }
 
   /* ---------------- 宠物切换与加载 ---------------- */
@@ -564,6 +565,53 @@
     applyPet();
   }
 
+  /* ---------------- 桌面模式（外部窗口） ----------------
+     配置的唯一事实来源还是这里（localStorage）；主进程只负责
+     开/关外部窗口和转发。自定义包要把文件内容编码后一起发过去，
+     因为外部窗口读不到本窗口的 IndexedDB。 */
+
+  const vaultPet = () => (window.vault && window.vault.pet) || null;
+
+  function bytesToB64(u8) {
+    let s = '';
+    const CH = 0x8000;
+    for (let i = 0; i < u8.length; i += CH) {
+      s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+    }
+    return btoa(s);
+  }
+
+  async function buildExternalCfg() {
+    const out = { pet: cfg.pet, size: cfg.size, sizePx: cfg.sizePx, customName: cfg.customName, custom: null };
+    if (cfg.pet === 'custom') {
+      const parsed = await getCustom();
+      if (parsed) {
+        const files = {};
+        for (const [k, v] of parsed.files) files[k] = bytesToB64(v);
+        out.custom = { manifest: parsed.manifest, prefix: parsed.prefix, files };
+      }
+    }
+    return out;
+  }
+
+  async function openExternal() {
+    const vp = vaultPet();
+    if (!vp) return;
+    try { await vp.openExternal(await buildExternalCfg()); } catch { /* 主进程没接上就先这样 */ }
+  }
+
+  function syncExternal() {
+    const vp = vaultPet();
+    if (!vp || cfg.mode !== 'desktop' || cfg.pet === 'none') return;
+    buildExternalCfg().then((c) => vp.syncExternal(c)).catch(() => {});
+  }
+
+  async function closeExternal() {
+    const vp = vaultPet();
+    if (!vp) return;
+    try { await vp.closeExternal(); } catch { /* 已经关了 */ }
+  }
+
   async function applyPet() {
     stopCurrent();
     closeMenu();
@@ -573,8 +621,15 @@
     pack = null;
     if (cfg.pet === 'none') {
       if (stage) stage.style.display = 'none';
+      closeExternal();
       return;
     }
+    if (cfg.mode === 'desktop') {
+      if (stage) stage.style.display = 'none';
+      openExternal();
+      return;
+    }
+    closeExternal();
     ensureStage();
     stage.style.display = '';
     if (cfg.pet === 'custom') {
@@ -723,6 +778,8 @@
     syncCards();
     document.querySelectorAll('#petSizeSeg .seg-btn').forEach((b) =>
       b.classList.toggle('is-active', b.dataset.size === cfg.size));
+    document.querySelectorAll('#petModeSeg .seg-btn').forEach((b) =>
+      b.classList.toggle('is-active', b.dataset.mode === cfg.mode));
     const box = document.querySelector('#petSizeCustom');
     const range = document.querySelector('#petSizeRange');
     const val = document.querySelector('#petSizeVal');
@@ -792,6 +849,15 @@
       const b = e.target.closest('.seg-btn');
       if (b) setSize(b.dataset.size);
     });
+    const modeSeg = document.querySelector('#petModeSeg');
+    if (modeSeg) modeSeg.addEventListener('click', (e) => {
+      const b = e.target.closest('.seg-btn');
+      if (!b || b.dataset.mode === cfg.mode) return;
+      cfg.mode = b.dataset.mode;
+      saveCfg();
+      syncSettingsUI();
+      applyPet();
+    });
     const range = document.querySelector('#petSizeRange');
     if (range) range.addEventListener('input', () => {
       cfg.sizePx = Number(range.value) || 92;
@@ -824,6 +890,21 @@
   function init() {
     bindSettings();
     syncSettingsUI();
+    /* 外部窗口右键菜单里的选择由主进程转回来，在这里统一执行 */
+    const vp = vaultPet();
+    if (vp && vp.onExternalCommand) {
+      vp.onExternalCommand((cmd) => {
+        if (!cmd) return;
+        if (cmd.type === 'setPet') setPet(cmd.id);
+        else if (cmd.type === 'setSize') setSize(cmd.key);
+        else if (cmd.type === 'setMode') {
+          cfg.mode = cmd.mode;
+          saveCfg();
+          syncSettingsUI();
+          applyPet();
+        } else if (cmd.type === 'openSettings') openPetSettings();
+      });
+    }
     applyPet();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
