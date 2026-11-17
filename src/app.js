@@ -373,9 +373,9 @@ const RELEASE_NOTES = [
 const RELEASE_TAG = { new: '新增', improve: '改进', fix: '修复' };
 
 /** 渲染一批改动为一个版本块 */
-function releaseBlock(batch, ver, isLatest) {
+function releaseBlock(batch, ver, isLatest, idx = 0) {
   return `
-    <section class="cl-batch">
+    <section class="cl-batch" style="--i:${Math.min(idx, 8)}">
       <div class="cl-head">
         <span class="cl-ver">${escapeHtml(isLatest ? ver : '更早')}</span>
         ${isLatest ? '<span class="cl-latest">本次更新</span>' : ''}
@@ -415,7 +415,7 @@ function renderReleaseNotes(mode = 'latest') {
       </div>`
     : '';
 
-  body.innerHTML = hint + list.map((b, i) => releaseBlock(b, cur, i === 0)).join('');
+  body.innerHTML = hint + list.map((b, i) => releaseBlock(b, cur, i === 0, i)).join('');
 }
 
 /** 判断日期字符串（YYYY-MM-DD）是不是今天 */
@@ -6357,6 +6357,14 @@ async function confirmDeleteCourse(course) {
    ============================================================ */
 function applyTheme(name, { titlebar = true } = {}) {
   document.documentElement.dataset.theme = name;
+  /* 把主题「选择」镜像一份到 localStorage，供 theme-init.js 在下次启动
+     的首帧之前预落定 data-theme（数据库里的设置要等 bootstrap 才有）。
+     存的是 choice（light/dark/system）不是落定结果：system 用户下次
+     启动仍按当时的系统外观重新判定。切换动画中途的临时翻面不改
+     S.settings.themeChoice，所以镜像不会被污染。 */
+  try {
+    localStorage.setItem('cv:themeChoice', S.settings?.themeChoice || name);
+  } catch { /* localStorage 不可用就跳过，只是下次启动可能先闪一下 */ }
   /* ★ 必须同时同步 .app 的 data-theme。
      styles.css 里深色规则写的是两条并列选择器：
        :root[data-theme='dark'] .card, .app[data-theme='dark'] .card { ... }
@@ -7515,7 +7523,11 @@ async function boot() {
 
     renderGuide();
     maybeShowChangelog();
+    /* 首屏已就绪：通知启动加载层退场（见 boot-loader.js） */
+    document.body.classList.add('boot-done');
   } catch (err) {
+    /* 失败也要让加载层退场，不然用户会被关在加载界面、看不到这条报错 */
+    document.body.classList.add('boot-done');
     toast(`初始化失败：${err.message}`, 'error');
   }
 }

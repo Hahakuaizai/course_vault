@@ -5,14 +5,47 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; img-src 'self' vault: data: blob:; media-src 'self' vault: blob:; frame-src 'self' vault:; connect-src 'self' vault: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:;" />
   <title>资料库</title>
+  <!-- 主题预落定：首帧之前先按上次的主题选择定下 data-theme，避免深色用户启动先闪浅色（见 theme-init.js） -->
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="folder-cover.css" />
   <link rel="stylesheet" href="theme-transition.css" />
   <link rel="stylesheet" href="theme-switch.css" />
   <link rel="stylesheet" href="page-motion.css" />
   <link rel="stylesheet" href="elastic-resize.css" />
+  <link rel="stylesheet" href="boot-loader.css" />
 </head>
 <body>
+  <!-- 启动加载层：冷启动那几秒先撑住首屏。动画在 boot-loader.css（纯 CSS，
+       主线程忙时也不僵），交互在 boot-loader.js（紧跟其后执行，不等 module 批）；
+       boot() 完成给 body 加 .boot-done 后本层退场，另有 9 秒兜底强制退场。 -->
+  <div class="boot-loader" id="bootLoader" aria-hidden="true">
+    <div class="boot-blob b1"></div>
+    <div class="boot-blob b2"></div>
+    <div class="boot-glow"></div>
+    <div class="boot-motes far"></div>
+    <div class="boot-motes near"></div>
+    <div class="boot-center">
+      <div class="boot-inner">
+        <div class="boot-ring">
+          <svg class="boot-ring-svg" viewBox="0 0 120 120">
+            <circle class="boot-arc a1" cx="60" cy="60" r="52" />
+            <circle class="boot-arc a2" cx="60" cy="60" r="42" />
+            <circle class="boot-arc a3" cx="60" cy="60" r="32" />
+          </svg>
+          <div class="boot-mark">
+            <svg viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/></svg>
+          </div>
+        </div>
+        <div class="boot-title">资料库</div>
+        <div class="boot-sub">正在打开你的资料…</div>
+        <div class="boot-bar"><span></span></div>
+      </div>
+    </div>
+    <div class="boot-ripples"></div>
+  </div>
+  <script src="boot-loader.js"></script>
+
   <div class="app">
     <!-- 顶部拖拽区 -->
     <header class="titlebar">

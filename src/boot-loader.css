@@ -1,0 +1,250 @@
+/* ==========================================================================
+   启动加载层（boot-loader）
+   --------------------------------------------------------------------------
+   解决什么：隔一段时间没开软件再启动，Windows 要冷读 380MB 的程序文件、
+   Defender 还会扫一遍未签名的 exe —— 窗口先出来、内容卡几秒才到。
+   这层在那几秒里撑住首屏：动画全走 CSS（合成线程驱动，主线程忙时也不僵），
+   鼠标能跟、能点出涟漪，用户知道软件是活的，不是死了。
+   退场：app.js 的 boot() 完成给 body 加 .boot-done，本层淡出并自删；
+   万一 boot 卡住，boot-loader.js 里有 9 秒兜底强制退场，绝不把人关在外面。
+   颜色全用主题变量，深色模式自动跟随（data-theme 落定在本层退场之前）。
+   ========================================================================== */
+
+.boot-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--bg-1);
+  animation: bootIn 0.35s var(--ease-out) both;
+  transition: opacity 0.5s var(--ease-out), visibility 0s linear 0.5s;
+  perspective: 900px;
+}
+.boot-loader.is-done {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+@keyframes bootIn {
+  from { opacity: 0; }
+}
+
+/* ---------- 背景：两团缓漂的暖色光晕（同 page-motion 的 Mica 语言） ---------- */
+.boot-blob {
+  position: absolute;
+  width: 58vmax;
+  height: 58vmax;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.boot-blob.b1 {
+  top: -20%;
+  left: -14%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 22%, transparent), transparent 65%);
+  animation: bootDrift1 12s ease-in-out infinite alternate;
+}
+.boot-blob.b2 {
+  right: -16%;
+  bottom: -24%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent-2, var(--accent)) 16%, transparent), transparent 65%);
+  animation: bootDrift2 15s ease-in-out infinite alternate;
+}
+@keyframes bootDrift1 {
+  to { transform: translate(6vmax, 4vmax) scale(1.12); }
+}
+@keyframes bootDrift2 {
+  to { transform: translate(-5vmax, -4vmax) scale(1.08); }
+}
+
+/* ---------- 跟随鼠标的软光（JS 用 lerp 驱动，带惯性） ---------- */
+.boot-glow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 340px;
+  height: 340px;
+  margin: -170px 0 0 -170px;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 20%, transparent), transparent 62%);
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* ---------- 尘埃：两层，JS 随机生成并做视差 ---------- */
+.boot-motes {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+.boot-mote {
+  position: absolute;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: bootFloat ease-in-out infinite alternate;
+}
+@keyframes bootFloat {
+  from { transform: translateY(-12px); opacity: 0.25; }
+  to { transform: translateY(12px); opacity: 0.8; }
+}
+
+/* ---------- 中心：三环 + 文件夹标记（JS 驱动轻微 3D 倾斜） ---------- */
+.boot-center {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  transform-style: preserve-3d;
+  will-change: transform;
+}
+.boot-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  animation: bootRise 0.6s var(--ease-out) both;
+}
+@keyframes bootRise {
+  from { opacity: 0; transform: translateY(10px); }
+}
+.boot-ring {
+  position: relative;
+  width: 128px;
+  height: 128px;
+  display: grid;
+  place-items: center;
+}
+.boot-ring-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.boot-arc {
+  fill: none;
+  stroke-linecap: round;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.boot-arc.a1 {
+  stroke: var(--accent);
+  stroke-width: 2.6;
+  stroke-dasharray: 150 177; /* 周长约 327 */
+  animation: bootSpin 2.6s linear infinite;
+}
+.boot-arc.a2 {
+  stroke: color-mix(in srgb, var(--accent) 55%, transparent);
+  stroke-width: 2;
+  stroke-dasharray: 96 168; /* 周长约 264 */
+  animation: bootSpinRev 3.8s linear infinite;
+}
+.boot-arc.a3 {
+  stroke: var(--line-3);
+  stroke-width: 1.6;
+  stroke-dasharray: 60 141; /* 周长约 201 */
+  animation: bootSpin 5.2s linear infinite;
+}
+@keyframes bootSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes bootSpinRev {
+  to { transform: rotate(-360deg); }
+}
+.boot-mark {
+  width: 54px;
+  height: 54px;
+  border-radius: var(--radius-l);
+  background: var(--bg-2);
+  box-shadow: 0 0 0 1px var(--line-1), var(--shadow-2);
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  animation: bootBreathe 2.8s ease-in-out infinite;
+}
+.boot-mark svg {
+  width: 27px;
+  height: 27px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+@keyframes bootBreathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+
+.boot-title {
+  font-family: var(--font-serif);
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: 6px;
+  /* 抵消 letter-spacing 的尾部偏移，让视觉居中 */
+  margin-right: -6px;
+  color: var(--fg-1);
+}
+.boot-sub {
+  font-size: 12.5px;
+  color: var(--fg-3);
+  letter-spacing: 1px;
+}
+
+/* ---------- 不定长进度细线 ---------- */
+.boot-bar {
+  width: 148px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--line-1);
+  overflow: hidden;
+  margin-top: 2px;
+}
+.boot-bar span {
+  display: block;
+  width: 38%;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: bootSlide 1.25s ease-in-out infinite;
+}
+@keyframes bootSlide {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(400%); }
+}
+
+/* ---------- 点击涟漪（JS 生成） ---------- */
+.boot-ripples {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.boot-ripple {
+  position: absolute;
+  width: 130px;
+  height: 130px;
+  margin: -65px 0 0 -65px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: bootRipple 0.7s var(--ease-out) forwards;
+}
+@keyframes bootRipple {
+  from { transform: scale(0.15); opacity: 0.9; }
+  to { transform: scale(1); opacity: 0; }
+}
+
+/* ---------- 退场时中心轻轻放大散开 ---------- */
+.boot-loader.is-done .boot-center {
+  transform: scale(1.05);
+  transition: transform 0.5s var(--ease-out);
+}
+
+/* ---------- 减少动态偏好：全部静止，只保留淡入淡出 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .boot-loader *, .boot-loader {
+    animation: none !important;
+  }
+}
