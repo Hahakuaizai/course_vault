@@ -18,6 +18,9 @@
 
   var DEV_DIR = 'C:\\Users\\30894\\Desktop\\workspace\\course-vault';
   var WORK_DIR = 'C:\\Users\\30894\\Desktop\\workspace';
+  /* gh 在本机是便携版、不在 PATH 里：生成代码先定位 gh，
+   * PATH 里没有时退回这个完整路径（见 releaseCode） */
+  var GH_FALLBACK = 'C:\\Users\\30894\\tools\\gh\\bin\\gh.exe';
 
   var cur = null; // { batch, version }
 
@@ -54,7 +57,9 @@
     ].join('\n');
   }
 
-  /* 第二段：打包当前项目（不带插件二）到桌面 workspace 并发布 Release */
+  /* 第二段：打包当前项目（不带插件二）到桌面 workspace 并发布 Release。
+   * 末尾发布不用裸 gh：便携版不在 PATH 里会报「无法识别命令」，
+   * 先用 Get-Command 定位，没有再退回便携版完整路径 */
   function releaseCode(batch, version) {
     var v = version || '1.0.0';
     var items = leadsOf(batch);
@@ -64,7 +69,9 @@
       'cd ' + DEV_DIR,
       'node build.js "..\\' + folder + '"',
       'Compress-Archive -Path "..\\' + folder + '" -DestinationPath "' + WORK_DIR + '\\' + folder + '.zip" -Force',
-      'gh release create v' + v + ' "' + WORK_DIR + '\\' + folder + '.zip" --title "资料库 v' + v + '" --notes "' + psq(notes) + '"',
+      '$gh = (Get-Command gh -ErrorAction SilentlyContinue).Source',
+      'if (-not $gh) { $gh = "' + GH_FALLBACK + '" }',
+      '& $gh release create v' + v + ' "' + WORK_DIR + '\\' + folder + '.zip" --title "资料库 v' + v + '" --notes "' + psq(notes) + '"',
     ].join('\n');
   }
 
