@@ -145,10 +145,16 @@ function register({ ipcMain, app, getWin }) {
     return !!mw && BrowserWindow.fromWebContents(e.sender) === mw;
   };
 
-  /* 指针屏幕坐标是否落在主窗口内容区内（留一点边距防误判） */
+  /* 指针屏幕坐标是否落在主窗口内容区内（留一点边距防误判）。
+     还要求主窗口此刻是前台焦点窗口：主窗口被别的软件盖住时，
+     几何上「落在主窗口范围内」的点实际落在最上层那个软件上，
+     这时回收宠物会让它消失进被盖住的窗口里（用户报的 bug）。
+     用户把宠物拖到别的前台软件上时应该让它留在那儿显示；
+     只有主窗口正被使用（有焦点）时，落点才真的指向它。 */
   function pointerInsideMain(x, y, inset) {
     const mw = getWin();
     if (!mw || mw.isMinimized()) return false;
+    if (!mw.isFocused()) return false;
     if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
     const b = mw.getContentBounds();
     const i = inset || 0;

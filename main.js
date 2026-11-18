@@ -13,6 +13,7 @@ const db = require('./db');
 const { createUpdater } = require('./updater');
 const folderCover = require('./src/folder-cover-main');
 const petMain = require('./src/pet-main');
+const changelogMain = require('./src/changelog');
 
 const isDev = process.argv.includes('--dev');
 
@@ -4183,6 +4184,9 @@ if (Test-Path $owp) {
     getWin: () => win,
   });
 
+  /* --- 插件一：自动更新内容（对比文件指纹生成更新说明，见 src/changelog.js） --- */
+  changelogMain.register({ ipcMain, app, getVersion: () => readVersion() });
+
   ipcMain.handle('update:restart', () => {
     /* 重启前必须把内存里的数据落盘。
      * 平时保存是 120ms 防抖的，直接 app.exit(0) 会跳过 before-quit 里那次
@@ -4217,6 +4221,18 @@ app.whenReady().then(() => {
 
   // 首次运行写入版本号
   if (!fs.existsSync(VERSION_FILE())) writeVersion('1.0.0');
+
+  /* 版本号按「成功更新次数」自愈：version.json 放在程序目录里，目录
+   * 被重置/换位置时会被打回 1.0.0；但每次成功更新都在 userData 的
+   * update-backup 里留了一份带时间戳的备份，份数就是成功更新的次数。
+   * 版本比它低就补回来（只升不降，备份被手动删过也不会把版本改小） */
+  try {
+    const bakDir = path.join(app.getPath('userData'), 'update-backup');
+    const applies = fs.readdirSync(bakDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory()).length;
+    const curParts = readVersion().split('.').map(Number);
+    if (applies > (curParts[2] || 0)) writeVersion(`1.0.${applies}`);
+  } catch { /* 没有备份目录 = 还没更新过，不处理 */ }
 
   // 登记协议处理器
   protocol.handle('vault', async (request) => {

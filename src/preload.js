@@ -85,6 +85,12 @@ contextBridge.exposeInMainWorld('vault', {
     set: (patch) => invoke('settings:set', patch),
   },
 
+  /* 插件一：自动更新内容（主进程扫描生成，见 src/changelog.js） */
+  changelog: {
+    get: () => invoke('changelog:get'),
+    seen: (id) => invoke('changelog:seen', id),
+  },
+
   library: {
     openBackups: () => invoke('library:openBackups'),
     openFilesDir: () => invoke('library:openFilesDir'),

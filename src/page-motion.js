@@ -262,9 +262,13 @@ function initSweep() {
   let bandTo = 0;
   let bandStart = 0;
   let bandDur = BAND_MS;
+  /* 起步偏移：整程横扫时 0.22（让光从屏外进入，定版观感）；
+     部分行程（拖动松手从中间出发）时为 0 —— 否则光会先凭空
+     跳一截再走，就是用户说的拖动时光线乱跳。begin() 里定。 */
+  let bandHead = 0.22;
   const smootherstep = (q) => q * q * q * (q * (q * 6 - 15) + 10);
   const bandEase = (q) => 0.35 * q + 0.65 * smootherstep(q);
-  const bandProgress = (q) => (q >= 1 ? 1 : 0.22 + 0.78 * bandEase(q));
+  const bandProgress = (q) => (q >= 1 ? 1 : bandHead + (1 - bandHead) * bandEase(q));
 
   const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
   const ss = (a, b, x) => {
@@ -326,6 +330,9 @@ function initSweep() {
 
   function loop(t) {
     raf = 0;
+    /* 减少动画在运行中被打开：立刻熄光收尾，不能等这一轮扫完。
+       （set/begin 那边也会拦，这里管的是已经在跑的循环。） */
+    if (reduceMotion()) { bandActive = false; clearVars(); return; }
     if (targetU === null || curU === null) return;
     const dt = Math.min(64, Math.max(1, t - lastT)) / 1000;
     lastT = t;
@@ -343,10 +350,11 @@ function initSweep() {
       }
       paint(curU);
     } else {
-      /* 弹簧追赶：只剩拖动跟手和拖动收尾的小余量在走这里。
-         omega 4.2（拖动）让光柔和跟随、不紧贴滑块；非拖动的 2.6
-         只负责把拖动结束时光与目标之间的小差收平。 */
-      const omega = dragging ? 4.2 : 2.6;
+      /* 弹簧追赶：拖动跟手用 omega 16（仿真里以 0.75Hz 满幅
+         左右横拖时滞后约 0.2 以内，紧贴滑块不大幅摆动；旧值
+         4.2 滞后近 0.25s、滞后量超过半个行程，光就在中间来回
+         荡、到不了边）。非拖动的 2.6 只负责收尾小余量。 */
+      const omega = dragging ? 16 : 2.6;
       const zeta = 1.05;
       let rest = dt;
       while (rest > 0) {
@@ -401,26 +409,21 @@ function initSweep() {
    * 压成 0；u=0.5 时 F=0.5，A=1。位置和亮度的性质完全保留。
    */
   const set = (u, m, isDrag) => {
-    if (m && m !== mode) { mode = m; el.dataset.mode = m; }
-    const uu = clamp01(u);
-    /* 首次（或刚从 hide 里恢复）：把光的起点对齐到 u。若模式的
-       目标端不在当前位置，当场就启动时间轴 —— 和揭幕同帧出发。
-       以前这里只做对齐便返回，要等驱动进度涨过 0.003 门槛才
-       启动，光总是慢半拍（用户报的「起步太晚」之一）。 */
-    if (curU === null) {
-      curU = uu; velU = 0; targetU = uu; wantIdle = false;
-      const end = m === 'to-light' ? 1 : (m === 'to-dark' ? 0 : null);
-      if (!isDrag && end !== null && Math.abs(end - uu) > 0.003) {
-        bandFrom = uu;
-        bandTo = end;
-        bandDur = BAND_MS;
-        bandStart = performance.now();
-        bandActive = true;
-        targetU = end;
-      }
-      kick();
+    /* 减少动画（设置开关或系统偏好，运行时随时可变）：光带整体
+       不工作。以前只在页面加载时检查一次，用户中途打开减少动画
+       后 __vaultSweep 还活着，拖动滑块照样有光 —— 点击路径因为
+       位置是瞬移的、begin 的距离为零被跳过，看起来才「没光」。
+       现在每次调用都动态检查，开着就熄光返回。 */
+    if (reduceMotion()) {
+      if (curU !== null || bandActive) { bandActive = false; clearVars(); }
       return;
     }
+    if (m && m !== mode) { mode = m; el.dataset.mode = m; }
+    const uu = clamp01(u);
+    /* 首次（或刚从 hide 里恢复）：直接把光的起点对齐到 u，
+       不要让光从上一次结束的位置飞过来。横扫一律由 begin()
+       显式启动，这里不代劳。 */
+    if (curU === null) { curU = uu; velU = 0; targetU = uu; wantIdle = false; kick(); return; }
     wantIdle = false;
     if (isDrag) {
       /* 拖动跟手：取消时间轴，回到弹簧追赶 */
@@ -432,49 +435,51 @@ function initSweep() {
     }
     dragging = false;
     if (bandActive) return; // 时间轴跑着：驱动方的逐帧进度不再接管光
-    if (Math.abs(uu - curU) > 0.003) {
-      /* 切换开始：驱动进度刚离开光的当前位置（点击后约 1–2 帧内
-         触发，感知上就是同一帧）。从光的当前位置向目标端点启动
-         时间轴；开关弹簧停稳后的 ±0.0003 级尾巴抖动远小于 0.003
-         的门槛，不会误触发第二次横扫。 */
-      bandFrom = curU;
-      bandTo = uu >= curU ? 1 : 0;
-      bandDur = BAND_MS;
-      bandStart = performance.now();
-      bandActive = true;
-      targetU = bandTo;
-      kick();
-      return;
-    }
-    /* 其余情况（拖动收尾的小余量、端点附近的尾巴）：交给弹簧收平 */
+    /* 不再凭「进度差超过门槛」自发启动横扫：拖动收尾时旋钮弹簧
+       会在端点附近过冲/回弹，逐帧 u 在光的落点两侧来回越过门槛，
+       就会反复触发反向的整程横扫（用户报的「来回不完整横扫、
+       卡在某一处」）。横扫只由 begin() 在切换/松手的那一刻显式
+       启动；这里只把剩余的小差交给弹簧收平。 */
     targetU = uu;
     kick();
   };
 
-  /* 显式启动横扫：驱动方在揭幕开始的那一帧调用，不再等 set()
-     的进度门槛。durationMs 由驱动方按揭幕时长给（要求光到达
-     对侧晚于揭幕完成，如面板路径 = THEME_ANIM_MS + 800）。
+  /* 显式启动横扫：驱动方在揭幕开始/拖动松手的那一帧调用。
+     durationMs 是「整程」的时长，实际时长按本次行程距离等比
+     缩放（下限 30%），半程横扫不会慢吞吞走满整程的时间。
      起点优先用光的当前位置（连点/中途反向时不跳变），没有
-     当前位置时用 fromU。 */
+     当前位置时用 fromU；起点离目标端太近（< 0.02）就不扫了，
+     只把目标对齐。整程（距离 > 0.9）才带 0.22 的起步偏移，
+     部分行程从当前位置平滑出发、不跳变。 */
   const begin = (fromU, toU, m, durationMs) => {
+    if (reduceMotion()) {
+      if (curU !== null || bandActive) { bandActive = false; clearVars(); }
+      return;
+    }
     if (m && m !== mode) { mode = m; el.dataset.mode = m; }
     const startU = curU !== null ? curU : clamp01(fromU);
+    const dest = clamp01(toU);
     curU = startU;
     velU = 0;
-    bandFrom = startU;
-    bandTo = clamp01(toU);
-    bandDur = durationMs > 0 ? durationMs : BAND_MS;
-    bandStart = performance.now();
-    bandActive = true;
-    targetU = bandTo;
+    targetU = dest;
     wantIdle = false;
     dragging = false;
+    const dist = Math.abs(dest - startU);
+    if (dist < 0.02) { kick(); return; }
+    bandFrom = startU;
+    bandTo = dest;
+    bandHead = dist > 0.9 ? 0.22 : 0;
+    bandDur = (durationMs > 0 ? durationMs : BAND_MS) * Math.max(0.3, dist);
+    bandStart = performance.now();
+    bandActive = true;
     paint(curU);
     kick();
   };
 
   /** 驱动方宣告本次切换结束：等光追到终点后自行清空 */
   const hide = () => {
+    /* 减少动画时不等追平，直接熄光 */
+    if (reduceMotion()) { bandActive = false; clearVars(); return; }
     wantIdle = true;
     if (curU === null || targetU === null) { clearVars(); return; }
     kick();
@@ -496,3 +501,4 @@ function initSweep() {
      都如此，反馈像故障。光只在真正切换主题时由驱动方带动。 */
 }
 initSweep();
+// 新增自动说明验证：如果你在更新弹窗里看到这句话，说明插件工作正常

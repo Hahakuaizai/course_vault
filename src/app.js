@@ -248,6 +248,68 @@ const RELEASE_NOTES = [
   {
     date: '2026-11-18',
     items: [
+      { type: 'improve', text: '设置里的更新历史只显示近 10 次：更早的记录不再列在那里，但仍完整保存在软件数据中，不会丢失' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '修复版本号显示成 1.0.0：版本号存放在程序目录里，目录被重置时会被打回 1.0.0，但每次成功更新都在数据目录里留了一份备份。现在启动时按备份份数（即成功更新次数）自动校准版本号，只升不降；同时更新历史里每批说明都标上按当前版本往回推算的版本号，不再一律写「更早」；自动说明的改动文件列表也不再把 version.json 这类记账文件算进去' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '修复「自动更新内容」插件记录的版本号可能对不上：插件之前记的是安装包里写死的版本，而界面显示的是每次更新自动递增的版本。现在插件改记界面实际显示的版本号，弹窗和设置里每批说明的版本与软件版本一致' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'new', text: '新增内置插件「自动更新内容」：以后每次更新后第一次打开软件，弹窗里的更新说明会由软件自动生成——它对比更新前后的文件，按「两次启动之间变过的文件算同一次更新」分组，再从每处改动新写的注释里提取目的（修复/新增/改进了什么）汇总成条目，弹窗只展示本次这一批，全部历史在「设置 → 关于 → 更新内容」里查看。扫描在窗口出来后异步进行，不影响启动速度；从下一次更新开始生效，本条说明仍是手写的最后一批' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '修复减少动画下切换主题几秒后又自动变回原主题：减少动画时滑块位置是瞬移的，切换流程误以为「动画根本没开始过」，先靠临时画面显示出新主题、约 1 秒后又把这次切换当作废操作回滚了。现在松手状态下滑块停在目标端就算数，切换立即正式落定，不再自己变回去' },
+      { type: 'fix', text: '启动加载动画豁免减少动画：开着减少动画时，开启软件的加载转圈会冻住不动，看着像死机。现在三环转圈、进度细线和加载层自身的淡入淡出不受减少动画影响、照常动；背景光晕漂移、尘埃这类装饰动画在减少动画时仍保持静止' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '减少动画开着时拖动主题滑块不再有光线：以前光带只在软件启动时检查一次减少动画，中途打开设置后拖动滑块照样有全屏光带和开关里的光（点击切换因为是瞬移的才没光）。现在光带每次启动都实时检查，减少动画开着就全程熄光——拖动、点击、面板切换都一样；运行中打开减少动画也会立刻把正在扫的光收掉' },
+      { type: 'fix', text: '桌宠在软件外时，拖到被其他软件盖住的主窗口范围不再消失：以前判断「拖回软件内」只看几何位置，主窗口被别的软件盖住时，把桌宠拖到那个区域松手会被收回软件内、等于凭空消失。现在只有主窗口正处于前台（正在使用）时，落在它范围内的松手才算拖回去；主窗口被覆盖时桌宠会留在最上层的软件上显示' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '修复拖动滑块「拖出去又拖回原处、主题反而瞬间切到对面」的逻辑 bug：从暗模式拖向亮模式、半路拖回原处松手，主题会毫无动画地瞬间变成亮模式，滑块还自己滑向亮侧。根源是一条兜底收尾无条件地「提交到对面主题」，没有判断滑块最后到底停在哪边——松手后弹簧还没停稳时它抢先执行，就把回滚做成了提交。现在它和正常的到位收尾用同一条判定：滑块落点在哪边就落哪边，拖回原处就是维持原主题，动画和光线也会跟着返回原处' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '优化拖动主题滑块时的帧率：拖动时圆形画面层每帧都要整屏重绘，卡片和按钮的阴影是最贵的一项。现在揭幕期间临时去掉克隆画面里的阴影（真实界面在下面、阴影都在，切换结束自动恢复，肉眼几乎察觉不到）；同时左右快拖时旋钮轻撞两端不再每次都爆一团粒子（重撞和松手到位的爆发照常），把每帧的绘制开销压下来，拖动更跟手' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '修复反复拖动主题滑块后「滑块在深色、界面还是浅色」的脱节（附带光线卡在中间）：根源是两条给异常情况兜底的看门狗不分时机——按住超过约 1 秒还没拖、或来回拖动超过 6 秒，它们就会在用户手底下把切换用的画面层收掉，之后松手只剩滑块在动、再也没有提交主题的路径。现在：只要手指/鼠标还按着，看门狗一律顺延；松手时若发现画面层已不在，会先补建一层再决定落点，保证滑块停在哪边、主题就是哪边' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '重点修复主题开关拖动的联动：以前左右反复拖动滑块时，光线会来回做不完整的横扫、最后卡在中间。三个根源一起改了：①拖动时光的跟随太松（滞后近半个行程），现在紧贴滑块走；②松手后旋钮弹簧在端点附近的过冲回弹会被误判成「又一次切换」，反复触发反向横扫——现在横扫只在切换/松手那一刻显式启动，逐帧进度再怎么抖也不会自发横扫；③从中间出发的半程横扫不再先凭空跳一截，时长也按实际距离缩放。点击切换和面板切换的横扫规则不变（同帧起步、晚于揭幕到达）' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
       { type: 'fix', text: '修复桌面桌宠右键菜单不跟随主题：在桌面上时切了主题，右键菜单还是上一个主题的样式（软件内没这个问题）。原因是菜单的主题靠桌宠配置捎带传递，而切主题不会触发桌宠配置同步。现在主题一变就立刻把新主题同步过去，桌面菜单和软件内保持一致' },
       { type: 'fix', text: '修复切换主题时光线起步太晚：以前光带要等揭幕进度涨过一个门槛才启动，看着就是主题快切完了光才动。现在光带在揭幕开始的同一帧就显式启动，并且总时长比揭幕更长——面板切换时光约 4.5 秒到达对侧（揭幕 3.7 秒），开关切换时光约 2.1 秒到达（揭幕约 1.4 秒）：同时起步，晚于主题到达' },
     ],
@@ -444,12 +506,32 @@ const RELEASE_NOTES = [
 
 const RELEASE_TAG = { new: '新增', improve: '改进', fix: '修复' };
 
+/* ============================================================
+ * 插件一：自动生成的更新内容（主进程 src/changelog.js）
+ * 主进程在每次启动时对比安装目录的文件指纹：两次启动之间变过的
+ * 文件算同一次更新，从改动里新写的注释自动总结成说明。手写的
+ * RELEASE_NOTES 退为兜底与早期历史：插件有待展示的批次时弹窗用
+ * 插件的，设置 → 关于里插件批次排在手写历史前面。
+ * ============================================================ */
+let genBatches = [];     // 插件生成的批次（新 → 旧）
+let genPendingId = null; // 本次更新待展示的批次 id（展示过即清）
+
+async function loadGenNotes() {
+  try {
+    const r = await api.changelog?.get();
+    if (r) {
+      genBatches = Array.isArray(r.batches) ? r.batches : [];
+      genPendingId = r.pendingId || null;
+    }
+  } catch { /* 插件不可用时按旧逻辑走手写说明 */ }
+}
+
 /** 渲染一批改动为一个版本块 */
 function releaseBlock(batch, ver, isLatest, idx = 0) {
   return `
     <section class="cl-batch" style="--i:${Math.min(idx, 8)}">
       <div class="cl-head">
-        <span class="cl-ver">${escapeHtml(isLatest ? ver : '更早')}</span>
+        <span class="cl-ver">${escapeHtml(ver)}</span>
         ${isLatest ? '<span class="cl-latest">本次更新</span>' : ''}
         <span class="cl-date">${escapeHtml(batch.date)}</span>
       </div>
@@ -460,6 +542,7 @@ function releaseBlock(batch, ver, isLatest, idx = 0) {
             <span class="cl-text">${escapeHtml(it.text)}</span>
           </li>`).join('')}
       </ul>
+      ${batch.files && batch.files.length ? `<div class="cl-files">改动文件：${batch.files.map((f) => escapeHtml(f.path.split('/').pop())).join('、')}${batch.files.length >= 12 ? ' 等' : ''}</div>` : ''}
     </section>`;
 }
 
@@ -472,14 +555,20 @@ function renderReleaseNotes(mode = 'latest') {
   const body = $('#changelogBody');
   if (!body) return;
   const cur = S.version ? `v${S.version}` : '当前版本';
-  const list = mode === 'all' ? RELEASE_NOTES : RELEASE_NOTES.slice(0, 1);
+  /* 插件生成的批次优先：弹窗只展示插件标出的待展示批次（就是本次
+   * 更新），没有待展示批次时回退到手写说明的第一批；历史视图里
+   * 插件批次排在手写历史之前 */
+  const pendingBatch = genBatches.find((b) => b.id === genPendingId) || null;
+  const list = mode === 'all'
+    ? [...genBatches, ...RELEASE_NOTES]
+    : (pendingBatch ? [pendingBatch] : RELEASE_NOTES.slice(0, 1));
 
   /* 最新那批的日期是手写的，如果这次更新忘了新开一批（只改了代码没写说明），
    * 弹出来就会是上一次的内容 —— 用户看到的是「更新内容还是上次的」。
    * 这里加一条兜底提示：最新批次的日期不是今天，就把话说清楚，
    * 免得用户以为更新没生效。日期用本地时区算，避免跨时区差一天。 */
   const newest = list[0];
-  const stale = mode !== 'all' && newest && !isToday(newest.date);
+  const stale = mode !== 'all' && !pendingBatch && newest && !isToday(newest.date);
   const hint = stale
     ? `<div class="cl-stale">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor"/></svg>
@@ -487,7 +576,22 @@ function renderReleaseNotes(mode = 'latest') {
       </div>`
     : '';
 
-  body.innerHTML = hint + list.map((b, i) => releaseBlock(b, cur, i === 0, i)).join('');
+  /* 每批标哪个版本号：批次按新→旧排列，版本号每次更新只在末位 +1，
+   * 所以第 i 批就是当前版本往回数 i 次。以前非最新批次一律写「更早」，
+   * 看不出是哪一版改的；存量批次本身没记版本，只能这样推算 */
+  const pm = /^(\d+)\.(\d+)\.(\d+)$/.exec(S.version || '');
+  const verFor = (b, i) => {
+    if (pm && Number(pm[3]) - i >= 0) return `v${pm[1]}.${pm[2]}.${Number(pm[3]) - i}`;
+    if (b.ver) return `v${b.ver}`;
+    return i === 0 ? cur : '更早';
+  };
+  /* 设置里的历史只显示近 10 次：更早的批次不渲染，但仍完整存放在
+   * 数据里（插件的 history.json、手写说明数组），不会丢 */
+  const shown = mode === 'all' ? list.slice(0, 10) : list;
+  const moreNote = mode === 'all' && list.length > shown.length
+    ? '<div class="cl-files">仅显示近 10 次更新，更早的记录仍保存在软件数据中。</div>'
+    : '';
+  body.innerHTML = hint + shown.map((b, i) => releaseBlock(b, verFor(b, i), i === 0, i)).join('') + moreNote;
 }
 
 /** 判断日期字符串（YYYY-MM-DD）是不是今天 */
@@ -532,15 +636,19 @@ function closeChangelog() {
  * 也不是在弹之前就记（那样一旦这次弹窗没成功显示，版本号已经被扣掉，
  * 这次的更新说明就永远看不到了 —— 正是「更新后没有弹窗」的原因）。
  */
-function maybeShowChangelog() {
+async function maybeShowChangelog() {
   const ver = S.version;
   if (!ver) return;
+  /* 先等插件一的扫描结论：有待展示批次说明刚发生过一次更新，
+   * 哪怕版本号没变（文件被同步/覆盖）也要弹，且只弹这批 */
+  await loadGenNotes();
+  const hasPending = !!genPendingId;
   const seen = S.settings?.seenChangelogVersion;
-  if (!seen) {
+  if (!seen && !hasPending) {
     saveSetting('seenChangelogVersion', ver);
     return;
   }
-  if (seen === ver) return;
+  if (seen === ver && !hasPending) return;
   /* 弹出来之后再记账。
      以前是「先记账再弹」：万一那次弹窗因为窗口还没画好、或者启动太忙
      没真正显示出来，版本号已经被记成「看过了」——这次的更新说明就再也
@@ -552,6 +660,11 @@ function maybeShowChangelog() {
       return;
     }
     saveSetting('seenChangelogVersion', ver);
+    if (genPendingId) {
+      const id = genPendingId;
+      genPendingId = null;
+      api.changelog?.seen(id).catch(() => {});
+    }
   };
   /* 等首屏稳定再弹：启动时主进程还在读库、核对文件，这时弹窗容易糊在
      正在加载的界面上。空闲回调最多等 3 秒，保证不会被无限推迟。 */
@@ -7380,6 +7493,10 @@ function prepareThemeReveal(target) {
      按下瞬间就会闪一下。 */
   appL.style.clipPath = revealClip(cur === 'light' ? 1 : 0);
   appL.style.willChange = 'clip-path';
+  /* 强制独立合成层：裁剪变化的重绘留在这一层上，不牵动底下真实
+     界面的合成。克隆体是 inset:0 满屏，它的 fixed 子元素以它为
+     参照和以视口为参照结果一致，不影响布局。 */
+  appL.style.transform = 'translateZ(0)';
   /* 克隆体自己铺底色：html/body 的底色在它身后，不跟着它变 */
   appL.style.background = 'var(--bg-1)';
   /* 独立合成层：clip-path 每帧变只重绘自己，不牵动整页 */

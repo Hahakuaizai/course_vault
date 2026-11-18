@@ -216,6 +216,19 @@ body,
   -webkit-backdrop-filter: none !important;
 }
 
+/* 揭幕期间压平克隆层（#appL）的阴影：拖动滑块时圆形裁剪每帧都在变，
+   整屏克隆层要跟着重绘，卡片/按钮的 box-shadow 是其中最贵的一项
+   （每帧对每个可见卡片做一遍模糊扩散）。克隆层只是切换期间的临时
+   画面，去掉阴影肉眼几乎察觉不到（真实界面在它下面、阴影都在），
+   揭幕一结束克隆层销毁，阴影自然回来。和上面关 backdrop-filter
+   是同一个取舍：动画期间少付一点绘制的钱，换帧率。 */
+:root.theme-snapshot #appL *,
+:root.theme-snapshot #appL *::before,
+:root.theme-snapshot #appL *::after {
+  box-shadow: none !important;
+  text-shadow: none !important;
+}
+
 /* View Transitions 的伪元素规则在 theme-transition.css 里（对角线揭幕） */
 
 @media (prefers-reduced-motion: reduce) {
@@ -3835,6 +3848,13 @@ body.is-marquee .card { pointer-events: none; }
   flex-direction: column;
   gap: 2px;
   margin-top: 8px;
+}
+/* 插件一自动生成的批次：底部一行小字列出本批改动的文件名 */
+.cl-files {
+  margin-top: 8px;
+  font-size: 11.4px;
+  line-height: 1.6;
+  color: var(--fg-3);
 }
 .cl-item {
   display: flex;

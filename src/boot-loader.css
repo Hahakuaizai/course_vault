@@ -248,3 +248,28 @@
     animation: none !important;
   }
 }
+
+/* ---------- 例外：转圈和进度线不受减少动画影响 ----------
+   styles.css 里 :root.no-motion 的全局规则会把所有动画压成
+   0.001ms 跑一次，启动加载的三环转圈和进度细线也被冻住 ——
+   可加载动画的职责就是告诉用户「软件还活着、正在加载」，冻住
+   反而像死机（用户实测反馈）。所以这一组显式豁免：不管是设置
+   里的减少动画还是系统偏好，转圈、进度线和加载层自身的淡入
+   淡出都照常。装饰性的部分（背景光晕漂移、尘埃、标记呼吸）
+   不在豁免内，减少动画时保持静止。
+   下面的值必须和上方原定义一致，改转速时两处一起改。 */
+:root.no-motion .boot-loader {
+  animation: bootIn 0.35s var(--ease-out) both !important;
+  transition: opacity 0.5s var(--ease-out), visibility 0s linear 0.5s !important;
+}
+:root.no-motion .boot-arc.a1 { animation: bootSpin 2.6s linear infinite !important; }
+:root.no-motion .boot-arc.a2 { animation: bootSpinRev 3.8s linear infinite !important; }
+:root.no-motion .boot-arc.a3 { animation: bootSpin 5.2s linear infinite !important; }
+:root.no-motion .boot-bar span { animation: bootSlide 1.25s ease-in-out infinite !important; }
+@media (prefers-reduced-motion: reduce) {
+  .boot-loader { animation: bootIn 0.35s var(--ease-out) both !important; }
+  .boot-arc.a1 { animation: bootSpin 2.6s linear infinite !important; }
+  .boot-arc.a2 { animation: bootSpinRev 3.8s linear infinite !important; }
+  .boot-arc.a3 { animation: bootSpin 5.2s linear infinite !important; }
+  .boot-bar span { animation: bootSlide 1.25s ease-in-out infinite !important; }
+}

@@ -738,8 +738,10 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
       writeRevealAt(u);
     }
 
-    /* --- 斜向光带 --- */
-    const A = ss(-0.1, 0.03, F) * (1 - ss(0.97, 1.12, F));
+    /* --- 斜向光带 ---
+       减少动画时恒为 0（不亮）：这是开关轨道里那道光，和全屏
+       光带一起关，拖动时也不例外。 */
+    const A = reduceMotion() ? 0 : ss(-0.1, 0.03, F) * (1 - ss(0.97, 1.12, F));
     const arcC = cm('arc', u);
     if (Math.abs(A - lastBandA) > 0.018 || Math.abs(F * 100 - lastBandF) > 1.25) {
       band.style.background = A > 0.01 ? bandCss(arcC, A, F * 100) : 'none';
@@ -924,7 +926,15 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
     last = t;
     for (let i = 0; i < n; i += 1) step(dt / n);
 
-    if (hitS > 0) { burst(hitSide, hitS); hitS = 0; }
+    /* 拖动中只给「重撞」放粒子：左右快拖时旋钮会不停轻撞两端，
+       每次爆发都是几十个粒子 + 多个径向渐变在画布上逐帧重算，
+       正好和整屏克隆层重绘抢同一帧的预算。旋钮自身的压扁/闪光
+       （render 里的 hit）不受影响，撞墙手感还在；松手到位时的
+       爆发（arrive）也不走这里，照常全量。 */
+    if (hitS > 0) {
+      if (!drag || hitS > 0.6) burst(hitSide, hitS);
+      hitS = 0;
+    }
 
     /* 揭幕收尾：只看旋钮到没到位，不等光弧弹簧收干净。
        先把最后一帧的 clipPath 写满/写空，再提交并销毁克隆体 ——
@@ -936,7 +946,13 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
        副本，同样命中 `.app[data-theme='dark'] .card` 这类规则，表现就是
        用户看到的「已经切到浅色了，网格里的卡片还是深色」。
        这里兜一层，保证任何路径下克隆层都不会长期残留。 */
-    if (revealOn && revealStarted && !knobArrived()
+    /* ★ 还在按压 / 拖动中时绝不触发：这一层正被用户的手用着。
+       以前反复拖动超过 6 秒就会在这里被强行收尾，层没了、提交
+       却按「拖动开始前的 target」算，松手后又没有任何路径再
+       提交 —— 旋钮停在深色端、主题留在浅色（用户截图的状态），
+       光线也因为揭幕不在了而停止跟手、卡在中间。等松手后若
+       弹簧真卡住，这里仍会兜底。 */
+    if (revealOn && revealStarted && !down && !drag && !knobArrived()
       && performance.now() - revealStartAt > 6000) {
       pos = target;
       xv = 0;
@@ -947,7 +963,15 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
     }
 
 
-    if (revealOn && revealStarted && knobArrived()) {
+    /* ★ revealStarted 不再是硬性前提：减少动画时 setTarget 把 pos
+       直接瞬移到目标端，revealMoving() 永远不会为真、revealStarted
+       永远置不上 —— 以前这种切换会先靠克隆层显示出新主题，1.2 秒
+       后被看门狗按「没开始过」回滚，用户看到的就是「切过去几秒
+       又自动变回来」。松手状态（!down）下旋钮停在目标端，本身就
+       足以证明这是一次有意图的切换：该提交提交、该回滚回滚。
+       按压中（down）仍必须等 revealStarted，防止按下第一帧就把
+       刚建好的层收掉。 */
+    if (revealOn && (revealStarted || !down) && knobArrived()) {
       pos = target;
       xv = 0;
       render();
@@ -1417,24 +1441,37 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
        直接收掉（不提交）。1.2 秒足够区分「用户按住不动在犹豫」——
        那种情况会走 pointerup，不会撞到这条。 */
     clearTimeout(revealWatchdog);
-    revealWatchdog = setTimeout(() => {
+    const onRevealWatchdog = () => {
       revealWatchdog = 0;
       if (!revealOn) return;
+      /* ★ 还在按压 / 拖动中：顺延，绝不在用户手底下收层。
+         以前按住犹豫超过 1.2 秒（还没开始拖）层就被收掉，之后
+         再拖也没有揭幕、松手没有提交路径，结果和 frame 里那条
+         6 秒看门狗一样：旋钮与主题脱节。 */
+      if (down || drag) {
+        revealWatchdog = setTimeout(onRevealWatchdog, 1200);
+        return;
+      }
       if (!revealStarted) {
         /* 没动过：这一轮什么也没发生，安静收掉 */
         endReveal(false);
         return;
       }
-      /* 动过但没收干净：按目标主题强制提交 */
+      /* 动过但没收干净：提交还是回滚，必须和 frame() 的到位收尾
+         用同一条判定 ——「旋钮目标端」对比「揭幕开始前的主题」。
+         ★ 以前这里是无条件 finish(true)（提交到建层时备好的
+         反面主题）。用户拖出去又拖回来、松手后弹簧还没停稳的
+         这段时间里它要是先响，就会把主题瞬间切到对面：没有
+         动画、没有光线，紧接着主题同步又让滑块自己滑向对面
+         —— 用户实测的「拖回原处反倒切成亮模式」就是这条。 */
       pos = target;
       xv = 0;
-      revealOn = false;
-      const api = revealApi();
-      if (api) api.finish(true);
-      pendingLift = false;
-      btn.classList.remove('is-veiled');
-      if (lifted) scheduleLower();
-    }, 1200);
+      render();
+      const curDark = isReallyDark();
+      const wantDark = target === 0;
+      endReveal(wantDark !== curDark);
+    };
+    revealWatchdog = setTimeout(onRevealWatchdog, 1200);
 
     return true;
   }
@@ -1467,16 +1504,22 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
       drag = false;
       /* 拖动结束不走 toggle()，标记作废，免得下一次点击误复用旧层 */
       revealFromDown = false;
+      /* ★ 兜底：揭幕层万一已经不在（被任何异常路径收掉过），
+         松手前补建一层。否则 setTarget 之后 frame() 没有可提交
+         的揭幕，旋钮到位了主题也不会变 —— 旋钮与主题脱节的
+         最后一道防线。补建的层按当前真实主题备制，from/target
+         关系正确，随后的弹簧到位会正常提交。 */
+      if (!revealOn) beginReveal();
       const moved = Math.abs(pos - dragOrigin);
       const goRight = moved < 0.35
         ? pos >= 0.5
         : (pos + xv * 0.16 > 0.5);
       setTarget(goRight ? 1 : 0);
-      /* 拖动松手同样让光带正式出发：从当前位置走 1.5s 到目标端，
-         晚于旋钮弹簧的到位时间。弹回原位且位置已贴着目标端时
-         不必再扫一遍。 */
+      /* 拖动松手同样让光带正式出发：从光的当前位置扫向目标端，
+         整程基准 1.5s（begin 内部按实际距离缩放时长）；起点离
+         目标太近时 begin 自己会跳过，不必在这里判断。 */
       const sw = window.__vaultSweep;
-      if (sw && sw.begin && Math.abs((goRight ? 1 : 0) - pos) > 0.05) {
+      if (sw && sw.begin) {
         sw.begin(pos, goRight ? 1 : 0, goRight ? 'to-light' : 'to-dark', 1500);
       }
       return;
