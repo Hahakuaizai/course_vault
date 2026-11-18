@@ -91,6 +91,11 @@ contextBridge.exposeInMainWorld('vault', {
     seen: (id) => invoke('changelog:seen', id),
   },
 
+  /* 插件二（仅本机）：发布助手门禁（见 src/plugin2-main.js） */
+  plugin2: {
+    status: () => invoke('plugin2:status'),
+  },
+
   library: {
     openBackups: () => invoke('library:openBackups'),
     openFilesDir: () => invoke('library:openFilesDir'),

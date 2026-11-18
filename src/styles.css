@@ -3856,6 +3856,55 @@ body.is-marquee .card { pointer-events: none; }
   line-height: 1.6;
   color: var(--fg-3);
 }
+/* 插件二（仅本机）：发布助手 —— 更新弹窗底部的按钮与代码面板 */
+.dv-btn {
+  margin-left: auto;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.35));
+  background: transparent;
+  color: var(--fg-2, inherit);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.dv-btn:hover { background: var(--accent-soft); }
+.dv-panel {
+  border-top: 1px solid var(--line, rgba(127, 127, 127, 0.25));
+  padding: 12px 18px 14px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.dv-sec + .dv-sec { margin-top: 12px; }
+.dv-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.dv-copy {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.35));
+  background: transparent;
+  color: var(--fg-2, inherit);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dv-copy:hover { background: var(--accent-soft); }
+.dv-code {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
 .cl-item {
   display: flex;
   align-items: flex-start;

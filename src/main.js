@@ -4187,6 +4187,10 @@ if (Test-Path $owp) {
   /* --- 插件一：自动更新内容（对比文件指纹生成更新说明，见 src/changelog.js） --- */
   changelogMain.register({ ipcMain, app, getVersion: () => readVersion() });
 
+  /* --- 插件二：发布助手（仅作者本机）。打包发布时本文件被排除，
+   * require 失败就静默跳过，发布版里连门禁 IPC 都不存在 --- */
+  try { require('./src/plugin2-main').register({ ipcMain, app }); } catch { /* 发布版不带插件二 */ }
+
   ipcMain.handle('update:restart', () => {
     /* 重启前必须把内存里的数据落盘。
      * 平时保存是 120ms 防抖的，直接 app.exit(0) 会跳过 before-quit 里那次

@@ -30,6 +30,10 @@ const APP_DIRS = ['src', 'assets'];
 /** 打包时不需要带过去的开发文件 */
 const EXCLUDE_FROM_APP = new Set(['test', 'build.js', '.build-tools', 'package-lock.json']);
 
+/** 插件二（发布助手）只在作者本机使用，打包时排除它的两个文件；
+ * 界面靠门禁 + 动态加载，缺文件会自动跳过，不影响发布版 */
+const PLUGIN2_FILES = new Set(['devtools.js', 'plugin2-main.js']);
+
 function rmrf(p) {
   try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* 忽略 */ }
 }
@@ -94,7 +98,9 @@ async function main() {
   }
   for (const d of APP_DIRS) {
     const s = path.join(ROOT, d);
-    if (fs.existsSync(s)) copyDir(s, path.join(appDir, d));
+    if (fs.existsSync(s)) {
+      copyDir(s, path.join(appDir, d), d === 'src' ? (e) => !PLUGIN2_FILES.has(e.name) : undefined);
+    }
   }
 
   /* ---- 4. 生产依赖 ---- */

@@ -248,6 +248,30 @@ const RELEASE_NOTES = [
   {
     date: '2026-11-18',
     items: [
+      { type: 'fix', text: '修正自动说明的两个小毛病：跨越多行的注释会被拆成两条、后半句还带着注释结束符号，现在会先拼完整再提炼；改动文件列表以前只显示文件名，根目录和 src 里的同名文件看起来像重复，改成显示完整路径' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'improve', text: '自动更新内容抓得更准：以前只从改动注释里猜目的，容易抓到一句细节、漏掉整轮的重点；现在优先采用每轮手写说明里新增的条目作为弹窗内容，注释提取退为兜底' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'new', text: '新增插件二「发布助手」（仅作者本机，靠数据目录里的标记文件启用）：每次更新弹窗的底部多一个按钮，点开生成两段带一键复制的 PowerShell 代码——一段是按本次更新说明简写的 GitHub 提交信息与上传命令，一段是把当前项目打包（不含插件二）到桌面 workspace 并发布 Release 的命令。打包脚本会排除插件二的两个文件，发布版里没有它、也看不到这个按钮' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'improve', text: '更新内容弹窗弹得更快：主进程的对比扫描不再固定等 1.5 秒才开始；没变过的文件只看大小和修改时间就跳过，不再每次开机把包括桌宠素材在内的全部文件重读一遍；有新说明时弹窗的等待也缩短了' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
       { type: 'improve', text: '设置里的更新历史只显示近 10 次：更早的记录不再列在那里，但仍完整保存在软件数据中，不会丢失' },
     ],
   },
@@ -526,6 +550,20 @@ async function loadGenNotes() {
   } catch { /* 插件不可用时按旧逻辑走手写说明 */ }
 }
 
+/* 插件二（仅本机）：发布助手。门禁在主进程（本机标记文件），通过才
+ * 动态加载 devtools.js；发布版没有标记、打包时也排除那个文件，
+ * 加载不到就静默跳过，界面上不留任何痕迹 */
+async function maybeLoadDevtools() {
+  try {
+    if (window.__cvDevtools) return;
+    if (!await api.plugin2?.status()) return;
+    const s = document.createElement('script');
+    s.src = 'devtools.js';
+    s.onerror = () => {};
+    document.head.appendChild(s);
+  } catch { /* 插件二不可用不影响任何功能 */ }
+}
+
 /** 渲染一批改动为一个版本块 */
 function releaseBlock(batch, ver, isLatest, idx = 0) {
   return `
@@ -542,7 +580,7 @@ function releaseBlock(batch, ver, isLatest, idx = 0) {
             <span class="cl-text">${escapeHtml(it.text)}</span>
           </li>`).join('')}
       </ul>
-      ${batch.files && batch.files.length ? `<div class="cl-files">改动文件：${batch.files.map((f) => escapeHtml(f.path.split('/').pop())).join('、')}${batch.files.length >= 12 ? ' 等' : ''}</div>` : ''}
+      ${batch.files && batch.files.length ? `<div class="cl-files">改动文件：${batch.files.map((f) => escapeHtml(f.path)).join('、')}${batch.files.length >= 12 ? ' 等' : ''}</div>` : ''}
     </section>`;
 }
 
@@ -592,6 +630,11 @@ function renderReleaseNotes(mode = 'latest') {
     ? '<div class="cl-files">仅显示近 10 次更新，更早的记录仍保存在软件数据中。</div>'
     : '';
   body.innerHTML = hint + shown.map((b, i) => releaseBlock(b, verFor(b, i), i === 0, i)).join('') + moreNote;
+  /* 插件二（仅本机）：弹窗展示本次更新时把这批交给发布助手挂按钮；
+   * 历史视图不是「本次改动」，传 null 收起 */
+  if (window.__cvDevtools) {
+    window.__cvDevtools.attach(mode === 'latest' ? list[0] || null : null, S.version);
+  }
 }
 
 /** 判断日期字符串（YYYY-MM-DD）是不是今天 */
@@ -642,6 +685,7 @@ async function maybeShowChangelog() {
   /* 先等插件一的扫描结论：有待展示批次说明刚发生过一次更新，
    * 哪怕版本号没变（文件被同步/覆盖）也要弹，且只弹这批 */
   await loadGenNotes();
+  maybeLoadDevtools();
   const hasPending = !!genPendingId;
   const seen = S.settings?.seenChangelogVersion;
   if (!seen && !hasPending) {
@@ -667,14 +711,15 @@ async function maybeShowChangelog() {
     }
   };
   /* 等首屏稳定再弹：启动时主进程还在读库、核对文件，这时弹窗容易糊在
-     正在加载的界面上。空闲回调最多等 3 秒，保证不会被无限推迟。 */
+     正在加载的界面上。空闲回调最多等 3 秒，保证不会被无限推迟。
+     有插件生成的新说明时内容已算好，等待缩短，弹得更快 */
   setTimeout(() => {
     if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(show, { timeout: 3000 });
+      requestIdleCallback(show, { timeout: hasPending ? 1200 : 3000 });
     } else {
       show();
     }
-  }, 800);
+  }, hasPending ? 250 : 800);
 }
 
 /* ============================================================

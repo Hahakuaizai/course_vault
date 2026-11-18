@@ -17,9 +17,10 @@
  * 了什么、为什么），取这类注释的第一句作为说明条目并按关键词归类；
  * 没有可用注释的文件用兜底条目，整批都没有时给一条总览条目。
  *
- * 启动速度：扫描在窗口出来后才异步启动，读文件全程异步并分片让行，
- * 无变化时只有一轮指纹比对；界面通过 changelog:get 等扫描结束才
- * 决定弹不弹窗，首屏渲染不等待本插件。
+ * 启动速度：register 在 whenReady 里调用，扫描随即异步启动、全程
+ * 分片让行；未变的文件只比对大小和修改时间就跳过，不重读内容
+ * （桌宠素材几十 MB，不该每次开机全读一遍）。界面通过 changelog:get
+ * 等扫描结束才决定弹不弹窗，首屏渲染不等待本插件。
  *
  * 数据文件（userData/changelog/）：
  *   snapshot.json  上次扫描时的 {相对路径: sha1}
@@ -95,10 +96,11 @@ function commentText(rawLine) {
   let t = rawLine.trim();
   if (!t) return null;
   if (t.startsWith('//')) t = t.slice(2);
-  else if (t.startsWith('/*')) t = t.slice(2).replace(/\*\/\s*$/, '');
+  else if (t.startsWith('/*')) t = t.slice(2);
   else if (t.startsWith('<!--')) t = t.slice(4).replace(/-->\s*$/, '');
   else if (t.startsWith('*')) t = t.slice(1);
   else return null;
+  t = t.replace(/\*\/\s*$/, ''); // 注释结束符号不该混进说明文字
   t = t.replace(/^[★※·\-—\s]+/, '').trim();
   if (t.length < 6) return null;
   if (/^[\s\*=\-]+$/.test(t)) return null;   // 纯分隔线
@@ -134,28 +136,56 @@ function extractFromDiff(oldText, newText) {
   }
   let added = 0;
   let removed = 0;
-  const candidates = [];
-  const seen = new Set();
+  const addedLines = [];
   for (const line of String(newText || '').split('\n')) {
     const t = line.trim();
     if (!t) continue;
     const n = bag.get(t) || 0;
     if (n > 0) { bag.set(t, n - 1); continue; }
     added++;
-    const body = commentText(line);
-    if (!body) continue;
-    const type = classify(body);
-    if (!type) continue;
-    const text = firstClause(body);
-    if (text.length < 6) continue;
-    const key = text.slice(0, 14);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    candidates.push({ type, text, star: line.includes('★') });
+    addedLines.push(line);
   }
   for (const n of bag.values()) removed += n;
-  /* 带 ★ 的是重点注释（本项目的惯例），排前面；其余保持出现顺序 */
-  candidates.sort((a, b) => (b.star ? 1 : 0) - (a.star ? 1 : 0));
+
+  const candidates = [];
+  const seen = new Set();
+  const pushCand = (type, text, star, curated) => {
+    if (!type || text.length < 6) return;
+    const key = text.slice(0, 14);
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({ type, text, star: !!star, curated: !!curated });
+  };
+  /* 跨行注释先攒着：上一行以顿号/逗号结尾、下一行还是注释行时，
+   * 两行本是一句话，拼完整再提炼免得拆成两条、后半句还带着符号 */
+  let buf = null;
+  let bufStar = false;
+  const flush = () => {
+    if (buf == null) return;
+    pushCand(classify(buf), firstClause(buf), bufStar, false);
+    buf = null;
+    bufStar = false;
+  };
+  for (const line of addedLines) {
+    /* 优先采信手写说明：app.js 里 RELEASE_NOTES 新增的条目本身就是
+     * 人工总结好的更新说明（{ type, text } 一行一条），比从注释里
+     * 猜目的准得多，排在所有注释候选之前。没有手写条目时（比如
+     * 用户自己改的代码）才靠下面的注释提取兜底 */
+    const note = line.match(/type:\s*'(fix|new|improve)'[^}]*text:\s*'([^']{8,})'/);
+    if (note) {
+      flush();
+      pushCand(note[1], firstClause(note[2]), true, true);
+      continue;
+    }
+    const body = commentText(line);
+    if (!body) { flush(); continue; }
+    buf = buf == null ? body : buf + body;
+    if (line.includes('★')) bufStar = true;
+    if (!/[、，]$/.test(body)) flush();
+  }
+  flush();
+  /* 手写说明条目（curated）最优先，其次带 ★ 的重点注释，其余保持出现顺序 */
+  candidates.sort((a, b) => ((b.curated ? 1 : 0) - (a.curated ? 1 : 0)) || ((b.star ? 1 : 0) - (a.star ? 1 : 0)));
   return { candidates, added, removed };
 }
 
@@ -274,14 +304,28 @@ async function scanOnce({ storeDir, appDir, ver }) {
   for (const rel of rels) {
     if (++n % 40 === 0) await tick(); // 分片让行，别占住主进程
     const full = path.join(appDir, ...rel.split('/'));
-    let buf;
-    try {
-      const st = await fsp.stat(full);
-      if (st.size > BIG_FILE) { newSnap[rel] = `big:${st.size}`; continue; }
-      buf = await fsp.readFile(full);
-    } catch { continue; }
-    const hash = sha1(buf);
-    newSnap[rel] = hash;
+    let st;
+    try { st = await fsp.stat(full); } catch { continue; }
+    if (st.size > BIG_FILE) {
+      newSnap[rel] = { h: `big:${st.size}`, s: st.size, m: 0 };
+      continue;
+    }
+    /* 快速路径：大小和修改时间都和上次一样，内容必然没变，直接沿用
+     * 上次的指纹，不读文件。更新器换文件必然产生新修改时间，所以
+     * 真改过的文件不会被这条漏掉。老格式快照（纯指纹字符串）没有
+     * 元数据，自然走读文件分支，扫完即升级成新格式 */
+    const oldRaw = firstRun ? undefined : oldSnap[rel];
+    const oldMeta = oldRaw && typeof oldRaw === 'object' ? oldRaw : null;
+    const oldHash = oldMeta ? oldMeta.h : oldRaw;
+    let buf = null;
+    let hash;
+    if (oldMeta && oldMeta.s === st.size && oldMeta.m === st.mtimeMs && oldMeta.h) {
+      hash = oldMeta.h;
+    } else {
+      try { buf = await fsp.readFile(full); } catch { continue; }
+      hash = sha1(buf);
+    }
+    newSnap[rel] = { h: hash, s: st.size, m: st.mtimeMs };
     if (firstRun) {
       if (TEXT_EXT.has(path.extname(rel).toLowerCase())) {
         const prevPath = path.join(prevDir, ...rel.split('/'));
@@ -290,11 +334,11 @@ async function scanOnce({ storeDir, appDir, ver }) {
       }
       continue;
     }
-    if (oldSnap[rel] === hash) continue;
+    if (oldHash === hash) continue;
     const isText = TEXT_EXT.has(path.extname(rel).toLowerCase());
     const d = {
       rel,
-      kind: oldSnap[rel] ? 'changed' : 'added',
+      kind: oldHash ? 'changed' : 'added',
       binary: !isText,
       candidates: [], added: 0, removed: 0,
     };
@@ -344,14 +388,13 @@ async function scanOnce({ storeDir, appDir, ver }) {
 
 /* ------------------------------------------------------------------ *
  * 注册：main.js 在 whenReady 里调一次。
- * 扫描推迟 1.5 秒启动（让首屏先出来），但 changelog:get 会等它完成，
- * 界面拿到的一定是本次启动的最新结论。
+ * 扫描立即异步启动（窗口还在创建，扫描全程分片让行不抢首屏），
+ * changelog:get 会等它完成，界面拿到的一定是本次启动的最新结论。
  * ------------------------------------------------------------------ */
 function register({ app, ipcMain, getVersion }) {
   const storeDir = path.join(app.getPath('userData'), 'changelog');
   let data = { pendingId: null, batches: [] };
   const ready = (async () => {
-    await new Promise((r) => setTimeout(r, 1500));
     try {
       /* ★ 修复自动说明里的版本号对不上：以前记的是安装包写死的版本，
        * 软件实际显示的版本是 version.json 里每次更新自动递增的那个，
