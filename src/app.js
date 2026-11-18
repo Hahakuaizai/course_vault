@@ -248,6 +248,25 @@ const RELEASE_NOTES = [
   {
     date: '2026-11-18',
     items: [
+      { type: 'fix', text: '修复更新弹窗的数目可能和手动检测对不上的问题：刚启动、本次检测还没跑完时，弹窗用的是上一次留下的旧结果；现在会等本次检测完成再弹，应用完也会把旧结果清掉' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'improve', text: '自动检测改为软件启动后立刻开始（不再等几秒），打开关于时结果已经备好、更新弹窗即时出现' },
+      { type: 'improve', text: '更新弹窗里会列出具体改动的文件（~ 修改 / + 新增 / - 移除），和手动检查的明细一样详细' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'improve', text: '发布助手把原来的「打包并发布」拆成「打包」和「上传 Release」两段分开复制：打包只在本地生成 zip，上传单独一段，网络中断后只需重跑上传、不用重新打包' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
       { type: 'improve', text: '自动检测到更新改为弹窗提示：打开设置 → 关于时直接弹出「检测到 X 个文件改动（修改 / 新增 / 移除）」，可选稍后应用或应用并重启（后者接着弹原有的应用确认框），不再用关于页里的提醒条' },
       { type: 'fix', text: '修复自动检测的提醒会被手动检查或一次「稍后」记录永久压住、之后再也不出现的问题：未应用的改动在下次打开关于时仍会弹窗提醒' },
     ],
@@ -8130,6 +8149,10 @@ function showAutoUpdate(d) {
  * 用户点进设置 → 关于时多半已经检测完了，结果不该等下一次推送。 */
 function restoreAutoUpdate(info) {
   if (!info?.autoResult?.total) return;
+  // 有一轮检测已经到期、但本次运行还没跑完时，留存的是上一轮的旧
+  // 结果（数目可能和现在的实际改动对不上）：先别弹，等这轮跑完，
+  // 新结果会自己推过来弹窗
+  if (info.checkDue && !info.sessionChecked) return;
   showAutoUpdate(info.autoResult);
 }
 
@@ -8149,6 +8172,16 @@ async function maybeShowAutoPopup() {
   if (d.changed.length) parts.push(`修改 ${d.changed.length}`);
   if (d.added.length) parts.push(`新增 ${d.added.length}`);
   if (d.removed.length) parts.push(`移除 ${d.removed.length}`);
+  // 具体是哪些文件也列出来，和手动检查的明细一个格式
+  // （~ 修改 / + 新增 / - 移除），太长就截断并计数，别把弹窗撑爆
+  const rows = [];
+  d.changed.forEach((f) => rows.push(`<div>~ ${escapeHtml(f)}</div>`));
+  d.added.forEach((f) => rows.push(`<div class="ur-ok">+ ${escapeHtml(f)}</div>`));
+  d.removed.forEach((f) => rows.push(`<div class="ur-warn">- ${escapeHtml(f)}</div>`));
+  const MAX_ROWS = 12;
+  let note = rows.slice(0, MAX_ROWS).join('');
+  if (rows.length > MAX_ROWS) note += `<div>……等共 ${rows.length} 个文件</div>`;
+  if (d.depsChanged) note += '<div>这次改动涉及依赖，没法直接应用，详情看关于页里的更新明细。</div>';
   autoPopupOpen = true;
   try {
     const ok = await askConfirm({
@@ -8156,7 +8189,7 @@ async function maybeShowAutoPopup() {
       lead: `检测到 ${d.total} 个文件改动（${parts.join(' · ')}）`,
       okText: '应用并重启',
       cancelText: '稍后应用',
-      note: d.depsChanged ? '这次改动涉及依赖，没法直接应用，详情看关于页里的更新明细。' : '',
+      note,
     });
     if (ok) applyAutoUpdate();
     else autoUpdateDismissed = autoSig(d);

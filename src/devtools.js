@@ -3,12 +3,15 @@
  * 插件二（仅作者本机）：发布助手 —— 界面
  * ============================================================
  * 与插件一（自动更新内容）联动：更新弹窗展示本次更新时，弹窗底部
- * 多一个「发布助手」按钮，点开是两段独立的 PowerShell 代码，各带
+ * 多一个「发布助手」按钮，点开是三段独立的 PowerShell 代码，各带
  * 一键复制：
  *   一、上传到 GitHub：git add / commit / push，提交信息由插件一
  *       生成的本批说明简写而来（取每条的第一小句）；
- *   二、打包并发布 Release：build.js 打包到 D 盘版本备份目录（打包
- *       脚本会排除插件二本身）→ 压成 zip → 删打包文件夹 → gh release create。
+ *   二、打包：build.js 打包到 D 盘版本备份目录（打包脚本会排除
+ *       插件二本身）→ 压成 zip → 删掉打包文件夹，只保留 zip；
+ *   三、上传 Release：gh release create 把 zip 传上去。
+ * 二、三特意拆开：打包纯本地不联网，上传单独一段 —— 网络断在半路
+ * 时只需重跑第三段，不必重新打包（用户定的拆法）。
  * 本文件只在主进程门禁通过（本机标记存在）时才被 app.js 动态加载；
  * 发布版里既没有标记、打包时也排除本文件，不会留下任何痕迹。
  * ============================================================
@@ -20,7 +23,7 @@
   /* 打包产物（文件夹和 zip）统一放这个版本备份目录，不再堆在桌面 workspace */
   var RELEASE_DIR = 'D:\\资料库course_vault版本备份';
   /* gh 在本机是便携版、不在 PATH 里：生成代码先定位 gh，
-   * PATH 里没有时退回这个完整路径（见 releaseCode） */
+   * PATH 里没有时退回这个完整路径（见 uploadCode） */
   var GH_FALLBACK = 'C:\\Users\\30894\\tools\\gh\\bin\\gh.exe';
 
   var cur = null; // { batch, version }
@@ -58,16 +61,13 @@
     ].join('\n');
   }
 
-  /* 第二段：打包当前项目（不带插件二）到版本备份目录并发布 Release。
+  /* 第二段：打包当前项目（不带插件二）到版本备份目录，只产出 zip。
    * ★ 打包文件夹和 zip 都落在 RELEASE_DIR：先建好目录，打包 → 压缩 →
    * 删掉打包文件夹，只保留 zip，免得每发一版就多留一个几百 MB 的
-   * 文件夹；删文件夹不影响后面的上传，gh 传的是 zip 本身。
-   * 末尾发布不用裸 gh：便携版不在 PATH 里会报「无法识别命令」，
-   * 先用 Get-Command 定位，没有再退回便携版完整路径 */
-  function releaseCode(batch, version) {
+   * 文件夹。这段纯本地、不联网，和第三段的上传分开：上传断了重跑
+   * 第三段就行，不必重新打包。 */
+  function packCode(version) {
     var v = version || '1.0.0';
-    var items = leadsOf(batch);
-    var notes = items.slice(0, 3).join('；') || '更新';
     var folder = '资料库-v' + v;
     var out = RELEASE_DIR + '\\' + folder;
     return [
@@ -76,6 +76,22 @@
       'node build.js "' + out + '"',
       'Compress-Archive -Path "' + out + '" -DestinationPath "' + out + '.zip" -Force',
       'Remove-Item -Recurse -Force "' + out + '"',
+    ].join('\n');
+  }
+
+  /* 第三段：把打包好的 zip 发布成 GitHub Release（唯一联网的一段）。
+   * 开头照样 cd 到开发目录：单独开窗口跑这段时，gh 靠当前目录的
+   * git 仓库认出要发到哪个仓库，不 cd 会直接报错。
+   * 不用裸 gh：便携版不在 PATH 里会报「无法识别命令」，
+   * 先用 Get-Command 定位，没有再退回便携版完整路径 */
+  function uploadCode(batch, version) {
+    var v = version || '1.0.0';
+    var items = leadsOf(batch);
+    var notes = items.slice(0, 3).join('；') || '更新';
+    var folder = '资料库-v' + v;
+    var out = RELEASE_DIR + '\\' + folder;
+    return [
+      'cd ' + DEV_DIR,
       '$gh = (Get-Command gh -ErrorAction SilentlyContinue).Source',
       'if (-not $gh) { $gh = "' + GH_FALLBACK + '" }',
       '& $gh release create v' + v + ' "' + out + '.zip" --title "资料库 v' + v + '" --notes "' + psq(notes) + '"',
@@ -131,7 +147,8 @@
       var willShow = panel.hidden;
       if (willShow) {
         document.getElementById('dvCode1').textContent = gitCode(cur.batch);
-        document.getElementById('dvCode2').textContent = releaseCode(cur.batch, cur.version);
+        document.getElementById('dvCode2').textContent = packCode(cur.version);
+        document.getElementById('dvCode3').textContent = uploadCode(cur.batch, cur.version);
       }
       panel.hidden = !willShow;
     });
@@ -140,6 +157,9 @@
     });
     document.getElementById('btnDvCopy2').addEventListener('click', function () {
       copyText(document.getElementById('dvCode2').textContent, this);
+    });
+    document.getElementById('btnDvCopy3').addEventListener('click', function () {
+      copyText(document.getElementById('dvCode3').textContent, this);
     });
   }
 
@@ -151,5 +171,5 @@
     }
   }
 
-  window.__cvDevtools = { attach: attach, _build: { gitCode: gitCode, releaseCode: releaseCode, lead: lead } };
+  window.__cvDevtools = { attach: attach, _build: { gitCode: gitCode, packCode: packCode, uploadCode: uploadCode, lead: lead } };
 })();

@@ -2680,6 +2680,10 @@ let autoStartupDone = false;
 /* 本次运行里最近一次尝试检测的时间（含失败的）：检测失败时持久化的
  * 上次检测时间不会更新，拿它兜底，避免失败后每隔几秒重试一次。 */
 let autoLastAttempt = 0;
+/* 本次运行里是否已经真正完成过一轮检测（算出过一份新结果）。
+ * 关于页判断留存结果新不新鲜就靠它：还没跑完时留存的是上一轮的
+ * 旧结果，数目可能和现在的实际改动对不上，不能拿去弹窗。 */
+let autoSessionChecked = false;
 
 /** 一份比对结果的指纹：文件清单没变，指纹就不变。
  * 页面靠它记「这批变化用户已经点过稍后了」，重启也不会对同一批重复提醒。 */
@@ -2734,6 +2738,7 @@ function runAutoCheck() {
     return { ok: false, reason: err.message };
   }
   stampCheck(d, { keepResult: true });
+  if (d.ok) autoSessionChecked = true;
   if (d.ok && d.total) pushUpdateAvailable({ ...d, sig: updateSig(d) });
   return d;
 }
@@ -2777,10 +2782,11 @@ function scheduleAutoCheck(delayFirst = 6000) {
 
   const dueIn = autoCheckDueIn();
   if (dueIn === Infinity) return;
-  /* 到期了也别抢启动那几秒：至少推迟 delayFirst，等首屏出来再跑，
-   * 免得全目录哈希和读库、核对文件挤在一起让窗口刚出现时更卡。
+  /* 到期就尽快跑：开机那次由调用方传 delayFirst=0，启动后立刻开始
+   * 检测（用户要求：打开关于时结果要已经备好，弹窗不能让人等）；
+   * 设置里刚改完频率时传较大的值，稍让一让界面刷新。
    * 还没到期就按剩余时间排，长开着的软件跨过边界也会准时查。 */
-  const wait = dueIn === 0 ? Math.max(1000, delayFirst) : dueIn;
+  const wait = dueIn === 0 ? Math.max(300, delayFirst) : dueIn;
   autoCheckTimer = setTimeout(() => {
     autoCheckTimer = null;
     if ((state.settings.autoCheckInterval || 'startup') === 'startup') autoStartupDone = true;
@@ -4240,6 +4246,10 @@ if (Test-Path $owp) {
       // 不必等下一次实时推送（见 app.js 的 restoreAutoUpdate）
       lastCheckAt: Number(cfg.lastCheckAt) || 0,
       autoResult: cfg.lastResult || null,
+      // 本次运行是否已经检测过一轮、眼下有没有一轮到期未跑：关于页
+      // 靠这两个判断留存结果能不能直接拿去弹窗（见 restoreAutoUpdate）
+      sessionChecked: autoSessionChecked,
+      checkDue: autoCheckDueIn() === 0,
     };
   });
 
@@ -4250,7 +4260,14 @@ if (Test-Path $owp) {
     return d;
   });
 
-  ipcMain.handle('update:apply', () => applyUpdate());
+  ipcMain.handle('update:apply', () => {
+    const r = applyUpdate();
+    /* 刚应用完，留存的自动检测结果已经过期（写的还是应用前那批
+     * 改动），清掉免得下次打开关于又拿它弹窗、数目和实际对不上。
+     * apply 失败是抛错的，能走到这里就是应用成功了。 */
+    try { saveUpdateConfig({ lastResult: null }); } catch { /* 清理失败不影响应用本身 */ }
+    return r;
+  });
 
   ipcMain.handle('update:pickSource', async () => {
     const res = await dialog.showOpenDialog(win, {
@@ -4395,8 +4412,9 @@ app.whenReady().then(() => {
 
   registerIpc();
   createWindow();
-  /* 自动检测更新：按用户设置决定是否启动、多久一次（见 scheduleAutoCheck） */
-  scheduleAutoCheck();
+  /* 自动检测更新：启动后立刻按设置排第一次（delayFirst=0），
+   * 用户打开关于时结果应该已经备好了（见 scheduleAutoCheck） */
+  scheduleAutoCheck(0);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
