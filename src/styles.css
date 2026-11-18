@@ -123,33 +123,34 @@ body.select-mode .card[data-dir]::before,
   corner-shape: squircle;
 }
 
-/* 深色 · 暖炭底 + 提亮陶土橙
-   不用纯黑和冷蓝，底色带一点棕，与浅色主题同源 */
+/* 深色 · 蓝灰炭底 + 月白蓝（方案 B「月白」，2026-11-18 用户定版）
+   原暖棕底 + 陶土橙在深底上发闷发肉，改走冷色：底色蓝灰炭黑，
+   强调月白蓝，与切深色时那条冷白月光光带呼应 */
 :root[data-theme='dark'],
 .app[data-theme='dark'] {
-  --bg-0: #131211;
-  --bg-1: #1a1917;
-  --bg-2: #201e1b;
-  --bg-3: #262421;
-  --bg-4: #2e2b27;
-  --bg-hover: #292623;
+  --bg-0: #0f1114;
+  --bg-1: #14161b;
+  --bg-2: #1a1d23;
+  --bg-3: #21242c;
+  --bg-4: #292d36;
+  --bg-hover: #22252d;
 
-  /* 线条：暖白叠加，避免发灰发脏 */
-  --line-1: rgba(255, 248, 235, 0.055);
-  --line-2: rgba(255, 248, 235, 0.09);
-  --line-3: rgba(255, 248, 235, 0.15);
+  /* 线条：冷白叠加，避免发灰发脏 */
+  --line-1: rgba(220, 232, 250, 0.055);
+  --line-2: rgba(220, 232, 250, 0.09);
+  --line-3: rgba(220, 232, 250, 0.15);
 
-  /* 文字：暖白，不用纯白，降低刺眼 */
-  --fg-1: #f0ece4;
-  --fg-2: #b5aea2;
-  --fg-3: #857e73;
-  --fg-4: #5c564e;
+  /* 文字：冷白，不用纯白，降低刺眼 */
+  --fg-1: #edf1f7;
+  --fg-2: #aab3c0;
+  --fg-3: #79828f;
+  --fg-4: #525a66;
 
-  /* 强调：陶土橙提亮一档，深底上更透气 */
-  --accent: #d97757;
-  --accent-soft: rgba(217, 119, 87, 0.13);
-  --accent-line: rgba(217, 119, 87, 0.32);
-  --accent-hover: #e58a6a;
+  /* 强调：月白蓝，深底上清透；与危险红彻底分开，不再撞色 */
+  --accent: #a8c3e8;
+  --accent-soft: rgba(168, 195, 232, 0.13);
+  --accent-line: rgba(168, 195, 232, 0.32);
+  --accent-hover: #bdd2f0;
   --danger: #e06b62;
 
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.34);
@@ -158,13 +159,13 @@ body.select-mode .card[data-dir]::before,
 
   --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
   --card-shadow-hover: 0 10px 30px rgba(0, 0, 0, 0.46);
-  --badge-bg: rgba(19, 18, 17, 0.82);
-  --badge-fg: #cfc8bc;
+  --badge-bg: rgba(12, 13, 16, 0.82);
+  --badge-fg: #c7d0dd;
   --badge-shadow: none;
-  --scrim: rgba(10, 9, 8, 0.62);
-  --scrim-strong: rgba(10, 9, 8, 0.55);
-  --dot-ring: rgba(255, 248, 235, 0.06);
-  --tree-line: rgba(255, 248, 235, 0.26);
+  --scrim: rgba(6, 7, 9, 0.62);
+  --scrim-strong: rgba(6, 7, 9, 0.55);
+  --dot-ring: rgba(220, 232, 250, 0.06);
+  --tree-line: rgba(220, 232, 250, 0.26);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }

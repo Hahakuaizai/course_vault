@@ -3922,8 +3922,8 @@ if (Test-Path $owp) {
       if (typeof win.setTitleBarOverlay === 'function') {
         const dark = name === 'dark';
         win.setTitleBarOverlay({
-          color: dark ? '#1a1917' : '#faf9f5',
-          symbolColor: dark ? '#b5aea2' : '#57544d',
+          color: dark ? '#14161b' : '#faf9f5',
+          symbolColor: dark ? '#aab3c0' : '#57544d',
           height: 46,
         });
       }

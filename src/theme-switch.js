@@ -48,12 +48,13 @@ export const USE_NEW_THEME_SWITCH = true;
    缓动取 smoothstep 的等价 bezier —— 参考版 waveClip 里套的就是
    `progress*progress*(3-2*progress)`。
 
-   ★ 800 → 1180：跟着弹簧一起放慢
+   ★ 800 → 1180 → 3660：面板路径单独放慢（2026-11-17 用户定版）
    这个常量只影响**设置面板 / 跟随系统**那条路径（它没有拖动过程，
    自己用 rAF 推 u）；开关拖动那条路由弹簧 SK/SC 决定实际时长，实测
-   现在约 1.5s。两条路径的观感要一致，所以按同样比例放慢约 47%，
-   推到 1180ms 时走完 u，加上收尾和光带淡出，整体接近开关路径。 */
-export const THEME_ANIM_MS = 1180;
+   约 1.4s 到位。3660 是用户在预览页里定下的面板时长：这条路径的
+   揭幕就是要比开关路径慢得多，光带（自有 2.2s 时间轴，见
+   page-motion.js）会在揭幕走完之前先扫到对侧，属于预期观感。 */
+export const THEME_ANIM_MS = 3660;
 export const THEME_EASE = 'cubic-bezier(0.5, 0, 0.5, 1)';
 
 const EVT_START = 'cv:theme-transition-start';

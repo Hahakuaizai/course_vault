@@ -236,16 +236,34 @@ function initSweep() {
 
   /* ---------- 平滑状态 ----------
      targetU 是驱动方给的「真实进度」，curU 是光实际走到的位置。
-     两者之间差一阶延迟 —— 光因此永远慢半拍，读起来是「柔缓地跟上」，
-     而不是和页面一模一样地平移。见下面 set() 的注释。 */
+     非拖动的切换（点击开关 / 面板路径）里，光不追赶驱动进度 ——
+     那种追赶起步必然迟滞（弹簧先要加速，前半秒光几乎不动）。
+     改走自己的时间轴：切换开始的同一帧启动，按 BAND_MS 走完，
+     与主题同时出发、比主题晚到达对侧。拖动时例外：光必须跟手，
+     仍用二阶弹簧追赶（见 loop）。 */
   let targetU = null;
   let curU = null;
-  let velU = 0; // 光的当前速度（二阶弹簧用，见 loop）
+  let velU = 0; // 光的当前速度（拖动追赶的二阶弹簧用，见 loop）
   let dragging = false;
   let wantIdle = false;
   let raf = 0;
   let idleTimer = 0;
   let lastT = 0;
+
+  /* 光带时间轴（2026-11-17 用户在预览页定版）：
+     总时长 2.2s；进度 = 22% 起步偏移 + 78% × 混合缓动。
+     起步偏移让亮条从屏幕边缘出发 —— 行程两端各有一截在屏外，
+     没有偏移时前约 1/4 行程画面上什么都看不到，又会读成「光晚启动」。
+     混合缓动 = 0.35×线性 + 0.65×smootherstep：起步即有约 35% 的
+     平均速度（光立刻可见地动），中段提速，末段减速停稳。 */
+  const BAND_MS = 2200;
+  let bandActive = false;
+  let bandFrom = 0;
+  let bandTo = 0;
+  let bandStart = 0;
+  const smootherstep = (q) => q * q * q * (q * (q * 6 - 15) + 10);
+  const bandEase = (q) => 0.35 * q + 0.65 * smootherstep(q);
+  const bandProgress = (q) => (q >= 1 ? 1 : 0.22 + 0.78 * bandEase(q));
 
   const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
   const ss = (a, b, x) => {
@@ -272,6 +290,7 @@ function initSweep() {
     targetU = null;
     curU = null;
     velU = 0;
+    bandActive = false;
     el.style.setProperty('--p', '-14');
     el.style.setProperty('--a', '0');
   }
@@ -310,27 +329,38 @@ function initSweep() {
     const dt = Math.min(64, Math.max(1, t - lastT)) / 1000;
     lastT = t;
 
-    /* 二阶弹簧（近临界阻尼）驱动：光有自己的速度 —— 起步缓缓加速、
-       中段匀速、接近目标自动减速停稳，天然的变速（慢→快→慢），
-       比原来的一阶指数追赶舒缓得多，收尾也不会戛然而止。
-       · 拖动中弹簧调硬（omega 30），光紧跟开关、不能拖沓；
-       · 松手后 / 设置面板调软（omega 6），整段横扫约 2 秒，
-         光晚约 300ms 起步、到位后柔和收住。 */
-    const omega = dragging ? 30 : 6.0;
-    const zeta = dragging ? 1.0 : 1.05;
-    let rest = dt;
-    while (rest > 0) {
-      const h = Math.min(rest, 1 / 120);
-      rest -= h;
-      const f = -omega * omega * (curU - targetU) - 2 * zeta * omega * velU;
-      velU += f * h;
-      curU += velU * h;
+    if (bandActive) {
+      /* 时间轴驱动：位置只取决于切换开始后过了多久，与驱动方的
+         弹簧 / rAF 进度完全脱钩 —— 同帧启动、按 BAND_MS 到达。 */
+      const q = (t - bandStart) / BAND_MS;
+      if (q >= 1) {
+        curU = bandTo;
+        bandActive = false;
+        velU = 0;
+      } else {
+        curU = bandFrom + (bandTo - bandFrom) * bandProgress(q);
+      }
+      paint(curU);
+    } else {
+      /* 弹簧追赶：只剩拖动跟手和拖动收尾的小余量在走这里。
+         omega 4.2（拖动）让光柔和跟随、不紧贴滑块；非拖动的 2.6
+         只负责把拖动结束时光与目标之间的小差收平。 */
+      const omega = dragging ? 4.2 : 2.6;
+      const zeta = 1.05;
+      let rest = dt;
+      while (rest > 0) {
+        const h = Math.min(rest, 1 / 120);
+        rest -= h;
+        const f = -omega * omega * (curU - targetU) - 2 * zeta * omega * velU;
+        velU += f * h;
+        curU += velU * h;
+      }
+      if (Math.abs(targetU - curU) < 0.0008 && Math.abs(velU) < 0.004) {
+        curU = targetU;
+        velU = 0;
+      }
+      paint(curU);
     }
-    if (Math.abs(targetU - curU) < 0.0008 && Math.abs(velU) < 0.004) {
-      curU = targetU;
-      velU = 0;
-    }
-    paint(curU);
 
     if (curU !== targetU) {
       raf = requestAnimationFrame(loop);
@@ -371,12 +401,36 @@ function initSweep() {
    */
   const set = (u, m, isDrag) => {
     if (m && m !== mode) { mode = m; el.dataset.mode = m; }
-    dragging = !!isDrag;
+    const uu = clamp01(u);
     /* 首次（或刚从 hide 里恢复）：直接把光的起点对齐到 u，
        不要让光从上一次结束的位置飞过来。 */
-    if (curU === null) { curU = clamp01(u); velU = 0; }
-    targetU = clamp01(u);
+    if (curU === null) { curU = uu; velU = 0; targetU = uu; wantIdle = false; kick(); return; }
     wantIdle = false;
+    if (isDrag) {
+      /* 拖动跟手：取消时间轴，回到弹簧追赶 */
+      dragging = true;
+      bandActive = false;
+      targetU = uu;
+      kick();
+      return;
+    }
+    dragging = false;
+    if (bandActive) return; // 时间轴跑着：驱动方的逐帧进度不再接管光
+    if (Math.abs(uu - curU) > 0.003) {
+      /* 切换开始：驱动进度刚离开光的当前位置（点击后约 1–2 帧内
+         触发，感知上就是同一帧）。从光的当前位置向目标端点启动
+         时间轴；开关弹簧停稳后的 ±0.0003 级尾巴抖动远小于 0.003
+         的门槛，不会误触发第二次横扫。 */
+      bandFrom = curU;
+      bandTo = uu >= curU ? 1 : 0;
+      bandStart = performance.now();
+      bandActive = true;
+      targetU = bandTo;
+      kick();
+      return;
+    }
+    /* 其余情况（拖动收尾的小余量、端点附近的尾巴）：交给弹簧收平 */
+    targetU = uu;
     kick();
   };
 
