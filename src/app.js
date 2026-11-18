@@ -41,7 +41,7 @@ const S = {
   docKind: 'all',
   /** 选「代码」后的细分：all | python | cpp | java | js | web | go | rust | shell | data | other */
   codeKind: 'all',
-  /** 多选模式：开启后单击是选择，双击才打开 */
+  /** 多选模式：开启后单击切换选中（再点一下取消），不打开/不进入 */
   selectMode: false,
   search: '',
   importPaths: [],
@@ -245,6 +245,59 @@ function toast(msg, type = '') {
  * 看到的全是上次已经读过的东西 —— 用户明确说过只想要这次的。
  * 旧的批留在数组里当历史，反正弹窗只取 slice(0, 1)。 */
 const RELEASE_NOTES = [
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'feat', text: '视频预览加了循环开关：控制条上新增循环按钮（倍速左边），点亮 = 播完从头循环，不点亮 = 播完暂停（默认）。选择会记住，下次打开视频沿用' },
+      { type: 'feat', text: '预览可以左右切换文件：同一个目录里有多个可预览文件（代码、文档、图片、视频、音频等）时，预览面板左右中部会出现切换箭头，点击在这些文件之间依次浏览（到头会绕回）；正在编辑文本或图片时箭头自动隐藏、切换禁用，不会误触丢修改' },
+      { type: 'fix', text: '修复克码人生在设置卡片和右键菜单里完全静止：它的待机动画只有 2 帧、第一帧要定格 5.2 秒只眨一下眼，预览里根本看不出在动。现在预览会自动判断：待机动画太静的宠物，改播它帧数多的动作来展示（克码人生播的是团队协作那条）；桌宠本体的待机行为不变' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'improve', text: '视频方向键步长改为自适应：以前定死 5 秒，碰到只有 3 秒的短视频，按 ← 直接回到 0、按 → 直接到结尾，看起来就像「回退到开始」（感谢反馈定位）。现在步长按总时长的十分之一算，下限 1 秒、上限 5 秒：3 秒的视频一次跳 1 秒，50 秒以上的视频一次跳 5 秒' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '视频快进/回退终于修好（这次是真因）：视频文件走的是软件自己的 vault:// 供文件通道，以前这个通道不管浏览器要哪一段都整文件返回，浏览器每次想跳进度都被打回开头，所以方向键、拖进度条都只能回起点——前几轮改播放器本身当然没用。现在通道按 Range 分段返回（206），方向键、进度条拖动、点进度条任意位置都能正常跳了' },
+      { type: 'fix', text: '修复换宠悬停预览遮挡菜单：桌宠靠屏幕边缘时子菜单会翻到另一侧，旧摆位只看屏幕边缘不看菜单，预览正好压在根菜单上。现在预览会依次尝试子菜单右/左、整个菜单的右/左、下/上六个位置，选第一个不遮挡任何已打开菜单的位置；软件内菜单和桌面菜单都已修复' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '再次修复视频方向键：按 ← / → 会把视频送回开头。原因是总时长还没读出来时，旧写法会把进度钳制到 0。现在改为直接对预览里正在播放的那个视频操作，总时长不可用时只做下限保护，不会再跳回开头' },
+      { type: 'improve', text: '设置里的桌宠卡片展示大小统一：以前按整张精灵图缩放，帧里留白多的宠物（如蓝发小女仆）就显得特别小。现在按每只宠物实际形象的范围缩放，几只桌宠和你自己导入的桌宠在卡片里的高度统一在展示框的四分之三左右' },
+      { type: 'improve', text: '「不显示」卡片去掉叉号，换成一根微微发光的白色横条，悬在展示框下部（不贴底）' },
+      { type: 'feat', text: '换宠菜单加悬停预览：在右键菜单的「更换宠物」里，把鼠标停在某个宠物名字上，菜单旁边会浮出和设置里同款的动态预览，可以先看清形象再选。预览的位置会自动判断（优先右侧、放不下换左侧），不会遮挡菜单' },
+      { type: 'feat', text: '桌面上的右键菜单换成自绘菜单（和软件内同款）：以前是系统原生菜单，做不了悬停预览，「桌宠大小 → 自定义」还会跳去打开软件设置。现在桌面菜单里同样有悬停动态预览，点「自定义」直接在菜单旁弹出大小拖动条，拖动即时生效，不用再进软件' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '修复导入文件夹时选了「允许重复」却没有生成副本文件夹：库里已有一个同名文件夹时，新导入的文件会被直接灌进原文件夹里（比如已有的「gif表情」会从 27 个文件变成 54 个）。原因是导入时按名字找到了旧文件夹就合并。现在选「允许重复」会新建一个「原名（1）」文件夹（再导入就是「（2）」），这次导入的整棵文件夹都装在新文件夹里；选「跳过」或「替换」时仍按原来的方式并入' },
+      { type: 'fix', text: '修复三个快捷键无效：Alt+← 返回上级目录、Alt+↑ 回到全部文件、Ctrl+Shift+R 在文件夹中显示。焦点落在 PDF 预览里时按键会被预览的子文档吃掉，主界面收不到；Ctrl+Shift+R 还会被软件自带的「强制重新加载」抢走，按下去变成刷新界面。现在这三个键由主进程统一代收，和焦点在哪无关；Ctrl+Shift+R 也不会再触发刷新' },
+      { type: 'fix', text: '修复鼠标框选和多选模式脱节：在空白处拖出选框选中一批文件后，仍是普通模式的点选规则。现在框选一出现就视为进入多选模式，点已选中的取消选中、Ctrl+A 全选、按 ESC 退出等都和手动开启多选一致' },
+      { type: 'new', text: '视频预览换成自定义控制条：进度条可以直接拖动快进、回退；播放和暂停合并成一个按钮，点视频本身也能播放/暂停；按空格播放/暂停，按 ← / → 回退/快进 5 秒；控制条右侧有倍速按钮，点开是一排横向选项（0.75、1、1.25、1.5、2、3 倍）' },
+      { type: 'new', text: '预览支持 Ctrl+滚轮缩放：看图片、视频、文档（Word、PPT、PDF 除外）、代码、表格、幻灯片时，按住 Ctrl 滚动滚轮就能放大缩小，放大倍率 0.25 到 4 倍，切换到下一个文件时自动复位。PDF 用的是内置阅读器，它自己处理 Ctrl+滚轮缩放' },
+      { type: 'new', text: '新建、导入、粘贴时重名自动改名：新名字和当前目录里已有的文件或文件夹撞名时，不再报错或覆盖，自动顺延成「原名（1）」「原名（2）」，文件的序号加在扩展名之前（如「报告（1）.pdf」）。新建文件夹、文件，导入添加文件，在同一目录里复制粘贴，都按这个规则' },
+      { type: 'new', text: '多选模式下按 Ctrl+A 可以全选当前目录的全部文件和文件夹（在搜索框、改名框里打字时不触发，那里还是输入框自己的全选）' },
+      { type: 'improve', text: '多选的点选规则统一：被选中的文件或文件夹，点击它任意一处都是取消选中，不再局限于左上角的小圆圈，也不分普通模式还是多选模式；在多选模式下点未选中的是选中，双击等于取消选中，不会误进文件夹' },
+      { type: 'fix', text: '修复选中标记的圆圈没对准：空心圆环和实心勾选标记原本大小差了 3 像素，叠在一起总是错开。现在两个标记尺寸完全一致，严丝合缝' },
+      { type: 'improve', text: '深色主题换成「月白」配色：底色从暖棕灰改为蓝灰炭色，强调色从陶土橙改为月光蓝，原来和强调色分不清的危险红也拉开了区别；切换主题时光线横扫的节奏同步定版（光带约 2.2 秒扫完，面板切换约 3.7 秒）' },
+      { type: 'fix', text: '「在文件夹中显示」（Ctrl+Shift+R）补全行为：没选中任何文件时打开当前目录在电脑上的位置；恰好选中一个文件或文件夹时打开那一项；选中了多个会提示「请选择一个文件或者文件夹」；如果目录只是软件内的虚拟目录、电脑上没有对应的真实文件夹，会明确给出提示，而不是没反应' },
+      { type: 'fix', text: '重名处理补全到改名、移动和回收站还原：给文件或文件夹改名时撞名、把文件或文件夹移进一个已有同名项的目录、从回收站还原时原位置已经有了同名项，都会自动顺延成「原名（1）」「原名（2）」，不再报错拦下，也不会出现两个同名项' },
+      { type: 'fix', text: '修复右键文件夹删除只删一个：选中了一批文件和文件夹、在某个文件夹上右键点「删除」时，以前只删右键的那一个文件夹。现在右键的项在多选里时，删除作用于整个选择（菜单上会写明「删除 N 项」）；在空白处右键也补上了对选中项的「删除 N 项」' },
+      { type: 'feat', text: '导入时可以改名：只选了一个文件或文件夹时，导入窗口里显示名字的地方可以直接编辑。改的只是它在软件里显示的名字，电脑上的原文件不会改名，路径显示和「在文件夹中显示」也照常指向电脑上的真实位置' },
+      { type: 'improve', text: '多选模式下，在网格空白处单击即可退出多选模式（拖动框选不受影响）' },
+      { type: 'fix', text: '修复视频预览的方向键失灵：点过进度条之后，焦点停在进度条上，空格和左右方向键会被误当成「在输入框里打字」拦掉。现在播放视频时空格播放/暂停、←/→ 快退/快进 5 秒在任何焦点下都有效，焦点在进度条上时方向键也是 5 秒步进，不再是滑杆自带的微小步进' },
+      { type: 'feat', text: '共用文件的编辑冲突处理（写时复制）：同一个电脑文件被登记了多条记录时，编辑其中一条的内容或给它改名，不会再连累其他记录。软件会在真正保存/改名的那一刻，先在原地把文件复制一份成「名称（1）」，只让这一条改指向副本再写入，原文件和其他记录保持不变；没有被共用的文件照常直接改' },
+    ],
+  },
   {
     date: '2026-11-17',
     items: [
@@ -2176,6 +2229,90 @@ function renderTrash() {
    ============================================================ */
 let currentPreview = null;
 
+/* 当前预览里的视频元素（自定义控制条与空格/方向键要操作它） */
+let pvVideoEl = null;
+/* Ctrl+滚轮缩放的当前倍率，每次打开新预览重置为 1 */
+let pvZoom = 1;
+
+/* ---------- 预览内左右切换（上一个 / 下一个文件） ----------
+ * 列表 = 打开预览时网格里正显示着的、且可预览的文件（按界面
+ * 上的顺序）。箭头按钮挂在预览面板上（#previewBody 的兄弟
+ * 节点，不会被每次渲染清掉）；编辑中（文本/图片编辑都会给
+ * #previewBody 加 is-editing）隐藏且点击无效。 */
+let pvSiblings = [];
+const PV_NAV_KINDS = new Set(['pdf', 'word', 'excel', 'ppt', 'image', 'video', 'audio', 'markdown', 'text', 'code']);
+
+function computePvSiblings(currentId) {
+  const byId = new Map(S.files.map((f) => [f.id, f]));
+  const ids = [];
+  document.querySelectorAll('#grid [data-file]').forEach((el) => {
+    const f = byId.get(el.dataset.file);
+    if (f && f.exists && PV_NAV_KINDS.has(f.kind)) ids.push(f.id);
+  });
+  return ids.includes(currentId) ? ids : [currentId];
+}
+
+let pvNavPrevEl = null;
+let pvNavNextEl = null;
+
+function ensurePvNav() {
+  if (pvNavPrevEl) return;
+  const host = $('#preview');
+  if (!host) return;
+  const mk = (cls, d, label) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = `pv-nav ${cls}`;
+    b.hidden = true;
+    b.innerHTML = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
+    b.setAttribute('aria-label', label);
+    return b;
+  };
+  pvNavPrevEl = mk('pv-nav-prev', 'M14.5 5.5 8 12l6.5 6.5', '上一个文件');
+  pvNavNextEl = mk('pv-nav-next', 'M9.5 5.5 16 12l-6.5 6.5', '下一个文件');
+  pvNavPrevEl.addEventListener('click', () => pvNavigate(-1));
+  pvNavNextEl.addEventListener('click', () => pvNavigate(1));
+  host.appendChild(pvNavPrevEl);
+  host.appendChild(pvNavNextEl);
+}
+
+function syncPvNav() {
+  ensurePvNav();
+  if (!pvNavPrevEl) return;
+  const show = pvSiblings.length > 1 && !!S.previewFileId;
+  pvNavPrevEl.hidden = !show;
+  pvNavNextEl.hidden = !show;
+  if (!show) return;
+  const i = pvSiblings.indexOf(S.previewFileId);
+  const n = pvSiblings.length;
+  const nameOf = (id) => (S.files.find((f) => f.id === id) || {}).name || '';
+  pvNavPrevEl.title = `上一个：${nameOf(pvSiblings[(i - 1 + n) % n])}（${i + 1} / ${n}）`;
+  pvNavNextEl.title = `下一个：${nameOf(pvSiblings[(i + 1) % n])}（${i + 1} / ${n}）`;
+}
+
+function pvNavigate(dir) {
+  /* 编辑中禁用：正在改文本/图片时不许切走（切走等于放弃编辑
+     流程，容易丢内容）；CSS 也同步把箭头藏了，这里再兜一层 */
+  if ($('#previewBody').classList.contains('is-editing')) return;
+  if (pvSiblings.length < 2 || !S.previewFileId) return;
+  const i = pvSiblings.indexOf(S.previewFileId);
+  if (i < 0) return;
+  const next = pvSiblings[(i + dir + pvSiblings.length) % pvSiblings.length];
+  openPreview(next);
+}
+
+/** 这次预览该缩放哪个元素：视频/图片缩元素本身，文档/代码缩内容区；
+ *  PDF 是跨源 iframe，返回 null（内置阅读器自己处理 Ctrl+滚轮）。 */
+function pvZoomTarget(body) {
+  const v = body.querySelector('video');
+  if (v) return v;
+  const img = body.querySelector('.pv-center > img');
+  if (img) return img;
+  if (body.querySelector('iframe')) return null;
+  return body.querySelector('.pv-doc, .pv-pre, .sheet-wrap, .slide-list, .pv-legacy-doc')
+    || body.firstElementChild;
+}
+
 async function openPreview(id) {
   const f = S.files.find((x) => x.id === id);
   if (!f) return;
@@ -2184,7 +2321,15 @@ async function openPreview(id) {
     ieDispose(imageEditor);
     imageEditor = null;
   }
+  // 上一个视频停掉，缩放倍率复位
+  if (pvVideoEl) {
+    pvVideoEl.pause();
+    pvVideoEl = null;
+  }
+  pvZoom = 1;
   S.previewFileId = id;
+  pvSiblings = computePvSiblings(id);
+  syncPvNav();
 
   $('#previewName').textContent = f.name;
   const c = courseOf(f.courseId);
@@ -2249,12 +2394,97 @@ async function openPreview(id) {
     if (p.type === 'video') {
       const wrap = document.createElement('div');
       wrap.className = 'pv-center';
+      const box = document.createElement('div');
+      box.className = 'pv-video';
       const v = document.createElement('video');
       v.src = p.url;
-      v.controls = true;
       v.autoplay = false;
-      wrap.appendChild(v);
+      /* 自定义控制条，不用原生 controls：原生条没有倍速，样式也和
+       * 应用不统一。进度条可拖动快进/回退；播放与暂停是同一个按钮；
+       * 倍速点开是一排横向选项（0.75–3）。空格与 ←/→ 在全局
+       * keydown 里处理（操作 pvVideoEl）。 */
+      const bar = document.createElement('div');
+      bar.className = 'pv-vbar';
+      const PLAY = '<svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>';
+      const PAUSE = '<svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><rect x="3.5" y="2.5" width="3.2" height="11" rx="1"/><rect x="9.3" y="2.5" width="3.2" height="11" rx="1"/></svg>';
+      bar.innerHTML = `
+        <button type="button" class="pv-vbtn" data-act="play" title="播放 / 暂停（空格）">${PLAY}</button>
+        <span class="pv-vtime">0:00 / 0:00</span>
+        <input type="range" class="pv-vseek" min="0" max="1000" step="1" value="0" title="进度（←/→ 快退/快进，长视频 5 秒、短视频按比例）">
+        <button type="button" class="pv-vbtn" data-act="loop" title="循环播放（关：播完暂停）"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.6 8A5.6 5.6 0 1 1 11.9 3.6"/><path d="M13.9 1.4v3.1h-3.1"/></svg></button>
+        <div class="pv-vspeed">
+          <button type="button" class="pv-vbtn" data-act="speed" title="倍速播放">1×</button>
+          <div class="pv-vspeed-menu" hidden>
+            ${[0.75, 1, 1.25, 1.5, 2, 3].map((r) => `<button type="button" data-rate="${r}" class="${r === 1 ? 'is-active' : ''}">${r}×</button>`).join('')}
+          </div>
+        </div>`;
+      box.appendChild(v);
+      box.appendChild(bar);
+      wrap.appendChild(box);
       body.appendChild(wrap);
+      pvVideoEl = v;
+
+      const btnPlay = bar.querySelector('[data-act="play"]');
+      const seek = bar.querySelector('.pv-vseek');
+      const time = bar.querySelector('.pv-vtime');
+      const fmt = (s) => {
+        if (!Number.isFinite(s) || s < 0) s = 0;
+        const sec = Math.floor(s);
+        return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+      };
+      const syncPlayBtn = () => { btnPlay.innerHTML = v.paused ? PLAY : PAUSE; };
+      // play() 返回 Promise，格式不支持时它会 reject，吞掉免得报未处理异常
+      const togglePlay = () => {
+        if (v.paused) {
+          const pr = v.play();
+          if (pr && pr.catch) pr.catch(() => {});
+        } else v.pause();
+      };
+      btnPlay.addEventListener('click', togglePlay);
+      v.addEventListener('click', togglePlay);
+      v.addEventListener('play', syncPlayBtn);
+      v.addEventListener('pause', syncPlayBtn);
+      v.addEventListener('loadedmetadata', () => {
+        time.textContent = `0:00 / ${fmt(v.duration)}`;
+      });
+      v.addEventListener('timeupdate', () => {
+        if (v.duration) seek.value = String(Math.round((v.currentTime / v.duration) * 1000));
+        time.textContent = `${fmt(v.currentTime)} / ${fmt(v.duration)}`;
+      });
+      seek.addEventListener('input', () => {
+        if (!v.duration) return;
+        v.currentTime = (Number(seek.value) / 1000) * v.duration;
+        time.textContent = `${fmt(v.currentTime)} / ${fmt(v.duration)}`;
+      });
+      /* 循环开关：开 = 播完从头循环，关 = 播完暂停（默认关）。
+         选择记在本地，下次打开视频沿用。 */
+      const btnLoop = bar.querySelector('[data-act="loop"]');
+      let loopOn = false;
+      try { loopOn = localStorage.getItem('cv:videoLoop') === '1'; } catch { /* 读不到按关处理 */ }
+      const syncLoopBtn = () => {
+        v.loop = loopOn;
+        btnLoop.classList.toggle('is-on', loopOn);
+        btnLoop.title = loopOn ? '循环播放（开：播完从头循环）' : '循环播放（关：播完暂停）';
+      };
+      btnLoop.addEventListener('click', () => {
+        loopOn = !loopOn;
+        try { localStorage.setItem('cv:videoLoop', loopOn ? '1' : '0'); } catch { /* 存不下不影响本次 */ }
+        syncLoopBtn();
+      });
+      syncLoopBtn();
+      const speedBtn = bar.querySelector('[data-act="speed"]');
+      const speedMenu = bar.querySelector('.pv-vspeed-menu');
+      speedBtn.addEventListener('click', () => { speedMenu.hidden = !speedMenu.hidden; });
+      speedMenu.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-rate]');
+        if (!b) return;
+        const r = Number(b.dataset.rate);
+        v.playbackRate = r;
+        speedBtn.textContent = `${r}×`;
+        speedMenu.querySelectorAll('button').forEach((x) => x.classList.toggle('is-active', x === b));
+        speedMenu.hidden = true;
+      });
+      v.addEventListener('play', () => { speedMenu.hidden = true; });
       return;
     }
 
@@ -2438,6 +2668,12 @@ async function closePreview() {
   }
   $('#overlay').hidden = true;
   $('#previewBody').innerHTML = '';
+  // 视频关掉预览就停播并释放引用（空格/方向键靠 pvVideoEl 找目标）
+  if (pvVideoEl) {
+    pvVideoEl.pause();
+    pvVideoEl = null;
+  }
+  pvZoom = 1;
   S.previewFileId = null;
   currentPreview = null;
   setEditMode(false);
@@ -2735,7 +2971,9 @@ async function saveEdit() {
   try {
     const res = await api.files.saveText(S.previewFileId, editorEl.value);
     applyState(res.state);
-    toast('已保存，原文件已更新（旧版有备份）', 'ok');
+    toast(res.forked
+      ? '已保存。这个文件还有其他记录在共用，已先复制一份再改，原文件不受影响'
+      : '已保存，原文件已更新（旧版有备份）', 'ok');
 
     // 重新渲染预览，反映最新内容
     const id = S.previewFileId;
@@ -3551,7 +3789,9 @@ async function saveImageEdit() {
     const data = new Uint8Array(await blob.arrayBuffer());
     const res = await api.files.saveImage(ie.id, mime, data);
     applyState(res.state);
-    toast('图片已保存，原文件已更新（旧版有备份）', 'ok');
+    toast(res.forked
+      ? '图片已保存。这个文件还有其他记录在共用，已先复制一份再改，原文件不受影响'
+      : '图片已保存，原文件已更新（旧版有备份）', 'ok');
 
     const id = ie.id;
     ieDispose(ie);
@@ -3994,9 +4234,27 @@ function setPicked(paths) {
     return;
   }
   box.classList.add('has-items');
-  box.innerHTML = paths
-    .map((p) => `<div>${escapeHtml(p.split(/[\\/]/).pop())}</div>`)
-    .join('');
+  if (paths.length === 1) {
+    /* 只选了一项时，名字可以直接改：改的只是导入后在软件里
+     * 显示的名字，电脑上的原文件/文件夹不会改名，路径也还是
+     * 真实路径（2026-11-18 用户要的）。选了多项没有单一名字
+     * 可改，仍旧只列清单。 */
+    box.innerHTML = '';
+    const input = document.createElement('input');
+    input.id = 'pickedNameInput';
+    input.className = 'picked-name-input';
+    input.value = paths[0].split(/[\\/]/).pop();
+    input.spellcheck = false;
+    box.appendChild(input);
+    const hint = document.createElement('div');
+    hint.className = 'picked-name-hint';
+    hint.textContent = '可修改导入后显示的名字，电脑上的原文件不会改名';
+    box.appendChild(hint);
+  } else {
+    box.innerHTML = paths
+      .map((p) => `<div>${escapeHtml(p.split(/[\\/]/).pop())}</div>`)
+      .join('');
+  }
   $('#btnImportConfirm').disabled = false;
 }
 
@@ -4005,6 +4263,17 @@ async function doImport() {
   const courseId = S.importCourseId;
   const mode = 'link';
   const btn = $('#btnImportConfirm');
+
+  // 单选时弹窗里改过的名字（没改或改回原样就不传）
+  const nameInput = $('#pickedNameInput');
+  const originalName = S.importPaths.length === 1
+    ? S.importPaths[0].split(/[\\/]/).pop()
+    : null;
+  const nameOverride = nameInput && originalName
+    && nameInput.value.trim()
+    && nameInput.value.trim() !== originalName
+    ? nameInput.value.trim()
+    : null;
 
   btn.disabled = true;
   btn.textContent = '检查中…';
@@ -4028,10 +4297,10 @@ async function doImport() {
       btn.textContent = '开始导入';
       const choice = await askDuplicate(scan.duplicates);
       if (!choice) return; // 用户取消
-      await runImport(courseId, mode, choice);
+      await runImport(courseId, mode, choice, nameOverride);
       return;
     }
-    await runImport(courseId, mode, setting('duplicateMode'));
+    await runImport(courseId, mode, setting('duplicateMode'), nameOverride);
   } catch (err) {
     toast(err.message || '导入失败', 'error');
     btn.disabled = false;
@@ -4039,13 +4308,13 @@ async function doImport() {
   }
 }
 
-async function runImport(courseId, mode, dupMode) {
+async function runImport(courseId, mode, dupMode, nameOverride = null) {
   const btn = $('#btnImportConfirm');
   btn.disabled = true;
   btn.textContent = '导入中…';
 
   try {
-    const res = await api.files.import(S.importPaths, courseId, mode, dupMode, !!S.buildTree);
+    const res = await api.files.import(S.importPaths, courseId, mode, dupMode, !!S.buildTree, nameOverride);
     if (setting('autoSwitchCourse')) {
       // 导到顶层时回到「全部文件」，正好能看到刚建出来的目录
       S.view = courseId ? { type: 'course', courseId } : { type: 'all', courseId: null };
@@ -4510,10 +4779,11 @@ function handleEscape() {
   if (!$('#courseModal').hidden) { $('#courseModal').hidden = true; return; }
   /* 什么弹窗都没开时：多选模式开着 → Esc 直接退出多选模式
      （setSelectMode(false) 会顺带清空已选，哪怕只选了一个）；
-     普通状态下选了不止一个条目 → Esc 清空多选。单个条目的
-     普通选中不处理，免得误伤平时的点选状态。 */
+     普通状态下只要有选中（哪怕只选了一个）→ Esc 清空选中。
+     （2026-11-18 用户明确要求：选中一个文件时按 Esc 也要能取消，
+     不再保留原来「单个普通选中不处理」的豁免。） */
   if (S.selectMode) { setSelectMode(false); return; }
-  if (S.selected.size + S.selectedDirs.size > 1) clearSelection();
+  if (S.selected.size + S.selectedDirs.size >= 1) clearSelection();
 }
 
 /* ============================================================
@@ -5064,15 +5334,18 @@ function bindEvents() {
     }
     const key = cardKey(card);
 
-    /* 点中卡片左上角的选中圆圈（多选模式的圆圈在 top/left 8px、
-       16×16，命中范围放宽到 4–28px）：像复选框一样切换这一个
-       的选中——已选的点掉取消，没选的点上加入——而不是走下面
-       多选模式的「只选这一个」。 */
-    if (S.selectMode) {
+    /* 点中卡片左上角的选中圆圈（圆圈在 top/left 8px、16×16，
+       命中范围放宽到 4–28px）：像复选框一样切换这一个的选中——
+       已选的点掉取消，没选的点上加入——而不是走下面多选模式
+       的「只选这一个」。
+       多选模式下圆圈一直显示，点谁切换谁；普通模式下圆圈只在
+       已选中的卡片上显示（见 styles.css），点它取消这一个的
+       选中；普通模式没选中时不拦截这一角，免得误伤打开/进入。 */
+    {
       const r = card.getBoundingClientRect();
       const bx = e.clientX - r.left;
       const by = e.clientY - r.top;
-      if (bx >= 4 && bx <= 28 && by >= 4 && by <= 28) {
+      if (bx >= 4 && bx <= 28 && by >= 4 && by <= 28 && (S.selectMode || hasKey(key))) {
         if (hasKey(key)) removeKey(key);
         else addKey(key);
         S.anchor = { id: key, list: 'grid' };
@@ -5082,8 +5355,20 @@ function bindEvents() {
       }
     }
 
-    // 普通模式且没按修饰键：文件打开预览，文件夹进入
+    // 已选中的卡片：普通单击只取消选中，绝不打开/进入——普通
+    // 模式和多选模式一致（2026-11-18 用户定版：被选中的文件/
+    // 文件夹，点击任意一处都是取消选中）。框选/Ctrl 点选出的
+    // 选中状态在普通模式下同样走这里，不再误入文件夹。
     const plain = !e.shiftKey && !e.ctrlKey && !e.metaKey;
+    if (plain && hasKey(key)) {
+      removeKey(key);
+      S.anchor = { id: key, list: 'grid' };
+      syncSelectedClass();
+      updateSelBar();
+      return;
+    }
+
+    // 普通模式且没按修饰键：文件打开预览，文件夹进入
     if (plain && !S.selectMode) {
       if (card.dataset.file) openPreview(card.dataset.file);
       else enterDir(card.dataset.dir);
@@ -5102,7 +5387,18 @@ function bindEvents() {
       updateSelBar();
       return;
     }
-    // 多选模式下的普通单击：只选这一个
+    // 多选模式下的普通单击：切换这一个的选中——点一下选上，
+    // 再点一下取消（双击的第二下同理，等于取消选中），不清空
+    // 其他已选，也不打开/进入（2026-11-18 用户定版）。
+    if (S.selectMode) {
+      if (hasKey(key)) removeKey(key);
+      else addKey(key);
+      S.anchor = { id: key, list: 'grid' };
+      syncSelectedClass();
+      updateSelBar();
+      return;
+    }
+    // 普通模式兜底（如 Shift 点选时还没有锚点）：只选这一个
     S.selected.clear();
     S.selectedDirs.clear();
     addKey(key);
@@ -5114,6 +5410,18 @@ function bindEvents() {
   $('#grid').addEventListener('dblclick', (e) => {
     const card = e.target.closest('[data-file], [data-dir]');
     if (!card) return;
+    if (S.selectMode) {
+      /* 多选模式下双击不打开/不进入。两次单击一选一消之后卡片
+         可能又被选回，这里把双击的净效果定为取消选中
+         （2026-11-18 用户定版：双击 = 取消选中）。 */
+      const key = card.dataset.file || card.dataset.dir;
+      if (hasKey(key)) {
+        removeKey(key);
+        syncSelectedClass();
+        updateSelBar();
+      }
+      return;
+    }
     if (card.dataset.file) openPreview(card.dataset.file);
     else enterDir(card.dataset.dir);
   });
@@ -5213,6 +5521,16 @@ function bindEvents() {
       mq.moved = true;
       marquee.hidden = false;
       document.body.classList.add('is-marquee');
+      /* 框选出现即视为进入多选模式（2026-11-18 用户定版）：之后
+       * 点选切换、Ctrl+A 全选、ESC 退出等都按多选模式走。
+       * 这里不调 setSelectMode —— 它会 renderMain 重建网格、打断
+       * 正在进行的拖动；只同步状态位与样式类，操作条由下面每帧
+       * 的 updateSelBar 维护，拖完的状态和手动进多选一致。 */
+      if (!S.selectMode) {
+        S.selectMode = true;
+        document.body.classList.add('select-mode');
+        $('#btnSelectMode').classList.toggle('is-active', true);
+      }
     }
 
     const left = Math.min(mq.x0, x1);
@@ -5240,7 +5558,7 @@ function bindEvents() {
     updateSelBar();
   });
 
-  const endMarquee = () => {
+  const endMarquee = (fromBlur = false) => {
     if (!mq) return;
     const moved = mq.moved;
     mq = null;
@@ -5250,10 +5568,31 @@ function bindEvents() {
       const keys = [...S.shownIds].filter((k) => hasKey(k));
       S.anchor = { id: keys[keys.length - 1] || null, list: 'grid' };
       marqueeEndedAt = Date.now();
+    } else if (S.selectMode && !fromBlur) {
+      /* 多选模式下在网格空白处单击（按下松开没拖动）= 退出
+       * 多选模式（2026-11-18 用户要的）。拖出框选框的 mouseup
+       * 走上面的 moved 分支，不受影响；点卡片的 mouseup 根本
+       * 不进 endMarquee（mousedown 没落在空白处，mq 为空）。 */
+      setSelectMode(false);
     }
   };
-  window.addEventListener('mouseup', endMarquee);
-  window.addEventListener('blur', endMarquee);
+  window.addEventListener('mouseup', () => endMarquee(false));
+  window.addEventListener('blur', () => endMarquee(true));
+
+  /* 预览缩放：Ctrl+滚轮放大/缩小当前预览（图片、视频、文档、代码、
+   * 表格、幻灯片）。PDF 是跨源 iframe，滚轮事件进不了主文档，由它
+   * 内置阅读器自己处理；文本/图片编辑状态下不抢滚轮。 */
+  $('#previewBody').addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return;
+    if (imageEditor) return;
+    const body = $('#previewBody');
+    if (body.classList.contains('is-editing')) return;
+    const target = pvZoomTarget(body);
+    if (!target) return;
+    e.preventDefault();
+    pvZoom = Math.min(4, Math.max(0.25, pvZoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+    target.style.zoom = String(pvZoom);
+  }, { passive: false });
 
   /* 网格内拖拽：把文件/文件夹拖到文件夹卡片上 = 移进去；
      拖到空白处 = 移到「全部文件」顶层。 */
@@ -5590,6 +5929,12 @@ function bindEvents() {
               icon: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H10l1.6 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7.5z"/><path d="M9 13h6M13 10.5l2.5 2.5-2.5 2.5"/>',
               action: () => showMoveTargets(selKeys, at.x + 4, at.y + 4),
             },
+            {
+              label: `删除 ${selKeys.length} 项`,
+              danger: true,
+              icon: '<path d="M5 7h14M9 7V5h6v2M7 7l1 12h8l1-12"/>',
+              action: () => removeSelected(),
+            },
             { sep: true },
           ]
         : [];
@@ -5709,10 +6054,16 @@ function bindEvents() {
         dirNode ? { sep: true } : null,
         dirNode
           ? {
-              label: '删除文件夹',
+              /* 右键的文件夹在多选里时，删除作用于整个选择（和文件
+               * 菜单一致）；以前这里永远只删右键的这一个，选了一批
+               * 点删除只掉一个（2026-11-18 用户报的 bug）。 */
+              label: dirInSel && selKeys.length > 1 ? `删除 ${selKeys.length} 项` : '删除文件夹',
               danger: true,
               icon: '<path d="M5 7h14M9 7V5h6v2M7 7l1 12h8l1-12"/>',
-              action: () => confirmDeleteCourse(dirNode),
+              action: () => {
+                if (dirInSel && selKeys.length > 1) removeSelected();
+                else confirmDeleteCourse(dirNode);
+              },
             }
           : null,
         { sep: true },
@@ -6035,15 +6386,84 @@ function bindEvents() {
   /* 主进程代收的 Esc（焦点在 PDF iframe 里时，主文档收不到键盘事件） */
   api.win.onEscape?.(() => handleEscape());
 
+  /* Ctrl+Shift+R「在文件夹中显示」的完整行为（2026-11-18 用户定版）：
+   * 预览开着 → 显示预览中的文件；恰好选中一项 → 在电脑上打开那一项；
+   * 选中多项 → 提示只选一项；没选中 → 打开当前目录在电脑上的位置。
+   * 软件内的虚拟目录（没有对应的磁盘文件夹）会明确提示。 */
+  const revealByShortcut = async () => {
+    if (S.previewFileId) {
+      api.files.reveal(S.previewFileId).catch((x) => toast(x.message, 'error'));
+      return;
+    }
+    const fileIds = [...S.selected];
+    const dirIds = [...S.selectedDirs];
+    if (fileIds.length + dirIds.length > 1) {
+      toast('请选择一个文件或者文件夹', 'error');
+      return;
+    }
+    if (fileIds.length === 1) {
+      api.files.reveal(fileIds[0]).catch((x) => toast(x.message, 'error'));
+      return;
+    }
+    // 选中了一个文件夹，或没选中（打开当前目录）：都要先确认这个
+    // 目录在电脑上有真实位置，没有就按虚拟目录提示。
+    const dirId = dirIds.length === 1
+      ? dirIds[0]
+      : (S.view.type === 'course' ? S.view.courseId : null);
+    if (!dirId) {
+      toast('当前位置只是软件内的视图，在电脑上没有对应的真实文件夹', 'error');
+      return;
+    }
+    const node = S.courses.find((c) => c.id === dirId);
+    try {
+      const info = await api.courses.dir(dirId);
+      if (!info?.dir) {
+        toast(`「${node?.name || '该目录'}」只是软件内的目录，在电脑上没有对应的真实文件夹`, 'error');
+        return;
+      }
+      await api.courses.reveal(dirId);
+    } catch (x) {
+      toast(x.message, 'error');
+    }
+  };
+
+  /* 主进程代收的导航/显示快捷键（同上：焦点在 PDF 子文档里时主文档
+   * 收不到键；Ctrl+Shift+R 还会被默认菜单的强制刷新抢走）。
+   * 主进程在 before-input-event 里拦截并 preventDefault，页面不会
+   * 再收到原始按键，所以这里是唯一入口，不会和旧分支重复触发。 */
+  api.win.onShortcut?.((action) => {
+    if (action === 'nav-up') {
+      goUp();
+      return;
+    }
+    if (action === 'nav-home') {
+      S.view = { type: 'all', courseId: null };
+      clearSearchState();
+      saveLastView();
+      render();
+      return;
+    }
+    if (action === 'reveal') {
+      revealByShortcut();
+    }
+  });
+
   /* 全局键盘 */
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       handleEscape();
     }
-    // Alt+← 返回上级目录
-    if (e.altKey && e.key === 'ArrowLeft') {
+    // Alt+← / Alt+↑ / Ctrl+Shift+R 已移到主进程代收（见 onShortcut），
+    // 这里不再处理，免得焦点在主文档时两条路重复触发。
+    // Ctrl+A：多选模式下全选当前视图的全部文件与文件夹。
+    // 正在输入（搜索框、改名框等）时不抢，留给输入框自己的全选。
+    if (S.selectMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       e.preventDefault();
-      goUp();
+      S.shownIds.forEach((k) => addKey(k));
+      syncSelectedClass();
+      updateSelBar();
       return;
     }
     if (e.ctrlKey && e.key.toLowerCase() === 'm') {
@@ -6127,14 +6547,8 @@ function bindEvents() {
         }
         return;
       }
-      // Ctrl+Shift+R 在文件夹中显示
-      if (k === 'r' && e.shiftKey) {
-        e.preventDefault();
-        if (S.previewFileId) {
-          api.files.reveal(S.previewFileId).catch((x) => toast(x.message, 'error'));
-        }
-        return;
-      }
+      // Ctrl+Shift+R 在文件夹中显示：已移到主进程代收（见 onShortcut），
+      // 这里处理会被默认菜单的强制刷新抢先，永远轮不到。
     }
 
     // Ctrl+, 设置开关。**放在 inField 判断之前**：这是「随时都能按」的
@@ -6145,6 +6559,60 @@ function bindEvents() {
       e.preventDefault();
       toggleModal('settingsModal', openSettings);
       return;
+    }
+
+    /* 视频预览的播放键位：空格播放/暂停，←/→ 回退/快进 5 秒。
+     * 这段必须排在下面的 inField 拦截之前：进度条本身是个
+     * <input type=range>，点过进度条之后焦点就停在它上面，
+     * 按以前的顺序，所有按键先被 inField 以「在输入框里」为由
+     * 拦掉，方向键和空格全部失灵（用户报的 bug）。所以这里
+     * 只对真正的文字输入（文本框/文本域/可编辑区）让行，range
+     * 不算；焦点在进度条上时方向键也走这里的 5 秒步进，
+     * preventDefault 会顺带挡掉滑杆自带的 0.1% 微调，不会动
+     * 两次。焦点在按钮上时空格是按钮自己的点击，不抢。
+     * 目标元素现查现用：优先用预览区里真正在文档中的那个
+     * <video>（缓存引用一旦和实际播放的元素对不上，按键就会
+     * 打在错的元素上）；duration 还不可用（NaN/0）时只做下限
+     * 钳制，绝不把进度钳到 0 —— 上一版在 duration 取不到时
+     * 把 currentTime 钳成了 0，按任何方向键都回到开头。 */
+    if (S.previewFileId && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      const liveVideo = document.querySelector('#previewBody video');
+      const vid = liveVideo || pvVideoEl;
+      if (vid) {
+        const t = e.target;
+        const typing = !!t && (
+          t.tagName === 'TEXTAREA'
+          || t.isContentEditable
+          || (t.tagName === 'INPUT' && t.type !== 'range')
+        );
+        if (!typing) {
+          if (e.key === ' ' && !t.closest?.('button')) {
+            e.preventDefault();
+            if (vid.paused) {
+              const pr = vid.play();
+              if (pr && pr.catch) pr.catch(() => {});
+            } else vid.pause();
+            return;
+          }
+          if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+            e.preventDefault();
+            /* 步长随总时长缩放：长视频 5 秒，短视频按时长十分之一
+               （下限 1 秒）。定死 5 秒时，3 秒的短视频按 ← 直接
+               归零、按 → 直接到尾，看着和「回退到开始」没区别
+               （用户 2026-11-18 自己测出来的）。 */
+            const dur0 = vid.duration;
+            const step = Number.isFinite(dur0) && dur0 > 0
+              ? Math.min(5, Math.max(1, dur0 / 10))
+              : 5;
+            const d = e.key === 'ArrowLeft' ? -step : step;
+            const dur = vid.duration;
+            let next = Math.max(0, (vid.currentTime || 0) + d);
+            if (Number.isFinite(dur) && dur > 0) next = Math.min(next, dur);
+            vid.currentTime = next;
+            return;
+          }
+        }
+      }
     }
 
     // ---- 全局快捷键（输入框里不触发，免得打字时误操作）----
@@ -6190,23 +6658,7 @@ function bindEvents() {
       return;
     }
     // F2 重命名（单张卡片时；多选交给 grid 的 keydown 处理）
-    // Alt+↑ 回到「全部文件」
-    if (e.altKey && e.key === 'ArrowUp') {
-      e.preventDefault();
-      S.view = { type: 'all', courseId: null };
-      clearSearchState();
-      saveLastView();
-      render();
-      return;
-    }
-    // Alt+Home 回到顶层
-    if (e.altKey && e.key === 'Home') {
-      e.preventDefault();
-      S.view = { type: 'all', courseId: null };
-      clearSearchState();
-      saveLastView();
-      render();
-    }
+    // Alt+↑ / Alt+Home 回到「全部文件」：已移到主进程代收（nav-home）。
 
     // Ctrl+C：记下当前选中的条目（只记，不动磁盘）
     if (e.ctrlKey && e.key.toLowerCase() === 'c') {
@@ -6319,7 +6771,14 @@ function openRenameModal(file) {
     : file.name;
 
   input.value = file.name;
-  note.textContent = `会同步修改磁盘上的真实文件名（${file.path || ''}）。只改主名时扩展名 ${ext || '（无）'} 会自动保留。`;
+  /* 这个磁盘文件还有别的记录在共用时，改名走写时复制（先复制
+   * 一份再改名），说明要提前讲清，免得用户以为原件被改了名。 */
+  const sharedFile = file.storage !== 'copy' && !!file.path && S.files.some(
+    (x) => x.id !== file.id && x.storage !== 'copy' && x.path === file.path,
+  );
+  note.textContent = sharedFile
+    ? `这个文件还有其他记录在共用同一个磁盘文件：改名会先在原地复制一份再改名，原文件保留，其他记录不受影响。只改主名时扩展名 ${ext || '（无）'} 会自动保留。`
+    : `会同步修改磁盘上的真实文件名（${file.path || ''}）。只改主名时扩展名 ${ext || '（无）'} 会自动保留。`;
   modal.hidden = false;
 
   const finish = () => {
@@ -6344,7 +6803,11 @@ function openRenameModal(file) {
       const res = await api.files.rename(file.id, next);
       applyState(res.state);
       finish();
-      if (res.changed) toast(`已重命名为「${res.name}」`, 'ok');
+      if (res.changed) {
+        toast(res.forked
+          ? `已重命名为「${res.name}」（原文件还有其他记录在共用，已保留原件）`
+          : `已重命名为「${res.name}」`, 'ok');
+      }
     } catch (err) {
       toast(err.message || '重命名失败', 'error');
     }

@@ -349,7 +349,7 @@
       { key: 'large', label: '大', tick: cfg.size === 'large' },
       { key: 'custom', label: '自定义（' + targetH() + 'px）', tick: cfg.size === 'custom' },
     ];
-    pet.contextMenu({ groups, pets, sizes });
+    pet.contextMenu({ groups, pets, sizes, anchor: { x: e.screenX, y: e.screenY } });
   });
 
   /* ---------------- 主进程通道 ---------------- */

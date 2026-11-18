@@ -49,8 +49,8 @@ contextBridge.exposeInMainWorld('vault', {
     pickFolder: () => invoke('dialog:pickFolder'),
     scan: (paths) => invoke('files:scan', { paths }),
     search: (payload) => invoke('files:search', payload),
-    import: (paths, courseId, mode, dupMode, buildTree) => invoke(
-      'files:import', { paths, courseId, mode, dupMode, buildTree },
+    import: (paths, courseId, mode, dupMode, buildTree, nameOverride) => invoke(
+      'files:import', { paths, courseId, mode, dupMode, buildTree, nameOverride },
     ),
     preview: (id) => invoke('file:preview', id),
     highlight: (id, text) => invoke('file:highlight', { id, text }),
@@ -157,6 +157,13 @@ contextBridge.exposeInMainWorld('vault', {
       const h = () => fn();
       ipcRenderer.on('win:escape', h);
       return () => ipcRenderer.removeListener('win:escape', h);
+    },
+    /** 订阅主进程代收的导航/显示快捷键（Alt+←、Alt+↑、Ctrl+Shift+R）。
+     *  fn 收到 action：nav-up / nav-home / reveal。返回取消订阅函数。 */
+    onShortcut: (fn) => {
+      const h = (_e, action) => fn(action);
+      ipcRenderer.on('win:shortcut', h);
+      return () => ipcRenderer.removeListener('win:shortcut', h);
     },
   },
 

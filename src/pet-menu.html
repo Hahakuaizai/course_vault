@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<title>桌宠菜单</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="pet.css">
+<style>
+  /* 菜单窗口是透明无边框的：页面本身不能带底色，布局也回到
+     普通文档流（styles.css 里有主窗口的整页布局规则，这里覆盖掉） */
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    overflow: hidden;
+    height: auto;
+    display: block;
+  }
+</style>
+</head>
+<body>
+<script src="pets/packs.js"></script>
+<script src="pet-menu.js"></script>
+</body>
+</html>

@@ -49,8 +49,8 @@ contextBridge.exposeInMainWorld('vault', {
     pickFolder: () => invoke('dialog:pickFolder'),
     scan: (paths) => invoke('files:scan', { paths }),
     search: (payload) => invoke('files:search', payload),
-    import: (paths, courseId, mode, dupMode, buildTree) => invoke(
-      'files:import', { paths, courseId, mode, dupMode, buildTree },
+    import: (paths, courseId, mode, dupMode, buildTree, nameOverride) => invoke(
+      'files:import', { paths, courseId, mode, dupMode, buildTree, nameOverride },
     ),
     preview: (id) => invoke('file:preview', id),
     highlight: (id, text) => invoke('file:highlight', { id, text }),
@@ -158,6 +158,15 @@ contextBridge.exposeInMainWorld('vault', {
       ipcRenderer.on('pet:play', h);
       return () => ipcRenderer.removeListener('pet:play', h);
     },
+    /* 桌面自绘菜单窗口（pet-menu.html）专用：主进程把菜单模型
+       和状态发过来，菜单里的选择与关闭请求从这里回去 */
+    onMenuOpen: (fn) => {
+      const h = (_e, data) => fn(data);
+      ipcRenderer.on('pet:menu-open', h);
+      return () => ipcRenderer.removeListener('pet:menu-open', h);
+    },
+    menuAction: (a) => ipcRenderer.send('pet:menu-action', a),
+    menuClose: () => ipcRenderer.send('pet:menu-close'),
   },
 
   win: {
@@ -171,6 +180,13 @@ contextBridge.exposeInMainWorld('vault', {
       const h = () => fn();
       ipcRenderer.on('win:escape', h);
       return () => ipcRenderer.removeListener('win:escape', h);
+    },
+    /** 订阅主进程代收的导航/显示快捷键（Alt+←、Alt+↑、Ctrl+Shift+R）。
+     *  fn 收到 action：nav-up / nav-home / reveal。返回取消订阅函数。 */
+    onShortcut: (fn) => {
+      const h = (_e, action) => fn(action);
+      ipcRenderer.on('win:shortcut', h);
+      return () => ipcRenderer.removeListener('win:shortcut', h);
     },
   },
 

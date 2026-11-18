@@ -512,6 +512,7 @@
   let menuEl = null;
 
   function closeMenu() {
+    hidePetHover();
     if (!menuEl) return;
     menuEl.remove();
     menuEl = null;
@@ -669,14 +670,116 @@
     return root;
   }
 
+  /* ---------------- 换宠菜单的悬停动态预览 ----------------
+     悬停在「更换宠物」的某个名字上时，在菜单旁边浮出和设置页
+     同款的动态预览（idle 动画），方便先看清形象再决定。
+     摆位以子菜单面板为参照：优先右侧，右侧放不下换左侧，
+     两侧都不够就贴着视口边缘 —— 绝不压住菜单本身。 */
+
+  let petHoverEl = null;
+  let petHoverStop = null;
+
+  function hidePetHover() {
+    if (petHoverStop) { try { petHoverStop(); } catch { /* 已停 */ } petHoverStop = null; }
+    if (petHoverEl) { petHoverEl.remove(); petHoverEl = null; }
+  }
+
+  /* 预览摆位：候选位置依次试 —— 子菜单右侧、子菜单左侧、整个
+     菜单簇（根菜单+所有已展开子菜单）右侧、菜单簇左侧、菜单簇
+     下方、上方；第一个「完整落在视口内且不和任何已打开菜单
+     重叠」的位置胜出，都不完美时取重叠最少的。旧逻辑只看视口
+     不看菜单：子菜单翻到左侧时，预览按「子菜单右侧」摆正好
+     压在根菜单上（用户报的 bug，靠边时必现）。 */
+  function placeHoverPanel(el, anchorEl) {
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const rects = [];
+    document.querySelectorAll('.cv-pet-menu').forEach((n) => rects.push(n.getBoundingClientRect()));
+    document.querySelectorAll('.cv-pet-menu .mi.sub-open > .sub').forEach((n) => rects.push(n.getBoundingClientRect()));
+    if (!rects.length) rects.push(anchorEl.getBoundingClientRect());
+    const ir = anchorEl.getBoundingClientRect();
+    const sub = anchorEl.closest('.sub');
+    const sr = (sub || anchorEl).getBoundingClientRect();
+    const bx = Math.min(...rects.map((r) => r.left));
+    const bxx = Math.max(...rects.map((r) => r.right));
+    const by = Math.min(...rects.map((r) => r.top));
+    const byy = Math.max(...rects.map((r) => r.bottom));
+    const yItem = Math.min(Math.max(4, ir.top - 6), Math.max(4, vh - 4 - h));
+    const xSub = Math.min(Math.max(4, sr.left), Math.max(4, vw - 4 - w));
+    const candidates = [
+      { x: sr.right + 8, y: yItem },
+      { x: sr.left - w - 8, y: yItem },
+      { x: bxx + 8, y: yItem },
+      { x: bx - w - 8, y: yItem },
+      { x: xSub, y: byy + 8 },
+      { x: xSub, y: by - h - 8 },
+    ];
+    const overlap = (x, y) => rects.reduce((acc, r) => {
+      const ox = Math.max(0, Math.min(x + w, r.right) - Math.max(x, r.left));
+      const oy = Math.max(0, Math.min(y + h, r.bottom) - Math.max(y, r.top));
+      return acc + ox * oy;
+    }, 0);
+    const inView = (x, y) => x >= 4 && y >= 4 && x + w <= vw - 4 && y + h <= vh - 4;
+    let best = null;
+    let bestScore = Infinity;
+    for (const c of candidates) {
+      if (inView(c.x, c.y) && overlap(c.x, c.y) === 0) { best = c; break; }
+      let score = overlap(c.x, c.y);
+      if (!inView(c.x, c.y)) score += 1000000;
+      if (score < bestScore) { bestScore = score; best = c; }
+    }
+    el.style.left = Math.min(Math.max(4, best.x), Math.max(4, vw - 4 - w)) + 'px';
+    el.style.top = Math.min(Math.max(4, best.y), Math.max(4, vh - 4 - h)) + 'px';
+    el.classList.add('is-placed');
+  }
+
+  async function showPetHover(petId, anchorEl) {
+    hidePetHover();
+    if (petId === 'none') return;
+    let pk = null;
+    let urlFor = null;
+    if (petId === 'custom') {
+      const custom = await getCustom();
+      if (!custom) return;
+      pk = custom.manifest;
+      urlFor = (n) => {
+        const data = custom.files.get(custom.prefix + n);
+        if (!data) return '';
+        const url = URL.createObjectURL(new Blob([data], { type: 'image/png' }));
+        blobURLs.push(url);
+        return url;
+      };
+    } else {
+      pk = (window.CVPacks || {})[petId];
+      if (!pk) return;
+      urlFor = (n) => 'pets/' + petId + '/' + n;
+    }
+    /* await 期间指针可能已经移走、菜单可能已经关了 */
+    if (!menuEl || !anchorEl.isConnected) return;
+    const el = document.createElement('div');
+    el.className = 'cv-pet-hoverprev';
+    const cv = document.createElement('canvas');
+    el.appendChild(cv);
+    document.body.appendChild(el);
+    petHoverEl = el;
+    petHoverStop = startPreview(cv, pk, urlFor, { h: 104, w: 128 }, () => {
+      if (petHoverEl !== el) return;
+      placeHoverPanel(el, anchorEl);
+    });
+  }
+
   function buildPetSub() {
     const sub = subMenu(false);
-    for (const b of BUILTINS) {
-      sub.appendChild(menuItem(b.label, { tick: cfg.pet === b.id, onClick: () => setPet(b.id) }));
-    }
-    if (cfg.customName) {
-      sub.appendChild(menuItem(cfg.customName, { tick: cfg.pet === 'custom', onClick: () => setPet('custom') }));
-    }
+    const addItem = (id, label, tick) => {
+      const it = menuItem(label, { tick, onClick: () => setPet(id) });
+      it.addEventListener('pointerenter', () => showPetHover(id, it));
+      it.addEventListener('pointerleave', hidePetHover);
+      sub.appendChild(it);
+    };
+    for (const b of BUILTINS) addItem(b.id, b.label, cfg.pet === b.id);
+    if (cfg.customName) addItem('custom', cfg.customName, cfg.pet === 'custom');
     const sep = document.createElement('div');
     sep.className = 'sep';
     sub.appendChild(sep);
@@ -848,6 +951,8 @@
   async function buildExternalCfg() {
     const pc = petCfg();
     const out = { pet: cfg.pet, size: pc.size, sizePx: pc.sizePx, customName: cfg.customName, custom: null };
+    /* 桌面菜单窗口要跟随当前主题配色，把主题名一起带过去 */
+    out.theme = document.documentElement.getAttribute('data-theme') || '';
     if (cfg.pet === 'custom') {
       const parsed = await getCustom();
       if (parsed) {
@@ -939,35 +1044,92 @@
     previewStops = [];
   }
 
-  /* 在小 canvas 上循环播某个包的 idle 动画，返回停止函数 */
-  function startPreview(cv, pk, urlFor) {
-    const anim = pk.animations.idle;
-    if (!anim) return () => {};
+  /* 在小 canvas 上循环播某个包的 idle 动画，返回停止函数。
+     fit = {h, w}：预览里「角色」要占的目标高度和最大宽度。
+     角色范围按包的 contentBox 算：contentBox 完整落在帧内时，
+     它就是角色在帧里的区域（女仆、坤坤的帧里有大量留白），
+     按它裁剪再缩放，各只宠物的角色高度就统一了；contentBox
+     是画布坐标、帧本身已裁好的包（鲸娘等）裁剪会越界，
+     自动回退整帧。onSized 在首帧定好尺寸后回调（悬停预览
+     要等尺寸确定了才摆位）。 */
+  /* 预览该播哪个动画：idle 够生动就用 idle；idle 帧太少或单帧
+     定格太久（克码人生 idle 共 2 帧、第一帧定格 5.2 秒只眨一下
+     眼，卡片里看着完全静止 —— 用户报的问题）时，换一个帧数多、
+     单帧不拖沓的动作来展示；实在挑不出来，就把 idle 的单帧
+     时长压到 450ms 播。只影响预览，桌宠本体仍按原 idle 播。 */
+  function pickPreviewAnim(pk) {
+    const anims = (pk && pk.animations) || {};
+    const idle = anims.idle;
+    if (!idle) return null;
+    const stats = (a) => {
+      const frames = Array.isArray(a.frames) && a.frames.length ? a.frames : null;
+      return {
+        n: frames ? frames.length : (a.count || 1),
+        maxHold: frames ? Math.max(...frames.map((f) => f.ms || 120)) : (a.ms || 140),
+      };
+    };
+    const si = stats(idle);
+    if (si.n >= 3 && si.maxHold <= 1500) return { anim: idle, capMs: 0 };
+    /* 展示动画避开错误/掉线/睡觉这类状态梗动画（克码人生的
+       detached 是「脑袋掉了」，帧数最多但不适合当门面） */
+    const GAG = /error|detached|banned|sleep|dead|fail|bug/i;
+    let best = null;
+    let bestN = 0;
+    for (const [name, a] of Object.entries(anims)) {
+      if (GAG.test(name)) continue;
+      const s = stats(a);
+      if (s.n >= 6 && s.maxHold <= 800 && s.n > bestN) { best = a; bestN = s.n; }
+    }
+    if (best) return { anim: best, capMs: 0 };
+    return { anim: idle, capMs: 450 };
+  }
+
+  function startPreview(cv, pk, urlFor, fit, onSized) {
+    const pick = pickPreviewAnim(pk);
+    if (!pick) return () => {};
+    const anim = pick.anim;
+    const targetH = (fit && fit.h) || 72;
+    const maxW = (fit && fit.w) || 88;
     const img = new Image();
     let timer = 0;
     let stopped = false;
     img.onload = () => {
       if (stopped) return;
-      const frames = frameList(anim, img);
-      cv.width = anim.frameW;
-      cv.height = anim.frameH;
-      const box = pk.contentBox || { w: anim.frameW, h: anim.frameH };
-      const k = Math.min(56 / Math.max(1, box.h * (pk.scale || 1)), 80 / anim.frameW);
-      cv.style.width = Math.round(anim.frameW * k) + 'px';
-      cv.style.height = Math.round(anim.frameH * k) + 'px';
+      const frames = frameList(anim, img).map((f) => (
+        pick.capMs && (f.ms || 120) > pick.capMs ? { ...f, ms: pick.capMs } : f
+      ));
+      const scale = pk.scale || 1;
+      const fwL = anim.frameW / scale;
+      const fhL = anim.frameH / scale;
+      let crop = { x: 0, y: 0, w: fwL, h: fhL };
+      const cb = pk.contentBox;
+      if (cb && cb.w > 0 && cb.h > 0 && cb.x >= 0 && cb.y >= 0
+        && cb.x + cb.w <= fwL + 0.5 && cb.y + cb.h <= fhL + 0.5) {
+        crop = { x: cb.x, y: cb.y, w: cb.w, h: cb.h };
+      }
+      const k = Math.min(
+        targetH / Math.max(1, crop.h * scale),
+        maxW / Math.max(1, crop.w * scale),
+      );
+      cv.width = Math.max(1, Math.round(crop.w * scale));
+      cv.height = Math.max(1, Math.round(crop.h * scale));
+      cv.style.width = Math.round(crop.w * scale * k) + 'px';
+      cv.style.height = Math.round(crop.h * scale * k) + 'px';
       const c2 = cv.getContext('2d');
       const cols = anim.cols || 1;
       let idx = 0;
       const tick = () => {
         if (stopped) return;
         const f = frames[idx];
+        const fx = (f.i % cols) * anim.frameW + crop.x * scale;
+        const fy = Math.floor(f.i / cols) * anim.frameH + crop.y * scale;
         c2.clearRect(0, 0, cv.width, cv.height);
-        c2.drawImage(img, (f.i % cols) * anim.frameW, Math.floor(f.i / cols) * anim.frameH,
-          anim.frameW, anim.frameH, 0, 0, anim.frameW, anim.frameH);
+        c2.drawImage(img, fx, fy, crop.w * scale, crop.h * scale, 0, 0, cv.width, cv.height);
         idx = (idx + 1) % frames.length;
         timer = setTimeout(tick, Math.max(40, f.ms || 120));
       };
       tick();
+      if (onSized) onSized();
     };
     img.src = urlFor(anim.sheet);
     return () => { stopped = true; clearTimeout(timer); };
@@ -1037,8 +1199,12 @@
     }
     const noneCard = petCard('none', '不显示');
     const nIcon = document.createElement('div');
-    nIcon.className = 'pet-card-icon';
-    nIcon.textContent = '✕';
+    nIcon.className = 'pet-card-icon pet-card-icon-none';
+    /* 「不显示」不用叉号：一根微微发光的白色横条，悬在展示区
+       下部（不贴底），表示「空无一物」（用户定的样式） */
+    const nBar = document.createElement('span');
+    nBar.className = 'pet-none-bar';
+    nIcon.appendChild(nBar);
     noneCard.appendChild(nIcon);
     const nName = document.createElement('div');
     nName.className = 'pet-card-name';
@@ -1186,6 +1352,13 @@
         if (!cmd) return;
         if (cmd.type === 'setPet') setPet(cmd.id);
         else if (cmd.type === 'setSize') setSize(cmd.key);
+        else if (cmd.type === 'setSizePx') {
+          /* 桌面菜单里的大小滑块拖出来的像素值：切到自定义并
+             落到这个大小，再把新配置同步回桌面窗口即时生效 */
+          setPetCfg({ size: 'custom', sizePx: Math.min(200, Math.max(40, Number(cmd.px) || 92)) });
+          syncSettingsUI();
+          syncExternal();
+        }
         else if (cmd.type === 'setMode') setMode(cmd.mode);
         else if (cmd.type === 'dockInside') {
           /* 桌面上的宠物被拖回窗口内松手（或点了「切回软件内显示」）：

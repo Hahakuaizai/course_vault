@@ -121,6 +121,7 @@ function register({ ipcMain, app, getWin }) {
   }
 
   function closePetWin() {
+    closeMenuWin();
     if (!petWin) return;
     savePos();
     const w = petWin;
@@ -167,6 +168,121 @@ function register({ ipcMain, app, getWin }) {
     closePetWin();
   }
 
+  /* --- 桌面自绘菜单窗口 ---
+     以前右键弹系统原生菜单：悬停预览做不了，大小滑块也塞不下。
+     现在改成一个无边框透明小窗口（pet-menu.html），菜单、预览、
+     滑块都和软件内同款；窗口给足尺寸（560×600 上限、按工作区
+     夹取），菜单根落在右键点上，子菜单和预览在窗口内摆位。
+     原生菜单只作兜底（自绘窗口建不起来时）。 */
+  let menuWin = null;
+
+  function createMenuWin() {
+    if (menuWin && !menuWin.isDestroyed()) return menuWin;
+    menuWin = new BrowserWindow({
+      width: 560,
+      height: 600,
+      transparent: true,
+      frame: false,
+      resizable: false,
+      hasShadow: false,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      focusable: true,
+      show: false,
+      webPreferences: {
+        preload: path.join(__dirname, '..', 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
+    menuWin.setAlwaysOnTop(true, 'screen-saver');
+    menuWin.loadFile(path.join(__dirname, 'pet-menu.html'));
+    /* 点到别的应用/桌面就收起（点回宠物本体时 move-by 也会关） */
+    menuWin.on('blur', () => { if (menuWin && !menuWin.isDestroyed()) menuWin.hide(); });
+    menuWin.on('closed', () => { menuWin = null; });
+    return menuWin;
+  }
+
+  function closeMenuWin() {
+    if (menuWin && !menuWin.isDestroyed()) menuWin.hide();
+  }
+
+  function openMenuWin(model) {
+    const anchor = (model && model.anchor) || { x: 0, y: 0 };
+    const w = createMenuWin();
+    const wa = screen.getDisplayNearestPoint(anchor).workArea;
+    const width = Math.min(560, wa.width);
+    const height = Math.min(600, wa.height);
+    let x = Math.round(anchor.x - width / 2);
+    let y = Math.round(anchor.y - 70);
+    x = Math.min(Math.max(x, wa.x), wa.x + wa.width - width);
+    y = Math.min(Math.max(y, wa.y), wa.y + wa.height - height);
+    w.setBounds({ x, y, width, height });
+    const payload = {
+      model,
+      theme: (lastCfg && lastCfg.theme) || '',
+      pet: lastCfg ? lastCfg.pet : '',
+      sizePx: lastCfg ? lastCfg.sizePx : 92,
+      customName: lastCfg ? lastCfg.customName : '',
+      anchorInWin: { x: anchor.x - x, y: anchor.y - y },
+      flip: anchor.x - x > width / 2,
+      customPreview: null,
+    };
+    /* 自定义包只带 idle 那一张精灵图给悬停预览用，免得整包转发 */
+    if (lastCfg && lastCfg.custom) {
+      const c = lastCfg.custom;
+      const idle = c.manifest && c.manifest.animations && c.manifest.animations.idle;
+      if (idle && idle.sheet) {
+        const b64 = (c.files || {})[(c.prefix || '') + idle.sheet];
+        if (b64) payload.customPreview = { manifest: c.manifest, b64 };
+      }
+    }
+    const send = () => {
+      if (!menuWin || menuWin.isDestroyed()) return;
+      menuWin.webContents.send('pet:menu-open', payload);
+      menuWin.show();
+      menuWin.focus();
+    };
+    if (w.webContents.isLoading()) w.webContents.once('did-finish-load', send);
+    else send();
+  }
+
+  const fromMenuWin = (e) => menuWin && !menuWin.isDestroyed()
+    && BrowserWindow.fromWebContents(e.sender) === menuWin;
+
+  ipcMain.on('pet:menu-close', (e) => {
+    if (fromMenuWin(e)) closeMenuWin();
+  });
+
+  ipcMain.on('pet:menu-action', (e, a) => {
+    if (!fromMenuWin(e) || !a) return;
+    dbg('menu-action ' + a.type);
+    if (a.type === 'play') {
+      if (petWin) petWin.webContents.send('pet:play', a.id);
+      closeMenuWin();
+    } else if (a.type === 'setPet') {
+      sendCmd({ type: 'setPet', id: a.id });
+      closeMenuWin();
+    } else if (a.type === 'setSize') {
+      sendCmd({ type: 'setSize', key: a.key });
+      /* 选「自定义」不关菜单：菜单窗口里接着弹大小滑块 */
+      if (a.key !== 'custom') closeMenuWin();
+    } else if (a.type === 'setSizePx') {
+      /* 滑块拖动中连续发，只转发不关菜单 */
+      sendCmd({ type: 'setSizePx', px: a.px });
+    } else if (a.type === 'openSettings') {
+      sendCmd({ type: 'openSettings' });
+      closeMenuWin();
+    } else if (a.type === 'dock') {
+      closeMenuWin();
+      dockInside();
+    } else if (a.type === 'hide') {
+      sendCmd({ type: 'setPet', id: 'none' });
+      closeMenuWin();
+    }
+  });
+
   /* --- 主窗口 → 外部窗口 --- */
 
   ipcMain.handle('pet:external-open', (_e, cfg) => {
@@ -193,6 +309,7 @@ function register({ ipcMain, app, getWin }) {
 
   ipcMain.on('pet:move-by', (e, d) => {
     if (!fromPetWin(e)) { dbgReject('move-by'); return; }
+    closeMenuWin(); // 拖动开始时菜单还开着就先收起
     if (!d) return;
     const b = petWin.getBounds();
     petWin.setPosition(b.x + Math.round(d.dx || 0), b.y + Math.round(d.dy || 0));
@@ -271,13 +388,25 @@ function register({ ipcMain, app, getWin }) {
     sendCmd({ type: 'stayOut' });
   });
 
-  /* 右键菜单用系统原生的：宠物窗口只有宠物本体那么大，
-     HTML 菜单弹不下；原生菜单不受窗口边界限制。
+  /* 右键菜单优先用自绘窗口（pet-menu.html，见上方菜单窗口一节）：
+     悬停预览和大小滑块都靠它。自绘窗口建不起来时回退系统原生
+     菜单（功能子集：没有预览，自定义大小仍去设置页拉滑块）。
      菜单模型由 pet-stage.js 按当前宠物包组装。 */
   ipcMain.on('pet:context-menu', (e, model) => {
     if (!fromPetWin(e)) { dbgReject('context-menu'); return; }
     if (!model) return;
-    dbg('context-menu: popup');
+    try {
+      openMenuWin(model);
+      dbg('context-menu: dom menu');
+      return;
+    } catch (err) {
+      dbg('context-menu: dom menu failed, fallback native: ' + (err && err.message));
+    }
+    popupNativeMenu(model);
+  });
+
+  function popupNativeMenu(model) {
+    dbg('context-menu: popup native');
     const template = [];
     const groups = (model.groups || []).filter((g) => (g.items || []).length);
     if (groups.length) {
@@ -321,7 +450,7 @@ function register({ ipcMain, app, getWin }) {
     template.push({ label: '切回软件内显示', click: () => dockInside() });
     template.push({ label: '隐藏桌宠', click: () => sendCmd({ type: 'setPet', id: 'none' }) });
     Menu.buildFromTemplate(template).popup({ window: petWin });
-  });
+  }
 
   /* 【临时诊断】舞台侧的事件回传（按下/松手/右键/收到配置与命令） */
   ipcMain.on('pet:debug', (e, msg) => {
@@ -353,7 +482,11 @@ function register({ ipcMain, app, getWin }) {
     }
   });
 
-  app.on('before-quit', () => { flushCfg(); closePetWin(); });
+  app.on('before-quit', () => {
+    flushCfg();
+    if (menuWin && !menuWin.isDestroyed()) { const w = menuWin; menuWin = null; w.close(); }
+    closePetWin();
+  });
 }
 
 module.exports = { register };

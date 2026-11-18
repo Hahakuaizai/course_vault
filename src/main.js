@@ -1,7 +1,7 @@
 'use strict';
 
 const {
-  app, BrowserWindow, ipcMain, dialog, shell, protocol, net, nativeTheme, screen,
+  app, BrowserWindow, ipcMain, dialog, shell, protocol, net, nativeTheme, screen, Menu,
 } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -1356,7 +1356,134 @@ function ensureCourse(name, parentId, sourcePath, index) {
   return course;
 }
 
-async function importFiles({ paths, courseId, mode, dupMode, buildTree }) {
+/**
+ * 导入文件夹专用（重复处理选「允许重复」时）：不并入已有的同名
+ * 目录，而是另建一个 原名（1）、原名（2）……，整棵文件夹树挂在
+ * 新目录下。以前这里和 ensureCourse 一样按名字合并，用户重复导入
+ * 同一个文件夹时期望得到一份并列的副本，结果文件全灌进了原目录
+ * （2026-11-18 用户报的重大 bug）。
+ */
+function ensureFreshCourse(name, parentId, sourcePath, index) {
+  const clean = String(name || '').trim() || '未命名';
+  const found = index
+    ? index.get(clean, parentId)
+    : state.courses.find(
+      (c) => (c.parentId || null) === (parentId || null) && c.name === clean,
+    );
+  const taken = takenNamesIn(parentId);
+  // 没有同名目录、名字也没被同层文件占用：和普通导入一样建
+  if (!found && !taken.has(clean)) {
+    return ensureCourse(clean, parentId, sourcePath, index);
+  }
+  const course = {
+    id: uid(),
+    name: dedupeName(clean, taken, false),
+    color: '#5b8def',
+    parentId: parentId || null,
+    createdAt: Date.now(),
+  };
+  if (sourcePath) course.sourcePath = sourcePath;
+  state.courses.push(course);
+  if (index) index.add(course);
+  return course;
+}
+
+/**
+ * 某个目录内已占用的名字集合：它的子目录名 + 它名下的文件名。
+ * 文件和文件夹在网格里同处一层展示，命名共用一个命名空间——
+ * 新建/添加时要对两者一起避让（2026-11-18 用户定版）。
+ * dirId 为 null 表示最外层。
+ */
+function takenNamesIn(dirId) {
+  const taken = new Set();
+  for (const c of state.courses) {
+    if ((c.parentId || null) === (dirId || null)) taken.add(c.name);
+  }
+  for (const f of state.files) {
+    if ((f.courseId || null) === (dirId || null)) taken.add(f.name);
+  }
+  return taken;
+}
+
+/**
+ * 名字被占用时生成「原名（1）」「原名（2）」……第一个空缺序号。
+ * 文件名把序号插在扩展名之前：报告.pdf → 报告（1）.pdf。
+ * 生成后把新名字加回 taken 集合，同一批次连续调用不会互相撞名。
+ */
+function dedupeName(name, taken, isFile) {
+  if (!taken.has(name)) {
+    taken.add(name);
+    return name;
+  }
+  let base = name;
+  let ext = '';
+  if (isFile) {
+    const dot = name.lastIndexOf('.');
+    if (dot > 0) {
+      base = name.slice(0, dot);
+      ext = name.slice(dot);
+    }
+  }
+  for (let n = 1; ; n += 1) {
+    const cand = `${base}（${n}）${ext}`;
+    if (!taken.has(cand)) {
+      taken.add(cand);
+      return cand;
+    }
+  }
+}
+
+/**
+ * 写时复制（2026-11-18 用户定的方案）：一条链接记录要改磁盘文件
+ * 的内容之前，先看有没有别的记录指着同一个磁盘文件（比对口径
+ * 和 makePathIndex 一致：入库副本记录不算）。有，就把文件在同
+ * 目录复制一份「名称（1）.ext」，只让当前记录改指向副本，之后
+ * 的写入落在副本上 —— 别的记录继续指着原件，编辑互不影响。
+ * 没被共享就什么都不做。返回 true 表示这次分叉了。
+ */
+async function forkIfShared(f) {
+  if (!f || f.storage === 'copy' || !f.path) return false;
+  const self = path.resolve(f.path);
+  const shared = state.files.some(
+    (x) => x.id !== f.id && x.storage !== 'copy' && x.path
+      && path.resolve(x.path) === self,
+  );
+  if (!shared) return false;
+  const dir = path.dirname(self);
+  const base = path.basename(self);
+  const ext = path.extname(base);
+  const stem = ext ? base.slice(0, -ext.length) : base;
+  let n = 1;
+  let candidate = path.join(dir, `${stem}（${n}）${ext}`);
+  while (fs.existsSync(candidate)) {
+    n += 1;
+    candidate = path.join(dir, `${stem}（${n}）${ext}`);
+  }
+  await fsp.copyFile(self, candidate);
+  f.path = candidate;
+  // 显示名一直和磁盘名一致时跟着换；用户自己改过的显示名
+  // （导入时改名）不动。
+  if (f.name === base) f.name = path.basename(candidate);
+  return true;
+}
+
+async function importFiles({ paths, courseId, mode, dupMode, buildTree, nameOverride = null }) {
+  /* 导入弹窗里改的名字（只在恰好选了一项时给）：只改库里显示的
+   * 名字，磁盘上的原文件/文件夹不动，记录的路径也还是真实路径，
+   * 所以路径显示、在文件夹中显示都不受影响。 */
+  const cleanOverride = String(nameOverride || '').trim();
+  if (cleanOverride && /[\\/:*?"<>|]/.test(cleanOverride)) {
+    throw new Error('名称不能包含 \\ / : * ? " < > | 这些字符');
+  }
+  const useOverride = cleanOverride && (paths || []).length === 1
+    ? cleanOverride
+    : null;
+  let singleIsDir = false;
+  if (useOverride) {
+    try {
+      singleIsDir = (await fsp.stat(path.resolve(paths[0]))).isDirectory();
+    } catch { /* 探测失败就当文件处理 */ }
+  }
   // courseId 为 null 表示导入到「全部文件」这一层：
   // 选中的文件夹本身会变成顶层目录，文件则直接挂在最外层。
   if (courseId && !state.courses.some((c) => c.id === courseId)) {
@@ -1385,7 +1512,12 @@ async function importFiles({ paths, courseId, mode, dupMode, buildTree }) {
     if (!isDir) continue;
     const abs = path.resolve(p);
     // 导入到某个目录里 → 在它下面建同名子目录；导入到「全部文件」→ 建顶层目录
-    const baseCourseId = ensureCourse(path.basename(abs), courseId || null, abs, courseIdx).id;
+    // 「允许重复」时不并入已有同名目录，另建 原名（1）（见 ensureFreshCourse）
+    // 弹窗里改了名（单选文件夹时）就用新名建目录，磁盘原名不动。
+    const dirName = useOverride && singleIsDir ? useOverride : path.basename(abs);
+    const baseCourseId = (dup === 'allow'
+      ? ensureFreshCourse(dirName, courseId || null, abs, courseIdx)
+      : ensureCourse(dirName, courseId || null, abs, courseIdx)).id;
     bases.push({ base: abs, baseCourseId });
   }
 
@@ -1418,9 +1550,24 @@ async function importFiles({ paths, courseId, mode, dupMode, buildTree }) {
   // 否则同一次导入里出现两次的路径会各记一条。
   const pathIdx = makePathIndex(state.files);
 
+  // 目录 → 已占用名字集合（缓存）。导入途中分配掉的名字会写回
+  // 集合里，同一批次导入的同名文件依次避让成（1）（2）。
+  const takenByDir = new Map();
+  const takenFor = (dirId) => {
+    const k = dirId || null;
+    let s = takenByDir.get(k);
+    if (!s) {
+      s = takenNamesIn(k);
+      takenByDir.set(k, s);
+    }
+    return s;
+  };
+
   for (const src of raw) {
-    const name = path.basename(src);
-    const ext = path.extname(name).toLowerCase();
+    // 弹窗里改了名（单选文件时）只换库里显示的名字；ext 仍按
+    // 磁盘上的真名算，免得把扩展名改没了之后类型识别跟着错。
+    const name = useOverride && !singleIsDir ? useOverride : path.basename(src);
+    const ext = path.extname(path.basename(src)).toLowerCase();
     const real = path.resolve(src);
 
     let st;
@@ -1451,11 +1598,14 @@ async function importFiles({ paths, courseId, mode, dupMode, buildTree }) {
       continue;
     }
 
+    // 与目标目录内已有项（文件或子目录）重名时改名 原名（1）（2）…
+    // 同路径重复导入的 skip/replace 在上面已处理，这里只管新记录。
+    const finalName = dedupeName(name, takenFor(targetCourseId), true);
     const id = uid();
     const rec = {
       id,
       courseId: targetCourseId,
-      name,
+      name: finalName,
       ext,
       size: st.size,
       mtime: st.mtimeMs,
@@ -1831,7 +1981,11 @@ async function restoreTrash(entryId) {
 
   // 目录先回来，文件才挂得住
   for (const c of entry.courses) {
-    if (!state.courses.some((x) => x.id === c.id)) state.courses.push(c);
+    if (state.courses.some((x) => x.id === c.id)) continue;
+    // 还原期间原位置可能已经有了同名项，按（1）（2）顺延
+    // （全软件统一的重名处理）
+    c.name = dedupeName(c.name, takenNamesIn(c.parentId || null), false);
+    state.courses.push(c);
   }
 
   for (const f of entry.files) {
@@ -1847,6 +2001,8 @@ async function restoreTrash(entryId) {
         rest.path = trashedPath;
       }
     }
+    // 还原撞名顺延（同上）
+    rest.name = dedupeName(rest.name, takenNamesIn(rest.courseId || null), true);
     state.files.push(rest);
   }
 
@@ -2457,7 +2613,24 @@ function createWindow() {
    * 注意 focusedFrame 是**只读属性不是方法**，写成 focusedFrame() 会
    * 拿到 undefined，判定永远为 false，消息一条也发不出去。 */
   win.webContents.on('before-input-event', (e, input) => {
-    if (input.type !== 'keyDown' || input.key !== 'Escape') return;
+    if (input.type !== 'keyDown') return;
+
+    /* 导航/显示类快捷键也由主进程代收，理由同 Esc：焦点在 PDF
+     * 子文档里时主文档收不到键；而且 Ctrl+Shift+R 会被默认菜单的
+     * 「强制重新加载」抢走（应用菜单已关，这里再兜一层）。
+     * 在这里 preventDefault 后页面就不会再收到这次按键，渲染进程
+     * 只走 IPC 这一条路，不会重复触发。 */
+    let action = null;
+    if (input.alt && input.key === 'ArrowLeft') action = 'nav-up';
+    else if (input.alt && (input.key === 'ArrowUp' || input.key === 'Home')) action = 'nav-home';
+    else if (input.control && input.shift && (input.key === 'R' || input.key === 'r')) action = 'reveal';
+    if (action) {
+      e.preventDefault();
+      win.webContents.send('win:shortcut', action);
+      return;
+    }
+
+    if (input.key !== 'Escape') return;
     let inSubframe = false;
     try {
       const frame = win.webContents.focusedFrame;
@@ -2552,13 +2725,12 @@ function registerIpc() {
     if (parent && !state.courses.some((c) => c.id === parent)) {
       throw new Error('上级目录不存在');
     }
-    // 同一层级下不允许重名
-    if (state.courses.some((c) => (c.parentId || null) === parent && c.name === trimmed)) {
-      throw new Error('同一层级下已存在同名目录');
-    }
+    // 与同层已有的目录/文件重名时自动改名 原名（1）、原名（2）…
+    // （2026-11-18 用户定版：不再报错拦下新建）
+    const finalName = dedupeName(trimmed, takenNamesIn(parent), false);
     const course = {
       id: uid(),
-      name: trimmed,
+      name: finalName,
       color: color || '#5b8def',
       parentId: parent,
       createdAt: Date.now(),
@@ -2573,14 +2745,12 @@ function registerIpc() {
     if (!course) throw new Error('目录不存在');
     const trimmed = String(name || '').trim();
     if (!trimmed) throw new Error('名称不能为空');
-    if (state.courses.some(
-      (c) => c.id !== id
-        && (c.parentId || null) === (course.parentId || null)
-        && c.name === trimmed,
-    )) {
-      throw new Error('同一层级下已存在同名目录');
-    }
-    course.name = trimmed;
+    // 改名撞上同层已有的目录/文件时按（1）（2）顺延，不再报错
+    // （2026-11-18 用户定版：全软件统一的重名处理）。自己原来的
+    // 名字先从占用集合里摘掉，改回原名不算撞名。
+    const taken = takenNamesIn(course.parentId || null);
+    taken.delete(course.name);
+    course.name = dedupeName(trimmed, taken, false);
     saveStateNow();
     return snapshot();
   });
@@ -2627,10 +2797,10 @@ function registerIpc() {
         cur = state.courses.find((c) => c.id === cur)?.parentId || null;
       }
     }
-    if (state.courses.some(
-      (c) => c.id !== id && (c.parentId || null) === target && c.name === node.name,
-    )) {
-      throw new Error('目标位置已有同名目录');
+    // 移到原地时名字不动；换了位置且目标层已有同名项（文件或
+    // 目录）时按（1）（2）顺延，不再报错拦下（全软件统一的重名处理）
+    if (target !== (node.parentId || null)) {
+      node.name = dedupeName(node.name, takenNamesIn(target), false);
     }
     node.parentId = target;
     saveStateNow();
@@ -2757,7 +2927,10 @@ function registerIpc() {
       try { dir = app.getPath('desktop'); } catch { dir = app.getPath('userData'); }
     }
     await fsp.mkdir(dir, { recursive: true });
-    const target = uniqueTarget(dir, fileName);
+    // 与目标目录内已有文件/子目录重名时，先按 原名（1）（2）改名，
+    // 再交给 uniqueTarget 做磁盘层面的同名避让（2026-11-18 用户定版）
+    const wantedName = dedupeName(fileName, takenNamesIn(courseId), true);
+    const target = uniqueTarget(dir, wantedName);
     // 同名时实际落盘名字会带 (1)，界面跟着用真实名字
     const displayName = path.basename(target);
 
@@ -3096,6 +3269,15 @@ function registerIpc() {
     const oldExt = path.extname(oldPath);
     if (oldExt && !path.extname(next)) next += oldExt;
 
+    // 和同目录里其他记录撞名（对方的磁盘文件在别的位置）时按
+    // （1）（2）顺延，磁盘上的新名字跟着用顺延后的（全软件统一
+    // 的重名处理）；自己原来的名字不算撞名。
+    {
+      const taken = takenNamesIn(f.courseId || null);
+      taken.delete(f.name);
+      next = dedupeName(next, taken, true);
+    }
+
     const dir = path.dirname(oldPath);
     const target = path.join(dir, next);
     if (path.resolve(target) === path.resolve(oldPath)) {
@@ -3105,8 +3287,17 @@ function registerIpc() {
       throw new Error(`「${next}」已经存在，换一个名字吧`);
     }
 
+    /* 写时复制：这个磁盘文件还有别的记录在共用时，不能真把
+     * 原件改名 —— 那会把别的记录的路径一起改失效。改为把
+     * 原件复制一份到新名字，只让当前记录指向新文件，原件
+     * 留给其他记录。没被共享时照旧真改名。 */
+    const shared = f.storage !== 'copy' && state.files.some(
+      (x) => x.id !== f.id && x.storage !== 'copy' && x.path
+        && path.resolve(x.path) === path.resolve(oldPath),
+    );
     try {
-      await fsp.rename(oldPath, target);
+      if (shared) await fsp.copyFile(oldPath, target);
+      else await fsp.rename(oldPath, target);
     } catch (err) {
       if (err.code === 'EBUSY' || err.code === 'EPERM') {
         throw new Error('这个文件正被其他程序占用，先关掉它再重命名');
@@ -3128,7 +3319,7 @@ function registerIpc() {
     previewCache.delete(f.id);
 
     saveStateNow();
-    return { state: snapshot(), changed: true, name: next };
+    return { state: snapshot(), changed: true, name: next, forked: shared };
   });
 
   ipcMain.handle('file:saveText', async (_e, { id, text }) => {
@@ -3140,6 +3331,11 @@ function registerIpc() {
     if (kind !== 'code' && kind !== 'markdown' && kind !== 'text') {
       throw new Error('该格式不支持内置编辑');
     }
+
+    // 写时复制：和别的记录共用同一个磁盘文件时，先分叉再写，
+    // 免得改这一条把另一条的内容也改了。分叉后下面的备份和
+    // 写入都对着副本走，备份内容仍是改动前的版本。
+    const forked = await forkIfShared(f);
 
     // 备份一份，避免手滑丢失
     const backupDir = path.join(app.getPath('userData'), 'backups');
@@ -3154,7 +3350,7 @@ function registerIpc() {
     invalidateStat(f.path); // 刚写过，缓存里的大小/时间已过期
     previewCache.delete(f.id); // 预览也作废，否则重看还是旧内容
     saveStateNow();
-    return { ok: true, state: snapshot() };
+    return { ok: true, state: snapshot(), forked };
   });
 
   /**
@@ -3186,6 +3382,9 @@ function registerIpc() {
     if (!buf.length) throw new Error('没有收到图片数据');
     if (buf.length > 200 * 1024 * 1024) throw new Error('图片数据过大，无法保存');
 
+    // 写时复制：同 saveText，共用同一磁盘文件时先分叉再写。
+    const forked = await forkIfShared(f);
+
     // 备份一份，和文本编辑保持一致（旧版本都在「编辑备份」里）
     const backupDir = path.join(app.getPath('userData'), 'backups');
     await fsp.mkdir(backupDir, { recursive: true });
@@ -3199,7 +3398,7 @@ function registerIpc() {
     invalidateStat(f.path);
     previewCache.delete(f.id); // 预览缓存里还是旧图，必须作废
     saveStateNow();
-    return { ok: true, state: snapshot(), size: f.size };
+    return { ok: true, state: snapshot(), size: f.size, forked };
   });
 
   // 用系统默认程序打开编辑（Office / WPS 等）
@@ -3790,6 +3989,10 @@ if (Test-Path $owp) {
     }
 
     let copied = 0;
+    // 粘贴也是「新增」：与目标目录已有项重名的副本改名 原名（1）（2）…
+    // 文件与文件夹共用一份占用集合，同一批粘贴内依次避让
+    // （2026-11-18 用户定版，与新建/导入同一套规则）。
+    const taken = takenNamesIn(destId);
     for (const id of ids || []) {
       const src = findFile(id);
       if (!src) continue;
@@ -3797,6 +4000,7 @@ if (Test-Path $owp) {
         ...src,
         id: uid(),
         courseId: destId,
+        name: dedupeName(src.name, taken, true),
         addedAt: Date.now(),
       });
       copied += 1;
@@ -3833,6 +4037,9 @@ if (Test-Path $owp) {
       for (const node of subtree) {
         const copy = { ...node, id: idMap.get(node.id) };
         copy.parentId = node.id === id ? destId : idMap.get(node.parentId);
+        // 只有子树根落在目标目录这一层，需要按（1）（2）避让重名；
+        // 子目录都挂在全新的父目录下，名字不会撞，保持原名。
+        if (node.id === id) copy.name = dedupeName(node.name, taken, false);
         delete copy.fileCount;
         delete copy.totalCount;
         delete copy.childCount;
@@ -3869,9 +4076,15 @@ if (Test-Path $owp) {
     }
     const set = new Set(ids || []);
     let moved = 0;
+    // 移入的目录里已有同名项时按（1）（2）顺延（全软件统一的
+    // 重名处理）；本来就在目标目录里的文件不算新撞名，名字不动。
+    const taken = takenNamesIn(target);
     for (const f of state.files) {
       if (set.has(f.id)) {
-        f.courseId = target;
+        if ((f.courseId || null) !== target) {
+          f.name = dedupeName(f.name, taken, true);
+          f.courseId = target;
+        }
         moved += 1;
       }
     }
@@ -3987,6 +4200,11 @@ if (Test-Path $owp) {
  * 启动
  * ------------------------------------------------------------------ */
 app.whenReady().then(() => {
+  /* 关掉 Electron 默认应用菜单：本应用是自绘标题栏、不用原生菜单，
+   * 而默认菜单的「强制重新加载」占着 Ctrl+Shift+R，会把界面自己的
+   * 「在文件夹中显示」快捷键顶掉（按下去变成刷新界面）。
+   * 桌宠的右键菜单是 pet-main 里现搭现弹的，不走应用菜单，不受影响。 */
+  Menu.setApplicationMenu(null);
   migrateOldUserData();
   loadState();
   /* 首屏这几秒先别去 stat 全库的文件：库里文件一多，成千上万次同步
@@ -4009,18 +4227,55 @@ app.whenReady().then(() => {
       const f = findFile(id);
       if (!f || !fs.existsSync(f.path)) return new Response('Not found', { status: 404 });
 
-      const res = await net.fetch(pathToFileURL(f.path).toString());
       const mime = MIME[f.ext] || 'application/octet-stream';
-      const headers = new Headers(res.headers);
-      headers.set('Content-Type', mime);
-      headers.set('Accept-Ranges', 'bytes');
-      headers.set('Cache-Control', 'no-store');
-      /* 图片编辑器要把原图读成 blob 再画到画布上（直接 drawImage 会
-         污染画布，马赛克和保存都做不了）。页面是 file:// 源，vault://
-         是另一个源，不加这条 fetch 会以「Failed to fetch」告终。
-         这里放开的只是索引里登记过的文件，不是任意路径读取。 */
-      headers.set('Access-Control-Allow-Origin', '*');
-      return new Response(res.body, { status: res.status, headers });
+      const { size } = await fsp.stat(f.path);
+      const headers = new Headers({
+        'Content-Type': mime,
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-store',
+        /* 图片编辑器要把原图读成 blob 再画到画布上（直接 drawImage 会
+           污染画布，马赛克和保存都做不了）。页面是 file:// 源，vault://
+           是另一个源，不加这条 fetch 会以「Failed to fetch」告终。
+           这里放开的只是索引里登记过的文件，不是任意路径读取。 */
+        'Access-Control-Allow-Origin': '*',
+      });
+
+      /* 必须真的按 Range 分段回 206：视频/音频 seek 时浏览器会带
+         Range 头来取指定字节段。以前这里无视 Range、永远回整文件
+         （200），嘴上却声明 Accept-Ranges —— 浏览器每次 seek 都被
+         打回开头，表现就是按方向键、拖进度条永远回到起点（用户
+         反复报的 bug，前几轮改播放器代码都没用，根子在这里）。 */
+      let start = 0;
+      let end = size - 1;
+      let partial = false;
+      const range = request.headers.get('range');
+      if (range) {
+        const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+        if (m && (m[1] || m[2])) {
+          if (m[1] === '') {
+            // bytes=-N：最后 N 字节
+            const n = Math.min(size, parseInt(m[2], 10) || 0);
+            start = Math.max(0, size - n);
+            end = size - 1;
+          } else {
+            start = parseInt(m[1], 10);
+            end = m[2] ? Math.min(size - 1, parseInt(m[2], 10)) : size - 1;
+          }
+          if (start > end || start >= size) {
+            headers.set('Content-Range', `bytes */${size}`);
+            return new Response(null, { status: 416, headers });
+          }
+          partial = true;
+        }
+      }
+      headers.set('Content-Length', String(end - start + 1));
+      if (partial) headers.set('Content-Range', `bytes ${start}-${end}/${size}`);
+      if (request.method === 'HEAD' || size === 0) {
+        return new Response(null, { status: partial ? 206 : 200, headers });
+      }
+      const { Readable } = require('node:stream');
+      const stream = Readable.toWeb(fs.createReadStream(f.path, { start, end }));
+      return new Response(stream, { status: partial ? 206 : 200, headers });
     } catch (err) {
       return new Response(`Error: ${err.message}`, { status: 500 });
     }

@@ -185,10 +185,11 @@
 .pet-card canvas {
   display: block;
   image-rendering: pixelated;
-  /* 预览区高度封顶：各包帧尺寸不一、加载失败时 canvas 有默认
-     300×150，都不能把卡片撑高；等比缩放不变形 */
-  max-width: 84px;
-  max-height: 58px;
+  /* 预览尺寸由 pet.js 按角色内容框统一算好（角色高约 72px），
+     这里只留一道保险丝：加载失败时 canvas 有默认 300×150，
+     不能把卡片撑高；等比缩放不变形 */
+  max-width: 90px;
+  max-height: 80px;
   object-fit: contain;
 }
 
@@ -196,9 +197,47 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 56px;
+  height: 72px;
   font-size: 24px;
   color: var(--fg-3);
+}
+
+/* 「不显示」卡片：发光的白色横条悬在展示区下部，不贴底 */
+.pet-card-icon-none {
+  align-items: flex-end;
+  padding-bottom: 13px;
+  box-sizing: border-box;
+}
+
+.pet-none-bar {
+  display: block;
+  width: 42px;
+  height: 5px;
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.95), 0 0 20px rgba(255, 255, 255, 0.5);
+}
+
+/* 换宠菜单的悬停动态预览：浮在菜单旁边，不接指针事件 */
+.cv-pet-hoverprev {
+  position: fixed;
+  z-index: 305;
+  padding: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(31, 30, 29, 0.22), 0 2px 8px rgba(31, 30, 29, 0.12);
+  pointer-events: none;
+  opacity: 0;
+}
+
+.cv-pet-hoverprev.is-placed {
+  opacity: 1;
+}
+
+.cv-pet-hoverprev canvas {
+  display: block;
+  image-rendering: pixelated;
 }
 
 .pet-card-name {

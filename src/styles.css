@@ -1513,6 +1513,7 @@ button:focus-visible {
 .overlay[hidden] { display: none; }
 
 .preview {
+  position: relative;
   width: 100%;
   height: 100%;
   max-width: 1120px;
@@ -1594,6 +1595,75 @@ button:focus-visible {
   border-radius: var(--radius-m);
 }
 .pv-audio { width: min(520px, 100%); }
+
+/* ---------- 视频自定义控制条 ---------- */
+.pv-video {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 100%;
+  max-height: 100%;
+  min-height: 0;
+}
+.pv-video video { min-height: 0; }
+.pv-vbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-m);
+}
+.pv-vbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 28px;
+  padding: 0 7px;
+  border: none;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.pv-vbtn:hover { background: var(--bg-hover); color: var(--fg-1); }
+.pv-vtime {
+  font-size: 12px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pv-vseek { flex: 1; min-width: 60px; accent-color: var(--accent); cursor: pointer; }
+.pv-vspeed { position: relative; }
+.pv-vspeed-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-2);
+  z-index: 6;
+}
+.pv-vspeed-menu[hidden] { display: none; }
+.pv-vspeed-menu button {
+  border: none;
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pv-vspeed-menu button:hover { background: var(--bg-hover); color: var(--fg-1); }
+.pv-vspeed-menu button.is-active { background: var(--accent-soft); color: var(--accent); }
 
 /* ---------- 图片编辑 ---------- */
 .img-editor {
@@ -2400,6 +2470,23 @@ kbd {
   word-break: break-all;
 }
 .picked.has-items { color: var(--fg-2); }
+/* 导入弹窗里单选时的名字输入框：长得和 .picked 盒子融为一体 */
+.picked-name-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: none;
+  background: transparent;
+  color: var(--fg-1);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 1px 0;
+  outline: none;
+}
+.picked-name-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
 
 .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
 .swatch {
@@ -3332,6 +3419,7 @@ body.select-mode .card-info-btn { display: none; }
 body.select-mode .card[data-file]::before,
 body.select-mode .card[data-dir]::before {
   content: '';
+  box-sizing: border-box;
   position: absolute;
   top: 8px;
   left: 8px;
@@ -3347,6 +3435,23 @@ body.select-mode .card[data-file].is-selected::before,
 body.select-mode .card[data-dir].is-selected::before {
   border-color: var(--accent);
 }
+/* 普通模式：已选中的卡片也显示圆圈，点它取消这一个的选中
+   （app.js 网格点击的圆圈命中不分模式，只认「已选中」）。
+   几何与上面多选模式的圆圈一致。 */
+.card[data-file].is-selected::before,
+.card[data-dir].is-selected::before {
+  content: '';
+  box-sizing: border-box;
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  background: var(--bg-2);
+  z-index: 3;
+}
 body.select-mode .card[data-file],
 body.select-mode .card[data-dir] { cursor: pointer; }
 
@@ -3358,12 +3463,17 @@ body.select-mode .card[data-dir] { cursor: pointer; }
 .card.is-selected .card-name { color: var(--accent); }
 .card.is-selected::after {
   content: '';
+  box-sizing: border-box;
   position: absolute;
   top: 8px;
   left: 8px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
+  /* 与 ::before 圆环同宽的边框：两个伪元素外径必须逐像素一致，
+     否则实心勾选徽章和圆环会错位（::before 有 1.5px 边框、
+     ::after 原来没有，content-box 下外径差 3px）。 */
+  border: 1.5px solid var(--accent);
   background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-6'/%3E%3C/svg%3E") center / 11px no-repeat;
   z-index: 3;
 }
@@ -3861,3 +3971,31 @@ body.is-marquee .card { pointer-events: none; }
   background: var(--accent-soft);
   color: var(--fg-1) !important;
 }
+
+/* 预览内左右切换箭头（上一个/下一个文件）：挂在预览面板左右
+   中部；编辑中（#previewBody.is-editing）隐藏 */
+.pv-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 6;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+  color: var(--fg-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  opacity: 0.85;
+}
+.pv-nav:hover { opacity: 1; color: var(--fg-1); }
+.pv-nav[hidden] { display: none; }
+.pv-nav-prev { left: 14px; }
+.pv-nav-next { right: 14px; }
+#previewBody.is-editing ~ .pv-nav { display: none; }
+/* 视频循环开关的开启态 */
+.pv-vbtn.is-on { background: var(--accent-soft); color: var(--accent); }
