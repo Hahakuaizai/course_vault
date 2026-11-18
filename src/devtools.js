@@ -91,8 +91,8 @@
     }
   }
 
-  /* app.js 在渲染更新弹窗时调用：latest 模式传本批 batch，
-   * 其他情况传 null（收起按钮和面板） */
+  /* app.js 在渲染更新内容时调用：传最近一批 batch 挂按钮（更新弹窗
+   * 和设置里的历史视图都会传），传 null 时收起按钮和面板 */
   function attach(batch, version) {
     var btn = document.getElementById('btnDevtools');
     var panel = document.getElementById('devtoolsPanel');

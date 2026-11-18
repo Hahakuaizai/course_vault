@@ -248,6 +248,12 @@ const RELEASE_NOTES = [
   {
     date: '2026-11-18',
     items: [
+      { type: 'improve', text: '发布助手在设置里也能打开了：以前只有更新弹窗底部有这个按钮，弹窗不小心关掉就找不回来；现在从「设置 → 关于 → 更新内容」打开的历史视图底部也有，点开生成的仍是最近一次更新的上传与发布代码' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
       { type: 'fix', text: '修正自动说明的两个小毛病：跨越多行的注释会被拆成两条、后半句还带着注释结束符号，现在会先拼完整再提炼；改动文件列表以前只显示文件名，根目录和 src 里的同名文件看起来像重复，改成显示完整路径' },
     ],
   },
@@ -630,10 +636,11 @@ function renderReleaseNotes(mode = 'latest') {
     ? '<div class="cl-files">仅显示近 10 次更新，更早的记录仍保存在软件数据中。</div>'
     : '';
   body.innerHTML = hint + shown.map((b, i) => releaseBlock(b, verFor(b, i), i === 0, i)).join('') + moreNote;
-  /* 插件二（仅本机）：弹窗展示本次更新时把这批交给发布助手挂按钮；
-   * 历史视图不是「本次改动」，传 null 收起 */
+  /* 插件二（仅本机）：把最近一批交给发布助手挂按钮。更新弹窗和
+   * 设置里的历史视图都挂——弹窗不小心关了，还能从设置里再打开，
+   * 按钮生成的仍是最近一次更新的发布代码 */
   if (window.__cvDevtools) {
-    window.__cvDevtools.attach(mode === 'latest' ? list[0] || null : null, S.version);
+    window.__cvDevtools.attach(list[0] || null, S.version);
   }
 }
 
