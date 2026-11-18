@@ -987,6 +987,18 @@
     buildExternalCfg().then((c) => { externalCfgCache = c; vp.syncExternal(c); }).catch(() => {});
   }
 
+  /* 主题一变就把新主题同步给主进程：桌面菜单窗口是照配置里的
+     theme 字段渲染的，主题切换本身不改桌宠配置、不会触发
+     syncExternal —— 不同步的话，桌宠在桌面上时右键菜单永远
+     停在上一个主题的样式（用户报的 bug；软件内菜单走实时
+     CSS 变量，所以没这个问题）。 */
+  if (window.MutationObserver) {
+    new MutationObserver(() => syncExternal()).observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+  }
+
   async function closeExternal() {
     const vp = vaultPet();
     if (!vp) return;

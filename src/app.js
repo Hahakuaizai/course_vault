@@ -248,6 +248,13 @@ const RELEASE_NOTES = [
   {
     date: '2026-11-18',
     items: [
+      { type: 'fix', text: '修复桌面桌宠右键菜单不跟随主题：在桌面上时切了主题，右键菜单还是上一个主题的样式（软件内没这个问题）。原因是菜单的主题靠桌宠配置捎带传递，而切主题不会触发桌宠配置同步。现在主题一变就立刻把新主题同步过去，桌面菜单和软件内保持一致' },
+      { type: 'fix', text: '修复切换主题时光线起步太晚：以前光带要等揭幕进度涨过一个门槛才启动，看着就是主题快切完了光才动。现在光带在揭幕开始的同一帧就显式启动，并且总时长比揭幕更长——面板切换时光约 4.5 秒到达对侧（揭幕 3.7 秒），开关切换时光约 2.1 秒到达（揭幕约 1.4 秒）：同时起步，晚于主题到达' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
       { type: 'feat', text: '视频预览加了循环开关：控制条上新增循环按钮（倍速左边），点亮 = 播完从头循环，不点亮 = 播完暂停（默认）。选择会记住，下次打开视频沿用' },
       { type: 'feat', text: '预览可以左右切换文件：同一个目录里有多个可预览文件（代码、文档、图片、视频、音频等）时，预览面板左右中部会出现切换箭头，点击在这些文件之间依次浏览（到头会绕回）；正在编辑文本或图片时箭头自动隐藏、切换禁用，不会误触丢修改' },
       { type: 'fix', text: '修复克码人生在设置卡片和右键菜单里完全静止：它的待机动画只有 2 帧、第一帧要定格 5.2 秒只眨一下眼，预览里根本看不出在动。现在预览会自动判断：待机动画太静的宠物，改播它帧数多的动作来展示（克码人生播的是团队协作那条）；桌宠本体的待机行为不变' },
@@ -7593,10 +7600,18 @@ async function animateThemeSwitch(next) {
 
   dispatchThemeEvent(THEME_EVENT_START, { to: next, durationMs: THEME_ANIM_MS });
 
+  /* 光带在揭幕开始的同一帧显式启动（不再等逐帧 set 的进度
+     门槛），总时长比揭幕长 800ms —— 同时起步、晚于揭幕到达
+     对侧（用户 2026-11-18 定版）。逐帧 set 保留作兜底，时间轴
+     跑起来后它会自动让行。 */
+  const sweep0 = window.__vaultSweep;
+  const sweepMode0 = next === 'dark' ? 'to-dark' : 'to-light';
+  if (sweep0 && sweep0.begin) sweep0.begin(from, to, sweepMode0, THEME_ANIM_MS + 800);
+
   await new Promise((resolve) => {
     const t0 = performance.now();
     const sweep = window.__vaultSweep;
-    const sweepMode = next === 'dark' ? 'to-dark' : 'to-light';
+    const sweepMode = sweepMode0;
     const tick = () => {
       const q = Math.min(1, (performance.now() - t0) / THEME_ANIM_MS);
       const u = from + (to - from) * q;

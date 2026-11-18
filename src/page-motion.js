@@ -261,6 +261,7 @@ function initSweep() {
   let bandFrom = 0;
   let bandTo = 0;
   let bandStart = 0;
+  let bandDur = BAND_MS;
   const smootherstep = (q) => q * q * q * (q * (q * 6 - 15) + 10);
   const bandEase = (q) => 0.35 * q + 0.65 * smootherstep(q);
   const bandProgress = (q) => (q >= 1 ? 1 : 0.22 + 0.78 * bandEase(q));
@@ -331,8 +332,8 @@ function initSweep() {
 
     if (bandActive) {
       /* 时间轴驱动：位置只取决于切换开始后过了多久，与驱动方的
-         弹簧 / rAF 进度完全脱钩 —— 同帧启动、按 BAND_MS 到达。 */
-      const q = (t - bandStart) / BAND_MS;
+         弹簧 / rAF 进度完全脱钩 —— 同帧启动、按 bandDur 到达。 */
+      const q = (t - bandStart) / bandDur;
       if (q >= 1) {
         curU = bandTo;
         bandActive = false;
@@ -402,9 +403,24 @@ function initSweep() {
   const set = (u, m, isDrag) => {
     if (m && m !== mode) { mode = m; el.dataset.mode = m; }
     const uu = clamp01(u);
-    /* 首次（或刚从 hide 里恢复）：直接把光的起点对齐到 u，
-       不要让光从上一次结束的位置飞过来。 */
-    if (curU === null) { curU = uu; velU = 0; targetU = uu; wantIdle = false; kick(); return; }
+    /* 首次（或刚从 hide 里恢复）：把光的起点对齐到 u。若模式的
+       目标端不在当前位置，当场就启动时间轴 —— 和揭幕同帧出发。
+       以前这里只做对齐便返回，要等驱动进度涨过 0.003 门槛才
+       启动，光总是慢半拍（用户报的「起步太晚」之一）。 */
+    if (curU === null) {
+      curU = uu; velU = 0; targetU = uu; wantIdle = false;
+      const end = m === 'to-light' ? 1 : (m === 'to-dark' ? 0 : null);
+      if (!isDrag && end !== null && Math.abs(end - uu) > 0.003) {
+        bandFrom = uu;
+        bandTo = end;
+        bandDur = BAND_MS;
+        bandStart = performance.now();
+        bandActive = true;
+        targetU = end;
+      }
+      kick();
+      return;
+    }
     wantIdle = false;
     if (isDrag) {
       /* 拖动跟手：取消时间轴，回到弹簧追赶 */
@@ -423,6 +439,7 @@ function initSweep() {
          的门槛，不会误触发第二次横扫。 */
       bandFrom = curU;
       bandTo = uu >= curU ? 1 : 0;
+      bandDur = BAND_MS;
       bandStart = performance.now();
       bandActive = true;
       targetU = bandTo;
@@ -434,6 +451,28 @@ function initSweep() {
     kick();
   };
 
+  /* 显式启动横扫：驱动方在揭幕开始的那一帧调用，不再等 set()
+     的进度门槛。durationMs 由驱动方按揭幕时长给（要求光到达
+     对侧晚于揭幕完成，如面板路径 = THEME_ANIM_MS + 800）。
+     起点优先用光的当前位置（连点/中途反向时不跳变），没有
+     当前位置时用 fromU。 */
+  const begin = (fromU, toU, m, durationMs) => {
+    if (m && m !== mode) { mode = m; el.dataset.mode = m; }
+    const startU = curU !== null ? curU : clamp01(fromU);
+    curU = startU;
+    velU = 0;
+    bandFrom = startU;
+    bandTo = clamp01(toU);
+    bandDur = durationMs > 0 ? durationMs : BAND_MS;
+    bandStart = performance.now();
+    bandActive = true;
+    targetU = bandTo;
+    wantIdle = false;
+    dragging = false;
+    paint(curU);
+    kick();
+  };
+
   /** 驱动方宣告本次切换结束：等光追到终点后自行清空 */
   const hide = () => {
     wantIdle = true;
@@ -441,7 +480,7 @@ function initSweep() {
     kick();
   };
 
-  window.__vaultSweep = { set, hide };
+  window.__vaultSweep = { set, hide, begin };
 
   /* 揭幕建立时先定好配色。位置不在这里推 —— 拖动路径下目的地还没定，
      theme-switch.js 会按拖动方向覆盖这个初始值。 */

@@ -1472,6 +1472,13 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
         ? pos >= 0.5
         : (pos + xv * 0.16 > 0.5);
       setTarget(goRight ? 1 : 0);
+      /* 拖动松手同样让光带正式出发：从当前位置走 1.5s 到目标端，
+         晚于旋钮弹簧的到位时间。弹回原位且位置已贴着目标端时
+         不必再扫一遍。 */
+      const sw = window.__vaultSweep;
+      if (sw && sw.begin && Math.abs((goRight ? 1 : 0) - pos) > 0.05) {
+        sw.begin(pos, goRight ? 1 : 0, goRight ? 'to-light' : 'to-dark', 1500);
+      }
       return;
     }
     /* 没拖动就是点击 */
@@ -1502,6 +1509,10 @@ export function mountThemeSwitch(host, { onToggle } = {}) {
        不然整段动画里看见的都是克隆体里冻住的副本 */
     if (!lifted) lift();
     setTarget(nextTarget);
+    /* 光带与揭幕同帧启动：总时长 2.1s，晚于旋钮揭幕的约 1.4s
+       到位时间到达对侧（用户 2026-11-18 定版） */
+    const sw = window.__vaultSweep;
+    if (sw && sw.begin) sw.begin(pos, nextTarget, nextTarget === 0 ? 'to-dark' : 'to-light', 2100);
   }
 
   /* 键盘触发的 click 没有 pointerup 配对（detail === 0），单独接住。
