@@ -61,16 +61,30 @@ const diffSources = () => updater.diff();
 const checkForUpdate = () => updater.check();
 const applyUpdate = () => updater.apply();
 
+const updateConfigFile = () => path.join(app.getPath('userData'), 'update-config.json');
+
+/** 读 update-config.json 的全部内容。
+ * 开发目录、上次检测时间、上次自动检测结果都存在这一个文件里，
+ * 读写必须合并：任何一边整体覆盖，都会把另一边的字段冲掉。 */
+function loadUpdateConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(updateConfigFile(), 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveUpdateConfig(patch) {
+  const p = updateConfigFile();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify({ ...loadUpdateConfig(), ...patch }, null, 2), 'utf8');
+}
+
 /** 从 userData 的 config 里读开发目录设置 */
 function loadSourceDir() {
-  try {
-    const p = path.join(app.getPath('userData'), 'update-config.json');
-    const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
-    if (cfg.sourceDir && fs.existsSync(cfg.sourceDir)) {
-      SOURCE_DIR = cfg.sourceDir;
-    }
-  } catch {
-    /* 没有配置就用默认探测 */
+  const cfg = loadUpdateConfig();
+  if (cfg.sourceDir && fs.existsSync(cfg.sourceDir)) {
+    SOURCE_DIR = cfg.sourceDir;
   }
   // 默认：如果当前运行目录的上一级有同名项目，视为开发目录
   if (!SOURCE_DIR) {
@@ -80,9 +94,7 @@ function loadSourceDir() {
 }
 
 function saveSourceDir(dir) {
-  const p = path.join(app.getPath('userData'), 'update-config.json');
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify({ sourceDir: dir }, null, 2), 'utf8');
+  saveUpdateConfig({ sourceDir: dir });
   SOURCE_DIR = dir;
 }
 
@@ -188,7 +200,7 @@ const DEFAULT_STATE = () => ({
     importMode: 'link',
     /** 入库文件存放目录；null = 用户数据目录下的 files/ */
     storeDir: null,
-    /** 自动检测更新：开关 + 频率（startup / 1h / 6h / 24h），见 scheduleAutoCheck */
+    /** 自动检测更新：开关 + 频率（startup / 1h / 6h / 12h / 24h / daily），见 scheduleAutoCheck */
     autoCheckUpdate: false,
     autoCheckInterval: 'startup',
   },
@@ -2653,14 +2665,54 @@ function createWindow() {
 /* ------------------------------------------------------------------ *
  * 自动检测更新
  * ------------------------------------------------------------------ */
-/* 「每次启动」没有间隔，只在启动后比对一次；其余按固定间隔循环。 */
+/* 小时档的间隔毫秒数。「每次启动」和「每天一次」不走这张表：
+ * 前者每次启动查一次，后者按自然日（过了 0 点就算新的一天）。 */
 const AUTO_CHECK_EVERY = {
   '1h': 60 * 60 * 1000,
   '6h': 6 * 60 * 60 * 1000,
+  '12h': 12 * 60 * 60 * 1000,
   '24h': 24 * 60 * 60 * 1000,
 };
 
 let autoCheckTimer = null;
+/* 「每次启动」模式本次运行是否已经查过（查过就不再排） */
+let autoStartupDone = false;
+/* 本次运行里最近一次尝试检测的时间（含失败的）：检测失败时持久化的
+ * 上次检测时间不会更新，拿它兜底，避免失败后每隔几秒重试一次。 */
+let autoLastAttempt = 0;
+
+/** 一份比对结果的指纹：文件清单没变，指纹就不变。
+ * 页面靠它记「这批变化用户已经点过稍后了」，重启也不会对同一批重复提醒。 */
+function updateSig(d) {
+  const raw = JSON.stringify([d.changed || [], d.added || [], d.removed || []]);
+  let h = 5381;
+  for (let i = 0; i < raw.length; i++) h = ((h * 33) ^ raw.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+
+/** 记下「刚完成一次检测」：时间和结果存进 update-config.json。
+ * 自动、手动检测都记 ——「距上次检测满 N 小时」里的上次，指任何一次。
+ * keepResult 时把结果一并留下：用户可能在检测完成后才打开设置，
+ * 甚至下次启动才打开，提醒条要能凭这份记录在关于页里摆出来。 */
+function stampCheck(d, { keepResult = false } = {}) {
+  if (!d?.ok) return;
+  const patch = { lastCheckAt: Date.now() };
+  if (keepResult) {
+    patch.lastResult = d.total
+      ? {
+          ok: true,
+          total: d.total,
+          changed: d.changed,
+          added: d.added,
+          removed: d.removed,
+          version: d.version,
+          depsChanged: !!d.depsChanged,
+          sig: updateSig(d),
+        }
+      : null;
+  }
+  try { saveUpdateConfig(patch); } catch { /* 记录失败不影响检测本身 */ }
+}
 
 /** 把「发现更新」推给页面。页面还没加载完时消息会掉，所以等它加载完再补。 */
 function pushUpdateAvailable(d, tries = 0) {
@@ -2672,15 +2724,17 @@ function pushUpdateAvailable(d, tries = 0) {
   win.webContents.send('update:available', d);
 }
 
-/** 比对一次，有新东西就推给页面。返回比对结果，出错时 ok=false。 */
+/** 比对一次：记时间、存结果，有新东西就推给页面。返回比对结果，出错时 ok=false。 */
 function runAutoCheck() {
+  autoLastAttempt = Date.now();
   let d;
   try {
     d = checkForUpdate();
   } catch (err) {
     return { ok: false, reason: err.message };
   }
-  if (d.ok && d.total) pushUpdateAvailable(d);
+  stampCheck(d, { keepResult: true });
+  if (d.ok && d.total) pushUpdateAvailable({ ...d, sig: updateSig(d) });
   return d;
 }
 
@@ -2691,6 +2745,28 @@ function runAutoCheck() {
  * 定时器会被 Chromium 节流（隐藏页最长能压到每分钟一次，极端情况还会
  * 整个冻住），「每 1 小时」就变成了「不知道多久」。主进程的定时器不受影响。
  */
+/** 距下一次该检测还有多久（毫秒）。0 = 现在就到期；Infinity = 本次运行不再检测。
+ *
+ * 三种模式的「到期」都以持久化的上次检测时间为准，而不是本次运行的计时：
+ * 每 N 小时 —— 距上次检测已满 N 小时才到期，刚查过就重开软件不会白跑一遍；
+ * 每天一次 —— 按自然日：上次检测不在今天（过了 0 点）就到期，不必满 24 小时；
+ * 每次启动 —— 每次运行只查一次。 */
+function autoCheckDueIn(now = Date.now()) {
+  if (!state?.settings?.autoCheckUpdate) return Infinity;
+  const mode = state.settings.autoCheckInterval || 'startup';
+  const last = Math.max(Number(loadUpdateConfig().lastCheckAt) || 0, autoLastAttempt);
+  if (mode === 'startup') return autoStartupDone ? Infinity : 0;
+  if (mode === 'daily') {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    if (last < start.getTime()) return 0;
+    return start.getTime() + 24 * 60 * 60 * 1000 - now;
+  }
+  const every = AUTO_CHECK_EVERY[mode];
+  if (!every) return Infinity;
+  return Math.max(0, last + every - now);
+}
+
 function scheduleAutoCheck(delayFirst = 6000) {
   if (autoCheckTimer) {
     clearTimeout(autoCheckTimer);
@@ -2699,15 +2775,19 @@ function scheduleAutoCheck(delayFirst = 6000) {
   // state 可能在 loadState 之前就被问到（极早期调用），这时按未开启处理
   if (!state?.settings?.autoCheckUpdate) return;
 
-  const every = AUTO_CHECK_EVERY[state.settings.autoCheckInterval] || 0;
-  const tick = () => {
+  const dueIn = autoCheckDueIn();
+  if (dueIn === Infinity) return;
+  /* 到期了也别抢启动那几秒：至少推迟 delayFirst，等首屏出来再跑，
+   * 免得全目录哈希和读库、核对文件挤在一起让窗口刚出现时更卡。
+   * 还没到期就按剩余时间排，长开着的软件跨过边界也会准时查。 */
+  const wait = dueIn === 0 ? Math.max(1000, delayFirst) : dueIn;
+  autoCheckTimer = setTimeout(() => {
     autoCheckTimer = null;
+    if ((state.settings.autoCheckInterval || 'startup') === 'startup') autoStartupDone = true;
     runAutoCheck();
-    if (every) autoCheckTimer = setTimeout(tick, every);
-  };
-  /* 首次检测压到首屏出来之后：启动那几秒主进程正在读库、核对文件，
-   * 再叠一次全目录哈希会让窗口刚出现时更卡（和 stat 宽限期是同一个理由）。 */
-  autoCheckTimer = setTimeout(tick, Math.max(1000, delayFirst));
+    // 按新的上次检测时间排下一次（小时/每天模式继续循环，每次启动模式到此为止）
+    scheduleAutoCheck();
+  }, wait);
 }
 
 /* ------------------------------------------------------------------ *
@@ -4148,15 +4228,27 @@ if (Test-Path $owp) {
   });
 
   /* --- 软件更新 --- */
-  ipcMain.handle('update:info', () => ({
-    version: readVersion(),
-    appDir: APP_DIR,
-    dataDir: app.getPath('userData'),
-    sourceDir: SOURCE_DIR,
-    packaged: app.isPackaged,
-  }));
+  ipcMain.handle('update:info', () => {
+    const cfg = loadUpdateConfig();
+    return {
+      version: readVersion(),
+      appDir: APP_DIR,
+      dataDir: app.getPath('userData'),
+      sourceDir: SOURCE_DIR,
+      packaged: app.isPackaged,
+      // 自动检测的上次时间和留存结果：关于页靠它们把提醒条摆出来，
+      // 不必等下一次实时推送（见 app.js 的 restoreAutoUpdate）
+      lastCheckAt: Number(cfg.lastCheckAt) || 0,
+      autoResult: cfg.lastResult || null,
+    };
+  });
 
-  ipcMain.handle('update:check', () => checkForUpdate());
+  ipcMain.handle('update:check', () => {
+    const d = checkForUpdate();
+    // 手动检测也算「检测过」：自动检测的到期判断从这一次重新计时
+    stampCheck(d);
+    return d;
+  });
 
   ipcMain.handle('update:apply', () => applyUpdate());
 

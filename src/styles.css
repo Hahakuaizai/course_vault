@@ -1300,6 +1300,8 @@ button:focus-visible {
 }
 .seg-btn:hover { color: var(--fg-1); }
 .seg-btn.is-active { background: var(--bg-4); color: var(--fg-1); }
+/* 检测频率有六档，一行排不下时会把最后一档挤出可视区，允许它换行 */
+#autoCheckSeg { flex-wrap: wrap; }
 
 .primary-btn {
   display: inline-flex;

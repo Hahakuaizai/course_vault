@@ -959,7 +959,9 @@
                     <button class="seg-btn" data-interval="startup">每次启动</button>
                     <button class="seg-btn" data-interval="1h">每 1 小时</button>
                     <button class="seg-btn" data-interval="6h">每 6 小时</button>
-                    <button class="seg-btn" data-interval="24h">每天一次</button>
+                    <button class="seg-btn" data-interval="12h">每 12 小时</button>
+                    <button class="seg-btn" data-interval="24h">每 24 小时</button>
+                    <button class="seg-btn" data-interval="daily">每天一次</button>
                   </div>
                 </div>
               </div>
@@ -968,19 +970,6 @@
               <div class="update-actions">
                 <button class="ghost-btn" id="btnCheckUpdate">检查更新</button>
                 <button class="primary-btn" id="btnApplyUpdate" disabled>应用并重启</button>
-              </div>
-
-              <!-- 自动检测到更新时的提醒条：不弹窗、不抢焦点，就摆在这里 -->
-              <div class="update-avail" id="updateAvail" hidden>
-                <svg viewBox="0 0 24 24"><path d="M12 4v10"/><path d="M8 10l4 4 4-4"/><path d="M5 19h14"/></svg>
-                <div class="ua-text">
-                  <strong>有新版本可以更新</strong>
-                  <small id="updateAvailDesc">—</small>
-                </div>
-                <button class="ghost-btn" id="btnUpdateAvailView">查看明细</button>
-                <button class="icon-btn" id="btnUpdateAvailClose" title="忽略这次提醒">
-                  <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
-                </button>
               </div>
             </div>
 

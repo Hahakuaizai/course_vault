@@ -7,8 +7,8 @@
  * 一键复制：
  *   一、上传到 GitHub：git add / commit / push，提交信息由插件一
  *       生成的本批说明简写而来（取每条的第一小句）；
- *   二、打包并发布 Release：build.js 打包到桌面 workspace（打包
- *       脚本会排除插件二本身）→ 压成 zip → gh release create。
+ *   二、打包并发布 Release：build.js 打包到 D 盘版本备份目录（打包
+ *       脚本会排除插件二本身）→ 压成 zip → 删打包文件夹 → gh release create。
  * 本文件只在主进程门禁通过（本机标记存在）时才被 app.js 动态加载；
  * 发布版里既没有标记、打包时也排除本文件，不会留下任何痕迹。
  * ============================================================
@@ -17,7 +17,8 @@
   'use strict';
 
   var DEV_DIR = 'C:\\Users\\30894\\Desktop\\workspace\\course-vault';
-  var WORK_DIR = 'C:\\Users\\30894\\Desktop\\workspace';
+  /* 打包产物（文件夹和 zip）统一放这个版本备份目录，不再堆在桌面 workspace */
+  var RELEASE_DIR = 'D:\\资料库course_vault版本备份';
   /* gh 在本机是便携版、不在 PATH 里：生成代码先定位 gh，
    * PATH 里没有时退回这个完整路径（见 releaseCode） */
   var GH_FALLBACK = 'C:\\Users\\30894\\tools\\gh\\bin\\gh.exe';
@@ -57,7 +58,10 @@
     ].join('\n');
   }
 
-  /* 第二段：打包当前项目（不带插件二）到桌面 workspace 并发布 Release。
+  /* 第二段：打包当前项目（不带插件二）到版本备份目录并发布 Release。
+   * ★ 打包文件夹和 zip 都落在 RELEASE_DIR：先建好目录，打包 → 压缩 →
+   * 删掉打包文件夹，只保留 zip，免得每发一版就多留一个几百 MB 的
+   * 文件夹；删文件夹不影响后面的上传，gh 传的是 zip 本身。
    * 末尾发布不用裸 gh：便携版不在 PATH 里会报「无法识别命令」，
    * 先用 Get-Command 定位，没有再退回便携版完整路径 */
   function releaseCode(batch, version) {
@@ -65,13 +69,16 @@
     var items = leadsOf(batch);
     var notes = items.slice(0, 3).join('；') || '更新';
     var folder = '资料库-v' + v;
+    var out = RELEASE_DIR + '\\' + folder;
     return [
       'cd ' + DEV_DIR,
-      'node build.js "..\\' + folder + '"',
-      'Compress-Archive -Path "..\\' + folder + '" -DestinationPath "' + WORK_DIR + '\\' + folder + '.zip" -Force',
+      'New-Item -ItemType Directory -Force "' + RELEASE_DIR + '" | Out-Null',
+      'node build.js "' + out + '"',
+      'Compress-Archive -Path "' + out + '" -DestinationPath "' + out + '.zip" -Force',
+      'Remove-Item -Recurse -Force "' + out + '"',
       '$gh = (Get-Command gh -ErrorAction SilentlyContinue).Source',
       'if (-not $gh) { $gh = "' + GH_FALLBACK + '" }',
-      '& $gh release create v' + v + ' "' + WORK_DIR + '\\' + folder + '.zip" --title "资料库 v' + v + '" --notes "' + psq(notes) + '"',
+      '& $gh release create v' + v + ' "' + out + '.zip" --title "资料库 v' + v + '" --notes "' + psq(notes) + '"',
     ].join('\n');
   }
 

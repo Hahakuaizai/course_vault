@@ -248,6 +248,39 @@ const RELEASE_NOTES = [
   {
     date: '2026-11-18',
     items: [
+      { type: 'improve', text: '自动检测到更新改为弹窗提示：打开设置 → 关于时直接弹出「检测到 X 个文件改动（修改 / 新增 / 移除）」，可选稍后应用或应用并重启（后者接着弹原有的应用确认框），不再用关于页里的提醒条' },
+      { type: 'fix', text: '修复自动检测的提醒会被手动检查或一次「稍后」记录永久压住、之后再也不出现的问题：未应用的改动在下次打开关于时仍会弹窗提醒' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'improve', text: '发布助手的打包命令改把打包文件夹和 zip 放到 D 盘的版本备份目录（D:\\资料库course_vault版本备份），压缩后照旧自动删掉打包文件夹、只保留 zip' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'fix', text: '修复检测频率一行排不下六档、「每天一次」被挤出可视区的问题，现在排不下会自动换行' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'improve', text: '自动检测更新改为按「到期」检测：每 N 小时看距上次检测（自动、手动都算）是否已满，每天一次按自然日算（过了 0 点后第一次启动就检测，不必满 24 小时），刚检测完重开软件不会再白跑一遍' },
+      { type: 'improve', text: '自动检测在后台完成后结果会留存：打开设置 → 关于就能看到「检测到 X 个文件改动（修改 · 新增 · 移除）」，下方是「稍后应用 / 应用并重启」，点后者直接弹出原有的应用确认框；点「稍后」后同一批变化重启软件也不会再提醒，文件清单变了才会重新出现' },
+      { type: 'new', text: '检测频率新增「每 12 小时」和「每天一次」两档（原来的「每天一次」其实是滚动 24 小时，两者现已分开）' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
+      { type: 'improve', text: '发布助手生成的发布命令会在压缩完成后自动删除打包文件夹，只保留 zip 压缩包，不再每发布一版就在电脑里多留一个几百 MB 的文件夹' },
+    ],
+  },
+  {
+    date: '2026-11-18',
+    items: [
       { type: 'fix', text: '修复发布助手生成的发布命令报错：本机的 gh 是便携版、不在系统 PATH 里，命令里裸写 gh 会提示无法识别该命令；现在生成的代码会先自动定位 gh（PATH 里有就用现成的，没有就用便携版的完整路径），复制粘贴即可直接发布' },
     ],
   },
@@ -6470,6 +6503,8 @@ function bindEvents() {
     if (!btn) return;
     $$('.snav-item').forEach((b) => b.classList.toggle('is-active', b === btn));
     $$('.spane').forEach((p) => p.classList.toggle('is-active', p.dataset.pane === btn.dataset.pane));
+    // 切到「关于」时，有攒着没应用的自动检测结果就直接弹窗（用户定的规矩）
+    if (btn.dataset.pane === 'about') maybeShowAutoPopup();
   });
 
   // 教程里的目录跳转。
@@ -6547,8 +6582,6 @@ function bindEvents() {
     saveSetting('autoCheckInterval', btn.dataset.interval);
     syncSettingsUI();
   });
-  $('#btnUpdateAvailView').addEventListener('click', viewAutoUpdate);
-  $('#btnUpdateAvailClose').addEventListener('click', dismissAutoUpdate);
   /* 主进程定时比对完，把「有更新」推过来 */
   api.update.onAvailable?.((d) => showAutoUpdate(d));
 
@@ -6894,7 +6927,7 @@ function bindEvents() {
  *
  * 返回 Promise<boolean>。
  */
-function askConfirm({ title = '确认', lead = '', okText = '确定', danger = false, note = '' } = {}) {
+function askConfirm({ title = '确认', lead = '', okText = '确定', cancelText = '取消', danger = false, note = '' } = {}) {
   return new Promise((resolve) => {
     const modal = $('#confirmModal');
     const okBtn = $('#btnConfirmOk');
@@ -6902,6 +6935,8 @@ function askConfirm({ title = '确认', lead = '', okText = '确定', danger = f
 
     $('#confirmTitle').textContent = title;
     $('#confirmLead').textContent = lead;
+    okBtn.textContent = okText;
+    cancelBtn.textContent = cancelText;
     /* note 是一段可选的结构化补充内容（HTML），比如把要删的文件名列出来。
        调用方负责转义 —— 这里直接塞 innerHTML。 */
     const noteEl = $('#confirmNote');
@@ -7233,8 +7268,12 @@ const SETTING_DEFAULTS = {
   seenChangelogVersion: '',
   // 自动检测更新。默认关：没设置开发目录之前，定时比对只会一遍遍失败
   autoCheckUpdate: false,
-  // startup = 每次启动检测一次；1h / 6h / 24h = 按间隔循环
+  // startup = 每次启动检测一次；1h / 6h / 12h / 24h = 距上次检测满间隔才检测；
+  // daily = 每天一次（按自然日，过了 0 点后第一次启动就检测，不必满 24 小时）
   autoCheckInterval: 'startup',
+  // 用户对哪一批自动检测结果点过「稍后应用」（存结果指纹，见 showAutoUpdate）：
+  // 同一批变化不再重复提醒，文件清单变了（指纹不同）才重新出现
+  autoCheckDismissedSig: '',
 };
 
 function setting(key) {
@@ -7845,6 +7884,7 @@ async function openSettings() {
     sp.title = info.sourceDir || '';
     $('#statDataPath').textContent = info.dataDir || info.appDir || '—';
     $('#statDataPath').title = info.dataDir || info.appDir || '';
+    restoreAutoUpdate(info);
   } catch {
     /* 信息读取失败不影响使用 */
   }
@@ -7860,6 +7900,7 @@ async function refreshUpdateInfo() {
     sp.title = info.sourceDir || '';
     $('#statDataPath').textContent = info.dataDir || info.appDir || '—';
     $('#statDataPath').title = info.dataDir || info.appDir || '';
+    restoreAutoUpdate(info);
   } catch {
     /* 忽略 */
   }
@@ -8054,54 +8095,86 @@ async function removeDuplicates() {
 let pendingUpdate = null;
 
 /* ---------- 自动检测到的更新 ---------- *
- * 主进程按设置的间隔在后台比对开发目录，结果通过 'update:available' 送过来。
- * 这里只在「软件更新」区块下面摆一条提醒，不弹窗也不抢焦点：定时检测很
- * 可能正赶上用户在干别的，弹出来打断的代价比晚看几分钟大得多。
- * 明细仍然走下面的 updateResult，和手动检查完全同一条路径。 */
+ * 主进程按设置在后台比对开发目录：到期才比（每次启动 / 距上次满 N 小时 /
+ * 每天一次），结果通过 'update:available' 送过来，也留存在主进程那边，
+ * 打开设置时凭 update:info 把结果捞回来（见 restoreAutoUpdate）。
+ * 呈现方式是用户定的：不摆在关于页里当一条横幅，而是用户点进
+ * 设置 → 关于时直接弹窗 ——「检测到 X 个文件改动（修改 A · 新增 B ·
+ * 移除 C）」，下面是「稍后应用 / 应用并重启」；点应用并重启再接上
+ * 原有的应用确认框。在关于页开着时检测正好完成，也当场弹。
+ * 「稍后应用」只在本轮运行里压住这一批：软件重启后只要这批还没应用，
+ * 打开关于还会再弹 —— 免得一批改动被一次「稍后」永久吞掉。 */
 let autoUpdate = null;
-// 用户关掉过的提醒（按比对结果记账：下次比出不一样的东西还会再提醒）
+// 本轮运行里用户已经点过「稍后」的批次指纹（换一批改动会重新弹）
 let autoUpdateDismissed = '';
+// 弹窗正在展示时别被第二次触发叠开
+let autoPopupOpen = false;
 
 function autoUpdateKey(d) {
   return `${d.version || ''}|${d.total}`;
+}
+
+/** 结果指纹：主进程算好的优先用，没有就退回版本号+总数 */
+function autoSig(d) {
+  return d?.sig || autoUpdateKey(d);
 }
 
 function showAutoUpdate(d) {
   // 检测失败（没设开发目录、目录被移走）静默跳过，不要隔一阵就报一次错
   if (!d?.ok) return;
   autoUpdate = d.total ? d : null;
-  if (!d.total) {
-    // 已经没有差异了（可能刚更新完），旧的提醒要收掉
-    $('#updateAvail').hidden = true;
-    return;
-  }
-  if (autoUpdateKey(d) === autoUpdateDismissed) return;
+  maybeShowAutoPopup();
+}
 
+/** 打开设置时把留存的自动检测结果捞回来：检测是在后台跑的，
+ * 用户点进设置 → 关于时多半已经检测完了，结果不该等下一次推送。 */
+function restoreAutoUpdate(info) {
+  if (!info?.autoResult?.total) return;
+  showAutoUpdate(info.autoResult);
+}
+
+/** 关于页正露着脸、且有一批没应用的改动时，把更新弹窗摆出来。
+ * 触发点：打开设置（恢复留存结果）、左侧切到「关于」、检测刚完成。 */
+async function maybeShowAutoPopup() {
+  if (!autoUpdate?.total || autoPopupOpen) return;
+  if (autoSig(autoUpdate) === autoUpdateDismissed) return;
+  // 只在用户正看着「关于」时弹：设置没开、或停在别的分类页，先攒着
+  if ($('#settingsModal').hidden) return;
+  if (!$('.spane[data-pane="about"]')?.classList.contains('is-active')) return;
+  // 更新内容弹窗开着时别叠一层
+  if (!$('#changelogModal').hidden || !$('#confirmModal').hidden) return;
+
+  const d = autoUpdate;
   const parts = [];
   if (d.changed.length) parts.push(`修改 ${d.changed.length}`);
   if (d.added.length) parts.push(`新增 ${d.added.length}`);
-  if (d.removed.length) parts.push(`删除 ${d.removed.length}`);
-  $('#updateAvailDesc').textContent = `共 ${d.total} 个文件有变化（${parts.join(' · ')}）`;
-  $('#updateAvail').hidden = false;
+  if (d.removed.length) parts.push(`移除 ${d.removed.length}`);
+  autoPopupOpen = true;
+  try {
+    const ok = await askConfirm({
+      title: '检测到更新',
+      lead: `检测到 ${d.total} 个文件改动（${parts.join(' · ')}）`,
+      okText: '应用并重启',
+      cancelText: '稍后应用',
+      note: d.depsChanged ? '这次改动涉及依赖，没法直接应用，详情看关于页里的更新明细。' : '',
+    });
+    if (ok) applyAutoUpdate();
+    else autoUpdateDismissed = autoSig(d);
+  } finally {
+    autoPopupOpen = false;
+  }
 }
 
-/** 「查看明细」：把自动检测的这份结果直接展开，不再重新扫一遍磁盘 */
-function viewAutoUpdate() {
+/** 弹窗里点「应用并重启」：把自动检测的这份结果展开成明细（和手动检查
+ * 同一条路径），然后弹出原有的应用确认框。 */
+function applyAutoUpdate() {
   if (!autoUpdate) return;
   pendingUpdate = autoUpdate;
   renderUpdateResult(autoUpdate);
   $('#btnApplyUpdate').disabled = !autoUpdate.total || !!autoUpdate.depsChanged;
-  autoUpdateDismissed = autoUpdateKey(autoUpdate);
-  $('#updateAvail').hidden = true;
-
-  const reduce = document.documentElement.classList.contains('no-motion')
-    || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  $('#updateResult').scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
-}
-
-function dismissAutoUpdate() {
-  if (autoUpdate) autoUpdateDismissed = autoUpdateKey(autoUpdate);
-  $('#updateAvail').hidden = true;
+  autoUpdateDismissed = autoSig(autoUpdate);
+  // 依赖变了应用不了（明细里会写明原因），就不弹确认框了
+  if (!autoUpdate.depsChanged) applyUpdate();
 }
 
 function renderUpdateResult(d) {
@@ -8176,11 +8249,6 @@ async function checkUpdate() {
     renderUpdateResult(d);
     // 依赖变了就不能「应用并重启」，只能重新打包
     $('#btnApplyUpdate').disabled = !d.ok || !d.total || !!d.depsChanged;
-    // 明细已经展开在下面了，提醒条留着只是重复一遍
-    if (d.ok) {
-      autoUpdateDismissed = autoUpdateKey(d);
-      $('#updateAvail').hidden = true;
-    }
   } catch (err) {
     renderUpdateResult({ ok: false, reason: err.message });
   } finally {
