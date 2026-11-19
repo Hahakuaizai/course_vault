@@ -1911,12 +1911,26 @@ button:focus-visible {
 
 :root[data-theme='dark'] .hljs-comment, .app[data-theme='dark'] .hljs-comment, :root[data-theme='dark'] .hljs-quote, .app[data-theme='dark'] .hljs-quote { color: #6d7784; }
 :root[data-theme='dark'] .hljs-keyword, :root[data-theme='dark'] .hljs-selector-tag,
-:root[data-theme='dark'] .hljs-literal, .app[data-theme='dark'] .hljs-literal, :root[data-theme='dark'] .hljs-type, .app[data-theme='dark'] .hljs-type { color: #c39bf0; }
+:root[data-theme='dark'] .hljs-literal, .app[data-theme='dark'] .hljs-literal, :root[data-theme='dark'] .hljs-type, .app[data-theme='dark'] .hljs-type,
+:root[data-theme='dark'] .hljs-section, .app[data-theme='dark'] .hljs-section, :root[data-theme='dark'] .hljs-doctag, .app[data-theme='dark'] .hljs-doctag,
+:root[data-theme='dark'] .hljs-name, .app[data-theme='dark'] .hljs-name, :root[data-theme='dark'] .hljs-strong, .app[data-theme='dark'] .hljs-strong { color: #c39bf0; }
 :root[data-theme='dark'] .hljs-string, :root[data-theme='dark'] .hljs-regexp,
-:root[data-theme='dark'] .hljs-addition, .app[data-theme='dark'] .hljs-addition { color: #7fcf9c; }
-:root[data-theme='dark'] .hljs-number, .app[data-theme='dark'] .hljs-number, :root[data-theme='dark'] .hljs-variable, .app[data-theme='dark'] .hljs-variable { color: #e8a87c; }
-:root[data-theme='dark'] .hljs-title, .app[data-theme='dark'] .hljs-title, :root[data-theme='dark'] .hljs-title.function_, .app[data-theme='dark'] .hljs-title.function_ { color: #85b4f7; }
-:root[data-theme='dark'] .hljs-attr, .app[data-theme='dark'] .hljs-attr, :root[data-theme='dark'] .hljs-property, .app[data-theme='dark'] .hljs-property { color: #7fc7d9; }
+:root[data-theme='dark'] .hljs-addition, .app[data-theme='dark'] .hljs-addition,
+:root[data-theme='dark'] .hljs-attribute, .app[data-theme='dark'] .hljs-attribute, :root[data-theme='dark'] .hljs-meta .hljs-string, .app[data-theme='dark'] .hljs-meta .hljs-string { color: #7fcf9c; }
+/* 月白冷色高亮：数字原来是暖橙 #e8a87c，和月白主题不合拍，换成月白蓝；
+   符号/模板变量原来沿用浅色的 #b0561f（又暖又暗）一并归到月白蓝 */
+:root[data-theme='dark'] .hljs-number, .app[data-theme='dark'] .hljs-number, :root[data-theme='dark'] .hljs-variable, .app[data-theme='dark'] .hljs-variable,
+:root[data-theme='dark'] .hljs-symbol, .app[data-theme='dark'] .hljs-symbol, :root[data-theme='dark'] .hljs-bullet, .app[data-theme='dark'] .hljs-bullet,
+:root[data-theme='dark'] .hljs-template-variable, .app[data-theme='dark'] .hljs-template-variable { color: #a8c3e8; }
+:root[data-theme='dark'] .hljs-link, .app[data-theme='dark'] .hljs-link, :root[data-theme='dark'] .hljs-selector-attr, .app[data-theme='dark'] .hljs-selector-attr,
+:root[data-theme='dark'] .hljs-selector-pseudo, .app[data-theme='dark'] .hljs-selector-pseudo { color: #7fc7d9; }
+:root[data-theme='dark'] .hljs-title, .app[data-theme='dark'] .hljs-title, :root[data-theme='dark'] .hljs-title.function_, .app[data-theme='dark'] .hljs-title.function_,
+:root[data-theme='dark'] .hljs-title.class_, .app[data-theme='dark'] .hljs-title.class_, :root[data-theme='dark'] .hljs-function .hljs-title, .app[data-theme='dark'] .hljs-function .hljs-title,
+:root[data-theme='dark'] .hljs-class .hljs-title, .app[data-theme='dark'] .hljs-class .hljs-title { color: #85b4f7; }
+:root[data-theme='dark'] .hljs-attr, .app[data-theme='dark'] .hljs-attr, :root[data-theme='dark'] .hljs-property, .app[data-theme='dark'] .hljs-property,
+:root[data-theme='dark'] .hljs-params, .app[data-theme='dark'] .hljs-params { color: #7fc7d9; }
+:root[data-theme='dark'] .hljs-built_in, .app[data-theme='dark'] .hljs-built_in { color: #c39bf0; }
+:root[data-theme='dark'] .hljs-tag, .app[data-theme='dark'] .hljs-tag { color: #79828f; }
 
 .sheet-tabs {
   display: flex;

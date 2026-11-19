@@ -78,7 +78,7 @@
       const fwL = anim.frameW / scale;
       const fhL = anim.frameH / scale;
       let crop = { x: 0, y: 0, w: fwL, h: fhL };
-      const cb = pk.contentBox;
+      const cb = pk.previewBox || pk.contentBox;
       if (cb && cb.w > 0 && cb.h > 0 && cb.x >= 0 && cb.y >= 0
         && cb.x + cb.w <= fwL + 0.5 && cb.y + cb.h <= fhL + 0.5) {
         crop = { x: cb.x, y: cb.y, w: cb.w, h: cb.h };
@@ -336,7 +336,7 @@
     const range = document.createElement('input');
     range.type = 'range';
     range.min = '40';
-    range.max = '200';
+    range.max = '420';
     range.step = '2';
     range.value = String(data.sizePx || 92);
     const val = document.createElement('span');

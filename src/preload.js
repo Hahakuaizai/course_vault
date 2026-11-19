@@ -145,6 +145,7 @@ contextBridge.exposeInMainWorld('vault', {
     dragEnd: () => ipcRenderer.send('pet:drag-end'),
     resize: (w, h) => ipcRenderer.send('pet:resize', { w, h }),
     contextMenu: (model) => ipcRenderer.send('pet:context-menu', model),
+    /* 舞台窗口自己的按钮（悬浮形态按钮）走这条，主进程只放行切宠物 */
     onConfig: (fn) => {
       const h = (_e, cfg) => fn(cfg);
       ipcRenderer.on('pet:config', h);

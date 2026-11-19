@@ -18,7 +18,8 @@
   }
   canvas {
     display: block;
-    image-rendering: pixelated;
+    /* 非像素风宠物交给浏览器高质量缩放；像素风由 pet-stage.js 动态改回 pixelated */
+    image-rendering: auto;
     cursor: grab;
   }
   canvas:active { cursor: grabbing; }

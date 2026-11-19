@@ -17,7 +17,12 @@
     { id: 'clawd', label: '克码人生' },
     { id: 'kunkun', label: '坤坤' },
     { id: 'maid', label: '蓝发小女仆' },
+    { id: 'gemini', label: 'Gemini·Q版' },
+    { id: 'gemini-std', label: 'Gemini·标准版' },
   ];
+
+  /* Gemini 娘的 Q 版与标准版是两个独立的宠物包，各自一张卡、
+     各自在菜单里占一行（形态切换功能已按用户要求移除） */
   /* 大小三档是「内容高度」的目标像素，自定义在 40–200 之间拉滑块 */
   const SIZE_PRESETS = { small: 64, medium: 92, large: 128 };
 
@@ -100,7 +105,7 @@
   }
   function targetH() {
     const p = petCfg();
-    if (p.size === 'custom') return Math.min(200, Math.max(40, p.sizePx || 92));
+    if (p.size === 'custom') return Math.min(420, Math.max(40, p.sizePx || 92));
     return SIZE_PRESETS[p.size] || 92;
   }
   function builtinLabel(id) {
@@ -221,6 +226,10 @@
     stage.id = 'cvPet';
     canvas = document.createElement('canvas');
     ctx = canvas.getContext('2d');
+    /* 高质量重采样：放大桌宠时用双三次而非最近邻，
+       否则人物线稿和五官会被邻点采样搬得七零八落 */
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     stage.appendChild(canvas);
     document.body.appendChild(stage);
     bindPointer();
@@ -275,8 +284,15 @@
     const myPack = pack;
     loadSheet(anim.sheet).then((img) => {
       if (!pack || pack !== myPack) return; // 加载期间换了宠物，丢弃这次播放
-      canvas.width = anim.frameW;
-      canvas.height = anim.frameH;
+      /* 像素风包保持最近邻硬边，其它包走浏览器平滑缩放 */
+      canvas.style.imageRendering = pack.pixelArt ? 'pixelated' : 'auto';
+      /* 高 DPI 屏（Windows 125%/150% 缩放）按物理像素做后备，
+         否则位图像素少于屏幕像素，放大后仍然发虚 */
+      const ssp = pack.pixelArt ? 1 : Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+      canvas.width = Math.round(anim.frameW * ssp);
+      canvas.height = Math.round(anim.frameH * ssp);
+      ctx.imageSmoothingEnabled = !pack.pixelArt;
+      ctx.imageSmoothingQuality = 'high';
       sizeStage(anim);
       cur = { name, anim, frames: frameList(anim, img), idx: 0, cycles: mode === 'base' ? Infinity : 1, timer: 0 };
       step();
@@ -307,7 +323,9 @@
     const sx = (i % cols) * a.frameW;
     const sy = Math.floor(i / cols) * a.frameH;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, sx, sy, a.frameW, a.frameH, 0, 0, a.frameW, a.frameH);
+    /* 目标用 canvas 实际像素尺寸（可能已按 devicePixelRatio 放大），
+       不再是 frameW×frameH，否则高 DPI 屏会画到左上角一小块 */
+    ctx.drawImage(img, sx, sy, a.frameW, a.frameH, 0, 0, canvas.width, canvas.height);
   }
 
   function isIdleNow() {
@@ -778,7 +796,9 @@
       it.addEventListener('pointerleave', hidePetHover);
       sub.appendChild(it);
     };
-    for (const b of BUILTINS) addItem(b.id, b.label, cfg.pet === b.id);
+    for (const b of BUILTINS) {
+      addItem(b.id, b.label, cfg.pet === b.id);
+    }
     if (cfg.customName) addItem('custom', cfg.customName, cfg.pet === 'custom');
     const sep = document.createElement('div');
     sep.className = 'sep';
@@ -833,7 +853,7 @@
     const range = document.createElement('input');
     range.type = 'range';
     range.min = '40';
-    range.max = '200';
+    range.max = '420';
     range.step = '2';
     range.value = String(petCfg().sizePx || 92);
     const val = document.createElement('span');
@@ -1114,7 +1134,7 @@
       const fwL = anim.frameW / scale;
       const fhL = anim.frameH / scale;
       let crop = { x: 0, y: 0, w: fwL, h: fhL };
-      const cb = pk.contentBox;
+      const cb = pk.previewBox || pk.contentBox;
       if (cb && cb.w > 0 && cb.h > 0 && cb.x >= 0 && cb.y >= 0
         && cb.x + cb.w <= fwL + 0.5 && cb.y + cb.h <= fhL + 0.5) {
         crop = { x: cb.x, y: cb.y, w: cb.w, h: cb.h };
@@ -1367,7 +1387,7 @@
         else if (cmd.type === 'setSizePx') {
           /* 桌面菜单里的大小滑块拖出来的像素值：切到自定义并
              落到这个大小，再把新配置同步回桌面窗口即时生效 */
-          setPetCfg({ size: 'custom', sizePx: Math.min(200, Math.max(40, Number(cmd.px) || 92)) });
+          setPetCfg({ size: 'custom', sizePx: Math.min(420, Math.max(40, Number(cmd.px) || 92)) });
           syncSettingsUI();
           syncExternal();
         }

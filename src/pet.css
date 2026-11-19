@@ -37,7 +37,9 @@
 
 #cvPet canvas {
   display: block;
-  image-rendering: pixelated;
+  /* 默认交给浏览器做高质量缩放（非像素风宠物放大时才不糊）。
+     像素风包由 pet.js 在播放时动态改回 pixelated。 */
+  image-rendering: auto;
 }
 
 /* ---------- 右键多级菜单 ---------- */
@@ -152,6 +154,7 @@
 
 .pet-card {
   position: relative;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -184,7 +187,7 @@
 
 .pet-card canvas {
   display: block;
-  image-rendering: pixelated;
+  image-rendering: auto;
   /* 预览尺寸由 pet.js 按角色内容框统一算好（角色高约 72px），
      这里只留一道保险丝：加载失败时 canvas 有默认 300×150，
      不能把卡片撑高；等比缩放不变形 */
@@ -237,7 +240,7 @@
 
 .cv-pet-hoverprev canvas {
   display: block;
-  image-rendering: pixelated;
+  image-rendering: auto;
 }
 
 .pet-card-name {
@@ -347,3 +350,4 @@
   min-width: 38px;
   text-align: right;
 }
+

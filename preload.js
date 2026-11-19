@@ -177,6 +177,7 @@ contextBridge.exposeInMainWorld('vault', {
       return () => ipcRenderer.removeListener('pet:menu-open', h);
     },
     menuAction: (a) => ipcRenderer.send('pet:menu-action', a),
+    /* 舞台窗口自己的按钮（悬浮形态按钮）走这条，主进程只放行切宠物 */
     menuClose: () => ipcRenderer.send('pet:menu-close'),
   },
 

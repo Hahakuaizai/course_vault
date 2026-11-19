@@ -16,7 +16,10 @@
     { id: 'clawd', label: '克码人生' },
     { id: 'kunkun', label: '坤坤' },
     { id: 'maid', label: '蓝发小女仆' },
+    { id: 'gemini', label: 'Gemini·Q版' },
+    { id: 'gemini-std', label: 'Gemini·标准版' },
   ];
+  /* Gemini 娘的 Q 版与标准版是两个独立的宠物包（形态切换已移除） */
   const SIZE_PRESETS = { small: 64, medium: 92, large: 128 };
   const ANIM_LABELS = {
     idle: '待机', 'idle-look': '东张西望', 'idle-peck': '啄一啄', 'idle-spout': '喷水',
@@ -61,7 +64,7 @@
   let lastWinSize = '';
 
   function targetH() {
-    if (cfg.size === 'custom') return Math.min(200, Math.max(40, cfg.sizePx || 92));
+    if (cfg.size === 'custom') return Math.min(420, Math.max(40, cfg.sizePx || 92));
     return SIZE_PRESETS[cfg.size] || 92;
   }
 
@@ -124,8 +127,14 @@
     const myPack = pack;
     loadSheet(anim.sheet).then((img) => {
       if (!pack || pack !== myPack) return;
-      canvas.width = anim.frameW;
-      canvas.height = anim.frameH;
+      /* 像素风包保持最近邻硬边，其它包走浏览器平滑缩放 */
+      canvas.style.imageRendering = pack.pixelArt ? 'pixelated' : 'auto';
+      /* 高 DPI 屏按物理像素做后备，避免位图少于屏幕像素而发虚 */
+      const ssp = pack.pixelArt ? 1 : Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+      canvas.width = Math.round(anim.frameW * ssp);
+      canvas.height = Math.round(anim.frameH * ssp);
+      ctx.imageSmoothingEnabled = !pack.pixelArt;
+      ctx.imageSmoothingQuality = 'high';
       sizeStage(anim);
       cur = { name, anim, frames: frameList(anim, img), idx: 0, cycles: mode === 'base' ? Infinity : 1, timer: 0 };
       step();
@@ -154,8 +163,9 @@
     if (!img) return;
     const cols = a.cols || 1;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    /* 目标用 canvas 实际像素尺寸（可能已按 devicePixelRatio 放大） */
     ctx.drawImage(img, (i % cols) * a.frameW, Math.floor(i / cols) * a.frameH,
-      a.frameW, a.frameH, 0, 0, a.frameW, a.frameH);
+      a.frameW, a.frameH, 0, 0, canvas.width, canvas.height);
   }
 
   function isIdleNow() {
@@ -230,6 +240,7 @@
 
   function applyConfig(next) {
     cfg = Object.assign(cfg, next || {});
+    if (cfg.theme) document.documentElement.setAttribute('data-theme', cfg.theme);
     if (pet && pet.debug) pet.debug('config pet=' + cfg.pet);
     stopCurrent();
     for (const u of blobURLs) URL.revokeObjectURL(u);
