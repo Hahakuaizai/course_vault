@@ -807,6 +807,46 @@ function openChangelog(mode = 'latest') {
   $('#changelogModal').hidden = false;
 }
 
+/**
+ * 把弹窗里正在展示的更新内容整理成纯文本，供「复制」按钮使用。
+ *
+ * 直接从渲染好的 DOM 里取，不重新计算：弹窗可能显示最新一批，也可能是
+ * 设置里翻出来的历史，用户看到什么就该复制到什么。
+ */
+function changelogAsText() {
+  const box = $('#changelogBody');
+  if (!box) return '';
+  const out = [];
+  for (const sec of box.querySelectorAll('.cl-batch')) {
+    const ver = sec.querySelector('.cl-ver')?.textContent?.trim() || '';
+    const date = sec.querySelector('.cl-date')?.textContent?.trim() || '';
+    out.push(date ? `${ver}  ${date}` : ver);
+    for (const li of sec.querySelectorAll('.cl-item')) {
+      const tag = li.querySelector('.cl-tag')?.textContent?.trim() || '';
+      const text = li.querySelector('.cl-text')?.textContent?.trim() || '';
+      out.push(`- ${tag ? `[${tag}] ` : ''}${text}`);
+    }
+    const files = sec.querySelector('.cl-files')?.textContent?.trim();
+    if (files) out.push(files);
+    out.push('');
+  }
+  return out.join('\n').trim();
+}
+
+/**
+ * 写系统剪贴板。走主进程 —— 渲染进程的 navigator.clipboard 在窗口失焦时会
+ * 抛异常，但内容其实已经写进去了，从返回值上根本分不清成败（点了复制显示
+ * 「复制失败」，剪贴板里却是有内容的）。
+ */
+async function copyPlainText(text) {
+  try {
+    await api.clipboard.write(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function closeChangelog() {
   const m = $('#changelogModal');
   if (!m || m.hidden) return;
@@ -6611,6 +6651,18 @@ function bindEvents() {
 
   $('#btnChangelogClose').addEventListener('click', closeChangelog);
   $('#btnChangelogOk').addEventListener('click', closeChangelog);
+  $('#btnChangelogCopy').addEventListener('click', async function () {
+    /* 复制当前展示的更新内容：弹窗里可能只显示最新一批（本次更新），
+     * 也可能是在设置里翻历史，所以直接从已经渲染好的 DOM 里取，
+     * 不重新算一遍 —— 看到什么就复制什么 */
+    const btn = this;
+    const text = changelogAsText();
+    if (!text) return;
+    const ok = await copyPlainText(text);
+    const old = btn.textContent;
+    btn.textContent = ok ? '已复制' : '复制失败';
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  });
   $('#changelogModal').addEventListener('click', (e) => {
     if (e.target.id === 'changelogModal') closeChangelog();
   });

@@ -2034,7 +2034,10 @@ button:focus-visible {
   --ed-pad-y: 22px;
   --ed-font: 'Cascadia Code', 'Consolas', 'Microsoft YaHei UI', monospace;
   --ed-size: 13px;
-  --ed-line: 1.75;
+  /* 行高必须是整数像素。原来写的是倍数 1.75，13px × 1.75 = 22.75px 带小数，
+   * textarea 内部的行盒取整和高亮层的 <pre> 不一致，每行攒零点几像素的差，
+   * 越往下越明显 —— 表现就是光标跑到了别的那一行上 */
+  --ed-line: 24px;
 
   position: relative;
   flex: 1;
@@ -2048,6 +2051,9 @@ button:focus-visible {
   margin: 0;
   padding: var(--ed-pad-y) var(--ed-pad-x);
   border: none;
+  /* 两层都用 border-box：textarea 默认是 content-box，加完内边距会比容器
+   * 宽出一圈，文字起点和高亮层差开一点，行越长越容易看出来 */
+  box-sizing: border-box;
   font-family: var(--ed-font);
   font-size: var(--ed-size);
   line-height: var(--ed-line);

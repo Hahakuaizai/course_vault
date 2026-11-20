@@ -1,7 +1,7 @@
 'use strict';
 
 const {
-  app, BrowserWindow, ipcMain, dialog, shell, protocol, net, nativeTheme, screen, Menu,
+  app, BrowserWindow, ipcMain, dialog, shell, protocol, net, nativeTheme, screen, Menu, clipboard,
 } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -4231,6 +4231,14 @@ if (Test-Path $owp) {
     } catch {
       return false;
     }
+  });
+
+  /* 复制文本到系统剪贴板。渲染进程的 navigator.clipboard 在窗口失去焦点时
+   * 会直接抛异常（内容其实已经写进去了），从返回值上根本分不清成功还是失败；
+   * 主进程的 clipboard 不受焦点影响，写没写进去是确定的 */
+  ipcMain.handle('clipboard:write', (_e, text) => {
+    clipboard.writeText(String(text ?? ''));
+    return true;
   });
 
   /* --- 软件更新 --- */
