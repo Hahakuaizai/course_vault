@@ -21,10 +21,9 @@ const crypto = require('node:crypto');
 const SOURCE_EXT = new Set([
   '.js', '.css', '.html', '.json', '.md', '.bat', '.ico', '.png', '.svg',
   '.webp',
-  /* 桌宠的动作动画是 .webm，现在 src/pets 下有 114 个。跟 .webp 是同一个坑：
-   * 漏了它，改过的动画永远同步不过去，而且检查更新还会报「没有变化」，
-   * 用户只能靠重新打包分发才能生效，根本看不出问题出在同步白名单上。
-   * changelog 的 TRACK_EXT 早就带了 .webm，两边必须保持一致。 */
+  /* 桌宠动作动画（.webm）纳入同步白名单：src/pets 下现有 114 个，
+   * 遗漏会导致动画改动无法随更新同步，检查更新也会报告「没有变化」。
+   * changelog 的 TRACK_EXT 已包含该扩展名，两处必须保持一致。 */
   '.webm',
 ]);
 
@@ -96,16 +95,13 @@ function collectCode(root, base = root, out = new Map(), unreadableDirs = null) 
 }
 
 /**
- * 哈希的落盘缓存：{ 绝对路径: { s: 文件大小, m: 修改时间, h: sha1 } }。
+ * 新增哈希缓存：按文件大小与修改时间复用上次结果，避免重复读取素材。
  *
- * 为什么要缓存：src/pets 现在有 180MB（225 张 webp + 114 个 webm），
- * 每次检查更新都全量读一遍算 sha1，热缓存 185ms，冷盘要一两秒；而且
- * diff() 还要把源目录和程序目录各扫一遍。改过的文件必然产生新的 mtime，
- * 所以「大小和时间戳都没变」就可以直接沿用上次的哈希，不用读文件。
- *
- * 和 changelog 的快照是同一套思路，但两份数据互相独立：那个盯的是
- * 「安装目录这期间变了什么」，这个盯的是「两个目录现在差在哪」。
- * 缓存丢了/坏了只是退回全量哈希，不影响判断正确性。
+ * 缓存键为绝对路径，值为 { s: 大小, m: 修改时间, h: sha1 }。src/pets
+ * 现有 180MB（225 张 webp + 114 个 webm），每轮比对若全量读取需要
+ * 200ms 以上，而 diff() 要对源目录与程序目录各扫一遍。改动过的文件必然
+ * 产生新的修改时间，因此大小与时间都未变时可沿用上次哈希。
+ * 缓存缺失或损坏时退回全量计算，比对结果不受影响。
  */
 function cacheFile(userDataDir) {
   return path.join(userDataDir, 'update-cache.json');
@@ -143,14 +139,14 @@ function hashCached(full, cache) {
   return h;
 }
 
-/** 更新备份保留份数。回滚只会用到最近那一次，更早的基本不可能再翻。 */
+/** 更新备份仅保留最近 10 份，更早的自动清理。 */
 const KEEP_BACKUPS = 10;
 
 /**
- * 清掉过期的更新备份。
+ * 更新备份仅保留最近 10 份，超出部分自动清理。
  *
- * userData/update-backup 每次更新留一份「被替换文件的副本」，到 2026-11
- * 已经攒了 111 份、41MB。留着没什么用，长期跑下去只会越攒越多。
+ * userData/update-backup 每次更新会保存一份被替换文件的副本，此前已
+ * 累积至 111 份、41MB。回滚只会用到最近一次，更早的没有保留意义。
  */
 function pruneBackups(root) {
   try {
@@ -182,10 +178,8 @@ function depsChanged(sourceDir, appDir) {
     try {
       const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
       const deps = pkg.dependencies || {};
-      /* 按依赖名排序再序列化。npm/pnpm 偶尔会整段重写 package.json，
-       * 依赖的插入顺序跟着变（内容其实没动）。直接 stringify 会把「顺序
-       * 变了」误判成「依赖变了」，随后 apply() 硬拦更新，用户还以为是
-       * 代码出了问题。排序后只比真实内容。 */
+      /* 依赖比对改为按名称排序后再序列化，避免键顺序变化被误判为依赖变更。
+       * npm 与 pnpm 可能重写 package.json 的键顺序，直接序列化会误报。 */
       return JSON.stringify(Object.keys(deps).sort().map((k) => [k, deps[k]]));
     } catch {
       return null;
@@ -218,9 +212,9 @@ function createUpdater({
   function writeVersion(v) {
     const data = { version: v, updatedAt: new Date().toISOString() };
     const f = versionFile();
-    /* 先写临时文件再改名（与 changelog 的 writeJson 一致）。直接写的时候
-     * 如果进程正好在这一刻被结束、或者磁盘满了，version.json 会剩下半截
-     * JSON；下次 readVersion() 解析失败回落 0.0.0，版本号一夜回到解放前。 */
+    /* 版本号改为原子写入：先写临时文件再改名。直接覆盖写入时若进程
+     * 在写入过程中被结束，version.json 会残留半截 JSON，读取方回落到
+     * 0.0.0，版本号从头计起。 */
     const tmp = `${f}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
     fs.renameSync(tmp, f);
@@ -232,8 +226,8 @@ function createUpdater({
     if (!sourceDir) return { ok: false, reason: '尚未设置开发目录' };
     if (!fs.existsSync(sourceDir)) return { ok: false, reason: '开发目录不存在' };
 
-    /* 拿不到 userData 目录就退化成不做缓存（每次全量哈希），
-     * 结果一样，只是慢一点 —— 不能在极早期调用时直接抛错 */
+    /* 无法读取数据目录时退化为全量哈希，比对结果不受影响，
+     * 仅速度稍慢，不应在极早期调用时直接抛错。 */
     let userDataDir = '';
     try { userDataDir = getUserDataDir(); } catch { /* 退化 */ }
     const cache = userDataDir ? loadCache(userDataDir) : {};
@@ -271,9 +265,8 @@ function createUpdater({
       if (!src.has(rel)) removed.push(rel);
     }
 
-    /* 把这一轮算出来的 size/mtime/哈希存下来，下次没变的文件就不读了。
-     * 放在返回前：即使后面 pushUpdateAvailable 之类的流程出错，缓存也已经
-     * 落到盘上，不会白算一遍。 */
+    /* 比对结果返回前先落盘缓存：即使后续推送流程出错，
+     * 这一轮的哈希也已保存，不会重复计算。 */
     if (userDataDir) saveCache(userDataDir, cache);
 
     return {

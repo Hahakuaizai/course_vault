@@ -19,9 +19,9 @@
 (function () {
   'use strict';
 
-  /* 开发目录默认值。真实值在启动时从主进程问一次（设置里能改开发目录，
-   * 换过之后发布命令必须 cd 到新地方，否则是对着不存在的路径打包）。
-   * 问不到就退回这个默认值，命令照样能用。 */
+  /* 开发目录改为从主进程配置读取，未配置时使用默认路径。
+   * 设置中可修改开发目录，发布命令必须随之指向新路径，
+   * 否则会对不存在的目录打包。 */
   var DEV_DIR = 'C:\\Users\\30894\\Desktop\\workspace\\course-vault';
   (function initDevDir() {
     try {
@@ -85,13 +85,11 @@
       'cd ' + DEV_DIR,
       'New-Item -ItemType Directory -Force "' + RELEASE_DIR + '" | Out-Null',
       'node build.js "' + out + '"',
-      /* 打包失败就停。以前不管结果继续往下压，会在「要压缩的目录不存在」
-       * 上报错，错误信息和真正的病因（build.js 失败）完全对不上 */
+      /* 打包失败立即中止，避免后续压缩报出与真实原因无关的错误。 */
       'if ($LASTEXITCODE -ne 0) { Write-Host "打包失败，已中止" -ForegroundColor Red; exit 1 }',
-      /* 用 ZipFile::CreateFromDirectory 代替 Compress-Archive：项目素材现在
-       * 180MB（225 张 webp + 114 个 webm），Compress-Archive 是逐个添加的
-       * O(n²) 实现，这个体量要跑好几分钟；这个 API 一次性建索引，快一个
-       * 量级，也绕开它对中文路径的老毛病。旧 zip 先删掉，否则它会追加进去 */
+      /* 压缩改用 ZipFile.CreateFromDirectory 替代 Compress-Archive：
+       * 项目素材约 180MB，后者为逐个添加的实现，耗时过长；
+       * 同时先删除旧压缩包，避免内容被追加。 */
       'if (Test-Path "' + zip + '") { Remove-Item "' + zip + '" -Force }',
       'Add-Type -AssemblyName System.IO.Compression.FileSystem',
       '[System.IO.Compression.ZipFile]::CreateFromDirectory("' + out + '", "' + zip + '")',
@@ -163,9 +161,8 @@
     var btn = document.getElementById('btnDevtools');
     var panel = document.getElementById('devtoolsPanel');
     if (!btn || !panel) return;
-    /* 要用的元素一次取全再绑事件。以前只判了按钮和面板本身，面板里少一个
-     * dvCode* / btnDvCopy* 就会在 addEventListener 上抛 TypeError，
-     * 整个插件一声不响地失效，还完全看不出是哪儿缺了东西 */
+    /* 所需元素一次性取齐后再绑定事件：此前仅校验按钮与面板本身，
+     * 面板内缺少任一元素都会在绑定阶段抛出异常，导致插件静默失效。 */
     var els = {};
     var ids = ['dvCode1', 'dvCode2', 'dvCode3', 'btnDvCopy1', 'btnDvCopy2', 'btnDvCopy3'];
     for (var i = 0; i < ids.length; i++) {

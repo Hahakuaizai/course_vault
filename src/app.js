@@ -762,10 +762,9 @@ function renderReleaseNotes(mode = 'latest') {
    * 看不出是哪一版改的；存量批次本身没记版本，只能这样推算 */
   const pm = /^(\d+)\.(\d+)\.(\d+)$/.exec(S.version || '');
   const verFor = (b, i) => {
-    /* 批次自己记了版本号就用它 —— 那是扫描当时的真实值，最准。
-     * 以前先按「当前版本往回数」推算，只要中间跳过一个版本号（手动改过
-     * version.json、两次更新之间没重启、或者旧批次被清掉过），后面的批次
-     * 就全错位：实际发的是 1.0.109，界面上写成 v1.0.110。 */
+    /* 版本号取批次记录的原始值：扫描当时的版本最准确。按「当前版本
+     * 往回数」推算时，一旦中间跳号（手动改过 version.json、两次更新
+     * 之间未重启、旧批次被清理），后续批次会整体错位。 */
     if (b.ver) return `v${b.ver}`;
     if (pm && Number(pm[3]) - i >= 0) return `v${pm[1]}.${pm[2]}.${Number(pm[3]) - i}`;
     return i === 0 ? cur : '更早';
@@ -776,8 +775,8 @@ function renderReleaseNotes(mode = 'latest') {
   const moreNote = mode === 'all' && list.length > shown.length
     ? '<div class="cl-files">仅显示近 10 次更新，更早的记录仍保存在软件数据中。</div>'
     : '';
-  /* 一条说明都没有时（手写说明被清空、插件批次又还没生成），
-   * 以前这里渲染出来是空白面板，看着像界面坏了 */
+  /* 说明条目为空时给出提示，避免弹窗渲染成空白面板；
+   * 手写说明被清空、插件批次尚未生成时会走到这里。 */
   const emptyNote = shown.length ? '' : '<div class="cl-files">本次更新没有可展示的说明。</div>';
   body.innerHTML = hint + emptyNote + shown.map((b, i) => releaseBlock(b, verFor(b, i), i === 0, i)).join('') + moreNote;
   /* 插件二（仅本机）：把最近一批交给发布助手挂按钮。更新弹窗和

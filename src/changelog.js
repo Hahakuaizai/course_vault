@@ -53,7 +53,7 @@ const SKIP_FILES = new Set(['version.json', 'package-lock.json', 'vault-data.jso
 
 const MAX_BATCHES = 60;      // 历史最多保留多少批
 const MAX_ITEMS = 8;         // 一批最多展示多少条
-const MAX_PER_FILE = 2;      // 单个文件最多贡献多少条
+const MAX_PER_FILE = 3;      // 单个文件最多贡献多少条
 const BIG_FILE = 50 * 1024 * 1024; // 超过这个大小的文件不读内容
 
 /* 文件 → 界面上的模块名（兜底条目用） */
@@ -67,6 +67,7 @@ const FILE_LABEL = [
   [/main\.js$/, '主进程'],
   [/preload\.js$/, '预加载'],
   [/updater\.js$/, '更新器'],
+  [/changelog\.js$/, '更新内容生成'],
   [/db\.js$/, '数据库'],
   [/index\.html$/, '页面结构'],
 ];
@@ -101,7 +102,9 @@ function commentText(rawLine) {
   else if (t.startsWith('*')) t = t.slice(1);
   else return null;
   t = t.replace(/\*\/\s*$/, ''); // 注释结束符号不该混进说明文字
-  t = t.replace(/^[★※·\-—\s]+/, '').trim();
+  /* 行首的装饰符一律剥掉。单行 JSDoc（块注释开符和正文在同一行）去掉
+   * 斜杠后还剩一个星号，以前没处理，摘出来的更新条目会带着「* 」开头 */
+  t = t.replace(/^[★※·\-—*=\s]+/, '').trim();
   if (t.length < 6) return null;
   if (/^[\s\*=\-]+$/.test(t)) return null;   // 纯分隔线
   if (t.startsWith('@')) return null;        // JSDoc 标签不是说明
@@ -156,16 +159,25 @@ function extractFromDiff(oldText, newText) {
     seen.add(key);
     candidates.push({ type, text, star: !!star, curated: !!curated });
   };
-  /* 跨行注释先攒着：上一行以顿号/逗号结尾、下一行还是注释行时，
+  /* 跨行注释先攒着：上一行以顿号/逗号/冒号结尾、下一行还是注释行时，
    * 两行本是一句话，拼完整再提炼免得拆成两条、后半句还带着符号 */
   let buf = null;
   let bufStar = false;
+  /* 是否正处在一个多行块注释里。块的首行是这条改动的摘要，
+   * 块内后续行属于解释和举例，不单独成为更新条目 */
+  let inBlock = false;
+  /* 这个块里是否已经取过摘要行。块注释开符单独占一行时，第一行正文
+   * 才是摘要，之后的行只用来补全没写完的句子 */
+  let blockHasSummary = false;
   const flush = () => {
     if (buf == null) return;
     pushCand(classify(buf), firstClause(buf), bufStar, false);
     buf = null;
     bufStar = false;
   };
+  /* 这句话还没说完，下一行会接着写 */
+  const CONTINUES = /[、，：:]$/;
+  const CLOSES = /\*\/\s*$/;
   for (const line of addedLines) {
     /* 优先采信手写说明：app.js 里 RELEASE_NOTES 新增的条目本身就是
      * 人工总结好的更新说明（{ type, text } 一行一条），比从注释里
@@ -175,13 +187,57 @@ function extractFromDiff(oldText, newText) {
     if (note) {
       flush();
       pushCand(note[1], firstClause(note[2]), true, true);
+      inBlock = false;
       continue;
     }
     const body = commentText(line);
-    if (!body) { flush(); continue; }
+    const t = line.trim();
+    const opensBlock = t.startsWith('/*') || t.startsWith('<!--');
+    const closedHere = CLOSES.test(t) || /-->\s*$/.test(t);
+
+    if (opensBlock) {
+      /* 块注释开符出现：这个块只贡献一条摘要。以前逐行都当候选，
+       * 块里的解释性续行会被摘成「漏了它，改过的动画……」这种半句。 */
+      flush();
+      inBlock = !closedHere;
+      blockHasSummary = false;
+      if (line.includes('★')) bufStar = true;
+      if (body) {
+        buf = body;
+        blockHasSummary = true;
+        if (closedHere || !CONTINUES.test(body)) flush();
+      }
+      continue;
+    }
+
+    if (inBlock) {
+      if (!body) {
+        /* 空注释行（只有装饰符）标志句子结束 */
+        flush();
+        if (closedHere) inBlock = false;
+        continue;
+      }
+      if (!blockHasSummary) {
+        /* 开符单独占一行时，块里第一行正文才是摘要 */
+        buf = body;
+        blockHasSummary = true;
+        if (line.includes('★')) bufStar = true;
+        if (!CONTINUES.test(body)) flush();
+        if (closedHere) inBlock = false;
+        continue;
+      }
+      /* 摘要之后的续行：只在上一句没写完时接上，否则丢弃 */
+      if (buf != null) {
+        buf += body;
+        if (!CONTINUES.test(body)) flush();
+      }
+      if (closedHere) inBlock = false;
+      continue;
+    }
+    /* 单行注释（双斜杠）：一行就是一条 */
     buf = buf == null ? body : buf + body;
     if (line.includes('★')) bufStar = true;
-    if (!/[、，]$/.test(body)) flush();
+    if (!CONTINUES.test(body)) flush();
   }
   flush();
   /* 手写说明条目（curated）最优先，其次带 ★ 的重点注释，其余保持出现顺序 */
@@ -195,6 +251,12 @@ function extractFromDiff(oldText, newText) {
  *             candidates, added, removed }]
  */
 function composeItems(details) {
+  /* 生成说明的模块本身不参与注释提取：它里面写的全是实现细节
+   * （「行首的装饰符一律剥掉」这类），摘出来对用户没有任何意义。
+   * 清空 candidates 后由下面的兜底条目统一报一行代码改动。 */
+  for (const d of details) {
+    if (/(^|\/)changelog\.js$/.test(d.rel)) d.candidates = [];
+  }
   const items = [];
   const usedKeys = new Set();
   const push = (type, text) => {
@@ -211,10 +273,16 @@ function composeItems(details) {
     if (items.length >= MAX_ITEMS) break;
     if (d.candidates && d.candidates.length) push(d.candidates[0].type, d.candidates[0].text);
   }
-  /* 第二轮：还有名额时补第二条 */
+  /* 第二轮：还有名额就把每个文件剩下的候选按顺序补进来。
+   * 以前每个文件只补第二条，改动多的文件里排在后面的真实改动
+   * （换压缩方式、依赖比对规则之类的）会被整个丢掉 */
   for (const d of details) {
     if (items.length >= MAX_ITEMS) break;
-    if (d.candidates && d.candidates.length > 1) push(d.candidates[1].type, d.candidates[1].text);
+    const rest = (d.candidates || []).slice(1);
+    for (const c of rest) {
+      if (items.length >= MAX_ITEMS) break;
+      push(c.type, c.text);
+    }
   }
   /* 删除的文件：明确说一声 */
   for (const d of details) {
