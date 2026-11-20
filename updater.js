@@ -275,6 +275,10 @@ function createUpdater({
       added: added.sort(),
       removed: removed.sort(),
       total: changed.length + added.length + removed.length,
+      /* 程序目录里一共多少个文件。apply() 判断「是不是选错目录了」
+       * 要看删除占比，光看绝对数量分不清「删了一个测试文件」和
+       * 「整棵树都不见了」 */
+      totalFiles: dst.size,
       unreadable: unreadable.sort(),
       unreadableDirs,
       version: readVersion(),
@@ -312,11 +316,28 @@ function createUpdater({
       throw new Error('依赖有变化，只同步代码会让软件无法启动。请重新打包后再分发');
     }
 
-    // 删除的比更新的还多，多半是选错目录了
-    if (d.removed.length > d.changed.length + d.added.length) {
+    /* 删除保护：只有「要删掉的占了程序目录一半以上、而且没有任何其他改动」
+     * 才算选错目录。原来的条件是 removed > changed + added —— 用户只删掉
+     * 一个测试文件时 changed 和 added 都是 0，1 > 0 成立，一次正常的删除
+     * 被当成误操作拦下，更新直接走不通。 */
+    const totalFiles = Number(d.totalFiles) || 0;
+    const mostlyDeleting = totalFiles > 0 && d.removed.length / totalFiles > 0.5;
+    if (mostlyDeleting && d.changed.length + d.added.length === 0) {
       throw new Error(
-        `要删除的文件（${d.removed.length} 个）比要更新的还多，`
+        `要删除的文件有 ${d.removed.length} 个，超过程序目录的一半，`
         + '开发目录可能选错了，已中止。请检查「开发目录」设置。',
+      );
+    }
+    /* 另一个方向的误选：程序目录里的文件和开发目录几乎对不上名，说明两边
+     * 根本不是同一个项目（整个拷错文件夹就会这样）。判据用「对得上的比例」，
+     * 而不是「新增/删除各占多少」—— 小项目里正常改一两个文件，新增和删除
+     * 的比例都会瞬间超过三成，那样反而把正常更新拦死。 */
+    const matched = totalFiles - d.removed.length;
+    const matchRatio = totalFiles ? matched / totalFiles : 1;
+    if (totalFiles >= 5 && matchRatio < 0.34) {
+      throw new Error(
+        `程序目录里只有 ${matched} 个文件能在开发目录里找到（共 ${totalFiles} 个），`
+        + '两边可能不是同一个项目，已中止。请检查「开发目录」设置。',
       );
     }
 
