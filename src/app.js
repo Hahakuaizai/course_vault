@@ -246,6 +246,12 @@ function toast(msg, type = '') {
  * 旧的批留在数组里当历史，反正弹窗只取 slice(0, 1)。 */
 const RELEASE_NOTES = [
   {
+    date: '2026-11-20',
+    items: [
+      { type: 'improve', text: '框选优化：拖出线框但没有选中任何文件或文件夹时，松开鼠标不再进入选择模式' },
+    ],
+  },
+  {
     date: '2026-11-19',
     items: [
       { type: 'fix', text: '两只 Gemini 桌宠改名：卡片与菜单里显示为「Gemini·Q版」「Gemini·标准版」' },
@@ -5806,6 +5812,7 @@ function bindEvents() {
     mq = {
       x0: e.clientX - rect.left + content.scrollLeft,
       y0: e.clientY - rect.top + content.scrollTop,
+      wasSelectMode: S.selectMode,
       baseFiles: new Set(addMode ? S.selected : []),
       baseDirs: new Set(addMode ? S.selectedDirs : []),
       moved: false,
@@ -5864,6 +5871,7 @@ function bindEvents() {
   const endMarquee = (fromBlur = false) => {
     if (!mq) return;
     const moved = mq.moved;
+    const wasSelectMode = mq.wasSelectMode;
     mq = null;
     marquee.hidden = true;
     document.body.classList.remove('is-marquee');
@@ -5871,6 +5879,13 @@ function bindEvents() {
       const keys = [...S.shownIds].filter((k) => hasKey(k));
       S.anchor = { id: keys[keys.length - 1] || null, list: 'grid' };
       marqueeEndedAt = Date.now();
+      /* 框选松手时一个都没选中、且进多选模式是这次拖动造成的
+       * （拖动前不在多选模式）→ 撤销进模式，回到普通状态
+       * （2026-11-20 用户要的）。拖动前已在多选模式的不动：
+       * 那时空框选只是清空已选，模式保持。 */
+      if (!wasSelectMode && S.selected.size === 0 && S.selectedDirs.size === 0) {
+        setSelectMode(false);
+      }
     } else if (S.selectMode && !fromBlur) {
       /* 多选模式下在网格空白处单击（按下松开没拖动）= 退出
        * 多选模式（2026-11-18 用户要的）。拖出框选框的 mouseup
