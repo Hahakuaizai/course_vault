@@ -762,8 +762,12 @@ function renderReleaseNotes(mode = 'latest') {
    * 看不出是哪一版改的；存量批次本身没记版本，只能这样推算 */
   const pm = /^(\d+)\.(\d+)\.(\d+)$/.exec(S.version || '');
   const verFor = (b, i) => {
-    if (pm && Number(pm[3]) - i >= 0) return `v${pm[1]}.${pm[2]}.${Number(pm[3]) - i}`;
+    /* 批次自己记了版本号就用它 —— 那是扫描当时的真实值，最准。
+     * 以前先按「当前版本往回数」推算，只要中间跳过一个版本号（手动改过
+     * version.json、两次更新之间没重启、或者旧批次被清掉过），后面的批次
+     * 就全错位：实际发的是 1.0.109，界面上写成 v1.0.110。 */
     if (b.ver) return `v${b.ver}`;
+    if (pm && Number(pm[3]) - i >= 0) return `v${pm[1]}.${pm[2]}.${Number(pm[3]) - i}`;
     return i === 0 ? cur : '更早';
   };
   /* 设置里的历史只显示近 10 次：更早的批次不渲染，但仍完整存放在
@@ -772,7 +776,10 @@ function renderReleaseNotes(mode = 'latest') {
   const moreNote = mode === 'all' && list.length > shown.length
     ? '<div class="cl-files">仅显示近 10 次更新，更早的记录仍保存在软件数据中。</div>'
     : '';
-  body.innerHTML = hint + shown.map((b, i) => releaseBlock(b, verFor(b, i), i === 0, i)).join('') + moreNote;
+  /* 一条说明都没有时（手写说明被清空、插件批次又还没生成），
+   * 以前这里渲染出来是空白面板，看着像界面坏了 */
+  const emptyNote = shown.length ? '' : '<div class="cl-files">本次更新没有可展示的说明。</div>';
+  body.innerHTML = hint + emptyNote + shown.map((b, i) => releaseBlock(b, verFor(b, i), i === 0, i)).join('') + moreNote;
   /* 插件二（仅本机）：把最近一批交给发布助手挂按钮。更新弹窗和
    * 设置里的历史视图都挂——弹窗不小心关了，还能从设置里再打开，
    * 按钮生成的仍是最近一次更新的发布代码 */
@@ -5066,6 +5073,8 @@ function handleEscape() {
   closeCtx();
   // 确认框自己在捕获阶段处理 ESC，这里不要重复处理
   if (!$('#confirmModal').hidden) return;
+  // 项目架构图是全屏覆盖，Esc 先把它收起来
+  if (!$('#archModal').hidden) { $('#archModal').hidden = true; return; }
   // 更新公告放最前面：它是启动时弹的，其他弹窗都还没开
   if (!$('#changelogModal').hidden) { closeChangelog(); return; }
   /* 图片编辑器里正框着裁剪区域：Esc 先取消这个选区，
@@ -6585,6 +6594,22 @@ function bindEvents() {
   /* 更新内容公告 */
   /* 设置 → 关于里点「查看」：显示全部历史，不只最新一批 */
   $('#btnShowChangelog').addEventListener('click', () => openChangelog('all'));
+
+  /* 关于页「项目架构图」：在应用内全屏内嵌展示，不另开窗口。
+     src 只在第一次打开时赋值，避免每次启动都白白加载 800KB 的图；
+     关闭只是隐藏，图里的交互状态（当前视图、滚动位置）下次打开还在 */
+  $('#btnShowArchitecture').addEventListener('click', () => {
+    const frame = $('#archFrame');
+    if (!frame.getAttribute('src') || frame.getAttribute('src') === 'about:blank') {
+      frame.src = '../assets/架构图.html';
+    }
+    $('#archModal').hidden = false;
+  });
+  $('#btnArchClose').addEventListener('click', () => { $('#archModal').hidden = true; });
+  $('#archModal').addEventListener('click', (e) => {
+    if (e.target.id === 'archModal') $('#archModal').hidden = true;
+  });
+
   $('#btnChangelogClose').addEventListener('click', closeChangelog);
   $('#btnChangelogOk').addEventListener('click', closeChangelog);
   $('#changelogModal').addEventListener('click', (e) => {

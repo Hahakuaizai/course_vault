@@ -19,7 +19,17 @@
 (function () {
   'use strict';
 
+  /* 开发目录默认值。真实值在启动时从主进程问一次（设置里能改开发目录，
+   * 换过之后发布命令必须 cd 到新地方，否则是对着不存在的路径打包）。
+   * 问不到就退回这个默认值，命令照样能用。 */
   var DEV_DIR = 'C:\\Users\\30894\\Desktop\\workspace\\course-vault';
+  (function initDevDir() {
+    try {
+      window.vault.update.info().then(function (info) {
+        if (info && info.sourceDir) DEV_DIR = info.sourceDir;
+      }, function () { /* 拿不到就用默认值 */ });
+    } catch (e) { /* 同上 */ }
+  })();
   /* 打包产物（文件夹和 zip）统一放这个版本备份目录，不再堆在桌面 workspace */
   var RELEASE_DIR = 'D:\\资料库course_vault版本备份';
   /* gh 在本机是便携版、不在 PATH 里：生成代码先定位 gh，
@@ -70,12 +80,23 @@
     var v = version || '1.0.0';
     var folder = '资料库-v' + v;
     var out = RELEASE_DIR + '\\' + folder;
+    var zip = out + '.zip';
     return [
       'cd ' + DEV_DIR,
       'New-Item -ItemType Directory -Force "' + RELEASE_DIR + '" | Out-Null',
       'node build.js "' + out + '"',
-      'Compress-Archive -Path "' + out + '" -DestinationPath "' + out + '.zip" -Force',
+      /* 打包失败就停。以前不管结果继续往下压，会在「要压缩的目录不存在」
+       * 上报错，错误信息和真正的病因（build.js 失败）完全对不上 */
+      'if ($LASTEXITCODE -ne 0) { Write-Host "打包失败，已中止" -ForegroundColor Red; exit 1 }',
+      /* 用 ZipFile::CreateFromDirectory 代替 Compress-Archive：项目素材现在
+       * 180MB（225 张 webp + 114 个 webm），Compress-Archive 是逐个添加的
+       * O(n²) 实现，这个体量要跑好几分钟；这个 API 一次性建索引，快一个
+       * 量级，也绕开它对中文路径的老毛病。旧 zip 先删掉，否则它会追加进去 */
+      'if (Test-Path "' + zip + '") { Remove-Item "' + zip + '" -Force }',
+      'Add-Type -AssemblyName System.IO.Compression.FileSystem',
+      '[System.IO.Compression.ZipFile]::CreateFromDirectory("' + out + '", "' + zip + '")',
       'Remove-Item -Recurse -Force "' + out + '"',
+      'Write-Host "打包完成：' + zip + '" -ForegroundColor Green',
     ].join('\n');
   }
 
@@ -142,24 +163,33 @@
     var btn = document.getElementById('btnDevtools');
     var panel = document.getElementById('devtoolsPanel');
     if (!btn || !panel) return;
+    /* 要用的元素一次取全再绑事件。以前只判了按钮和面板本身，面板里少一个
+     * dvCode* / btnDvCopy* 就会在 addEventListener 上抛 TypeError，
+     * 整个插件一声不响地失效，还完全看不出是哪儿缺了东西 */
+    var els = {};
+    var ids = ['dvCode1', 'dvCode2', 'dvCode3', 'btnDvCopy1', 'btnDvCopy2', 'btnDvCopy3'];
+    for (var i = 0; i < ids.length; i++) {
+      els[ids[i]] = document.getElementById(ids[i]);
+      if (!els[ids[i]]) return;
+    }
     btn.addEventListener('click', function () {
       if (!cur) return;
       var willShow = panel.hidden;
       if (willShow) {
-        document.getElementById('dvCode1').textContent = gitCode(cur.batch);
-        document.getElementById('dvCode2').textContent = packCode(cur.version);
-        document.getElementById('dvCode3').textContent = uploadCode(cur.batch, cur.version);
+        els.dvCode1.textContent = gitCode(cur.batch);
+        els.dvCode2.textContent = packCode(cur.version);
+        els.dvCode3.textContent = uploadCode(cur.batch, cur.version);
       }
       panel.hidden = !willShow;
     });
-    document.getElementById('btnDvCopy1').addEventListener('click', function () {
-      copyText(document.getElementById('dvCode1').textContent, this);
+    els.btnDvCopy1.addEventListener('click', function () {
+      copyText(els.dvCode1.textContent, this);
     });
-    document.getElementById('btnDvCopy2').addEventListener('click', function () {
-      copyText(document.getElementById('dvCode2').textContent, this);
+    els.btnDvCopy2.addEventListener('click', function () {
+      copyText(els.dvCode2.textContent, this);
     });
-    document.getElementById('btnDvCopy3').addEventListener('click', function () {
-      copyText(document.getElementById('dvCode3').textContent, this);
+    els.btnDvCopy3.addEventListener('click', function () {
+      copyText(els.dvCode3.textContent, this);
     });
   }
 

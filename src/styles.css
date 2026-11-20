@@ -3794,6 +3794,29 @@ body.is-marquee .card { pointer-events: none; }
    更新内容公告
    ============================================================ */
 .changelog-modal { max-width: 560px; }
+
+/* ---------- 项目架构图（应用内全屏嵌入） ---------- */
+/* 尽量铺满窗口，让图里的画布有足够宽度；四周留 2vw 喘口气 */
+.arch-modal {
+  width: 96vw;
+  max-width: 1800px;
+  height: 92vh;
+  max-height: 92vh;
+}
+.arch-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 0 0 var(--radius-xl) var(--radius-xl);
+}
+.arch-body iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+  background: #0f1116;
+}
 .changelog-body {
   padding: 16px 22px 20px;
   overflow-y: auto;

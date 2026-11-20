@@ -285,13 +285,22 @@ function localDate(d = new Date()) {
  */
 async function scanOnce({ storeDir, appDir, ver }) {
   const snapFile = path.join(storeDir, 'snapshot.json');
+  const targetFile = path.join(storeDir, 'snapshot-target.json');
   const histFile = path.join(storeDir, 'history.json');
   const prevDir = path.join(storeDir, 'prev');
   await fsp.mkdir(prevDir, { recursive: true });
 
   const history = await readJson(histFile, { pendingId: null, batches: [] });
   if (!Array.isArray(history.batches)) history.batches = [];
-  const oldSnap = await readJson(snapFile, null);
+  /* 快照记的是「上一次扫的是哪个目录」。开发模式（app.getAppPath() 指向项目根）
+   * 和打包版（指向 resources/app）看到的是两棵不同的树：build.js、.build-tools/、
+   * 未同步的大资源只在开发目录里有。两种模式共用一份快照，切换一次就会把对方
+   * 独有的文件全判成「删除」，内容对比也会反过来（新增算成删掉）。
+   * 目录对不上就当作首次运行：只重建基线，不出批次。 */
+  const prevTarget = await readJson(targetFile, null);
+  const sameTarget =
+    typeof prevTarget === 'string' && path.resolve(prevTarget) === path.resolve(appDir);
+  const oldSnap = sameTarget ? await readJson(snapFile, null) : null;
   const firstRun = !oldSnap;
 
   const rels = [];
@@ -368,6 +377,8 @@ async function scanOnce({ storeDir, appDir, ver }) {
   }
 
   await writeJson(snapFile, newSnap);
+  /* 和快照一起记下这次扫的目录，下次目录一变就知道基线不适用了 */
+  await writeJson(targetFile, appDir);
 
   if (firstRun || !details.length) return history;
 

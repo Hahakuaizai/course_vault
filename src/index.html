@@ -980,8 +980,35 @@
               </div>
               <button class="ghost-btn" id="btnShowChangelog">查看</button>
             </div>
+
+            <!-- 项目架构图：主进程开独立窗口加载 assets/架构图.html，保留它的交互动效 -->
+            <div class="srow">
+              <div class="srow-text">
+                <strong>项目架构图</strong>
+                <small>打开交互式架构图，看各模块之间怎么连的</small>
+              </div>
+              <button class="ghost-btn" id="btnShowArchitecture">查看</button>
+            </div>
           </section>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!--
+    项目架构图：在应用内全屏内嵌展示，不另开窗口。
+    iframe 首次打开时才赋值 src，避免每次启动都加载 800KB 的图。
+  -->
+  <div class="modal-backdrop" id="archModal" hidden>
+    <div class="modal arch-modal" role="dialog" aria-modal="true" aria-labelledby="archTitle">
+      <header class="modal-head">
+        <h3 id="archTitle">项目架构图</h3>
+        <button class="icon-btn" id="btnArchClose" title="关闭 (Esc)">
+          <svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </header>
+      <div class="arch-body">
+        <iframe id="archFrame" title="项目架构图" src="about:blank"></iframe>
       </div>
     </div>
   </div>

@@ -21,6 +21,11 @@ const crypto = require('node:crypto');
 const SOURCE_EXT = new Set([
   '.js', '.css', '.html', '.json', '.md', '.bat', '.ico', '.png', '.svg',
   '.webp',
+  /* 桌宠的动作动画是 .webm，现在 src/pets 下有 114 个。跟 .webp 是同一个坑：
+   * 漏了它，改过的动画永远同步不过去，而且检查更新还会报「没有变化」，
+   * 用户只能靠重新打包分发才能生效，根本看不出问题出在同步白名单上。
+   * changelog 的 TRACK_EXT 早就带了 .webm，两边必须保持一致。 */
+  '.webm',
 ]);
 
 /** 不参与同步的目录 */
@@ -91,6 +96,78 @@ function collectCode(root, base = root, out = new Map(), unreadableDirs = null) 
 }
 
 /**
+ * 哈希的落盘缓存：{ 绝对路径: { s: 文件大小, m: 修改时间, h: sha1 } }。
+ *
+ * 为什么要缓存：src/pets 现在有 180MB（225 张 webp + 114 个 webm），
+ * 每次检查更新都全量读一遍算 sha1，热缓存 185ms，冷盘要一两秒；而且
+ * diff() 还要把源目录和程序目录各扫一遍。改过的文件必然产生新的 mtime，
+ * 所以「大小和时间戳都没变」就可以直接沿用上次的哈希，不用读文件。
+ *
+ * 和 changelog 的快照是同一套思路，但两份数据互相独立：那个盯的是
+ * 「安装目录这期间变了什么」，这个盯的是「两个目录现在差在哪」。
+ * 缓存丢了/坏了只是退回全量哈希，不影响判断正确性。
+ */
+function cacheFile(userDataDir) {
+  return path.join(userDataDir, 'update-cache.json');
+}
+
+function loadCache(userDataDir) {
+  try {
+    return JSON.parse(fs.readFileSync(cacheFile(userDataDir), 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCache(userDataDir, cache) {
+  try {
+    const f = cacheFile(userDataDir);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const tmp = `${f}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cache), 'utf8');
+    fs.renameSync(tmp, f);
+  } catch { /* 写不进去只是下次慢一点，不影响正确性 */ }
+}
+
+/**
+ * 带缓存的哈希。stat 失败（文件刚被删、被占用）返回 null，
+ * 调用方按「算不出来」处理，与 hashFile 的约定一致。
+ */
+function hashCached(full, cache) {
+  let st;
+  try { st = fs.statSync(full); } catch { return null; }
+  const c = cache[full];
+  if (c && c.s === st.size && c.m === st.mtimeMs && c.h) return c.h;
+  const h = hashFile(full);
+  if (h) cache[full] = { s: st.size, m: st.mtimeMs, h };
+  return h;
+}
+
+/** 更新备份保留份数。回滚只会用到最近那一次，更早的基本不可能再翻。 */
+const KEEP_BACKUPS = 10;
+
+/**
+ * 清掉过期的更新备份。
+ *
+ * userData/update-backup 每次更新留一份「被替换文件的副本」，到 2026-11
+ * 已经攒了 111 份、41MB。留着没什么用，长期跑下去只会越攒越多。
+ */
+function pruneBackups(root) {
+  try {
+    const names = fs.readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort(); // 目录名是 ISO 时间戳，字典序恰好等于时间顺序
+    const drop = names.slice(0, Math.max(0, names.length - KEEP_BACKUPS));
+    for (const name of drop) {
+      try {
+        fs.rmSync(path.join(root, name), { recursive: true, force: true });
+      } catch { /* 单个删不掉（被占用）就放着，下次再清 */ }
+    }
+  } catch { /* 目录还不存在，没什么可清的 */ }
+}
+
+/**
  * 运行时依赖有没有变过。
  *
  * 更新只同步代码，不动 node_modules。开发时新装了一个库，同步过去后
@@ -104,7 +181,12 @@ function depsChanged(sourceDir, appDir) {
   const readDeps = (dir) => {
     try {
       const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
-      return JSON.stringify(pkg.dependencies || {});
+      const deps = pkg.dependencies || {};
+      /* 按依赖名排序再序列化。npm/pnpm 偶尔会整段重写 package.json，
+       * 依赖的插入顺序跟着变（内容其实没动）。直接 stringify 会把「顺序
+       * 变了」误判成「依赖变了」，随后 apply() 硬拦更新，用户还以为是
+       * 代码出了问题。排序后只比真实内容。 */
+      return JSON.stringify(Object.keys(deps).sort().map((k) => [k, deps[k]]));
     } catch {
       return null;
     }
@@ -135,7 +217,13 @@ function createUpdater({
 
   function writeVersion(v) {
     const data = { version: v, updatedAt: new Date().toISOString() };
-    fs.writeFileSync(versionFile(), JSON.stringify(data, null, 2), 'utf8');
+    const f = versionFile();
+    /* 先写临时文件再改名（与 changelog 的 writeJson 一致）。直接写的时候
+     * 如果进程正好在这一刻被结束、或者磁盘满了，version.json 会剩下半截
+     * JSON；下次 readVersion() 解析失败回落 0.0.0，版本号一夜回到解放前。 */
+    const tmp = `${f}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(tmp, f);
   }
 
   /** 比对开发目录与程序目录 */
@@ -143,6 +231,12 @@ function createUpdater({
     const sourceDir = getSourceDir();
     if (!sourceDir) return { ok: false, reason: '尚未设置开发目录' };
     if (!fs.existsSync(sourceDir)) return { ok: false, reason: '开发目录不存在' };
+
+    /* 拿不到 userData 目录就退化成不做缓存（每次全量哈希），
+     * 结果一样，只是慢一点 —— 不能在极早期调用时直接抛错 */
+    let userDataDir = '';
+    try { userDataDir = getUserDataDir(); } catch { /* 退化 */ }
+    const cache = userDataDir ? loadCache(userDataDir) : {};
 
     const unreadableDirs = [];
     const src = collectCode(sourceDir, sourceDir, new Map(), unreadableDirs);
@@ -159,8 +253,8 @@ function createUpdater({
       const target = dst.get(rel);
       if (!target) { added.push(rel); continue; }
 
-      const a = hashFile(full);
-      const b = hashFile(target);
+      const a = hashCached(full, cache);
+      const b = hashCached(target, cache);
       if (a === null || b === null) {
         /* 算不出哈希就当作「有变化」处理，让用户能点更新把它覆盖掉。
          * 以前这里是 `a !== b` 直接比较：两边都是 null 时被判成「相同」，
@@ -176,6 +270,11 @@ function createUpdater({
     for (const rel of dst.keys()) {
       if (!src.has(rel)) removed.push(rel);
     }
+
+    /* 把这一轮算出来的 size/mtime/哈希存下来，下次没变的文件就不读了。
+     * 放在返回前：即使后面 pushUpdateAvailable 之类的流程出错，缓存也已经
+     * 落到盘上，不会白算一遍。 */
+    if (userDataDir) saveCache(userDataDir, cache);
 
     return {
       ok: true,
@@ -236,8 +335,13 @@ function createUpdater({
     }
 
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupDir = path.join(getUserDataDir(), 'update-backup', stamp);
+    const backupRoot = path.join(getUserDataDir(), 'update-backup');
+    const backupDir = path.join(backupRoot, stamp);
     const toWrite = [...d.changed, ...d.added];
+
+    /* 新备份写进去之前先清掉老的，只留最近几份 —— 不然每更新一次多一份，
+     * 时间一长自己都忘了这个目录是干嘛的，还白占几十 MB */
+    pruneBackups(backupRoot);
 
     // 覆盖前先备份将被替换的文件
     for (const rel of toWrite) {
@@ -295,8 +399,13 @@ module.exports = {
   createUpdater,
   collectCode,
   hashFile,
+  hashCached,
+  loadCache,
+  saveCache,
+  pruneBackups,
   depsChanged,
   SOURCE_EXT,
   SKIP_DIRS,
   SKIP_FILES,
+  KEEP_BACKUPS,
 };
