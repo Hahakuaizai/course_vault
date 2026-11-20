@@ -142,6 +142,34 @@ function hashCached(full, cache) {
 /** 更新备份仅保留最近 10 份，更早的自动清理。 */
 const KEEP_BACKUPS = 10;
 
+/** 能当文本读的扩展名（估算被删文件的内容分量时用） */
+const TEXT_EXT = new Set(['.js', '.css', '.html', '.json', '.md', '.svg', '.bat']);
+
+/**
+ * 估算一个文件「删掉会不会有影响」：0 空文件，1 一两行占位，2 有实际内容，3 看起来是代码。
+ *
+ * 删除保护只统计 2 分以上的文件。用户删掉自己刚建的测试文件、或者一批空的
+ * 占位文件，软件跑起来一点不受影响，不该被当成「选错目录」把整个更新拦死。
+ */
+function contentWeight(full, rel) {
+  let st;
+  try { st = fs.statSync(full); } catch { return 0; }
+  if (st.size === 0) return 0;
+  const ext = path.extname(rel).toLowerCase();
+  /* 二进制按体积：几百字节的多半是占位图标，几十 KB 的是真素材 */
+  if (!TEXT_EXT.has(ext)) return st.size > 1024 ? 2 : 1;
+  if (st.size > 2 * 1024 * 1024) return 3;
+  let text;
+  try { text = fs.readFileSync(full, 'utf8'); } catch { return 2; }
+  const lines = text.split('\n').filter((l) => l.trim().length > 0);
+  if (!lines.length) return 0;
+  /* 先看代码特征再看体积：几十字节的函数也是正经代码，
+   * 按体积一刀切会把它们误判成占位文件 */
+  if (/(^|\n)\s*(function|class|const|let|var|import|export|def |public |private |<[a-zA-Z])/.test(text)) return 3;
+  if (st.size < 200) return 1;
+  return 2;
+}
+
 /**
  * 更新备份仅保留最近 10 份，超出部分自动清理。
  *
@@ -316,27 +344,27 @@ function createUpdater({
       throw new Error('依赖有变化，只同步代码会让软件无法启动。请重新打包后再分发');
     }
 
-    /* 删除保护：只有「要删掉的占了程序目录一半以上、而且没有任何其他改动」
-     * 才算选错目录。原来的条件是 removed > changed + added —— 用户只删掉
-     * 一个测试文件时 changed 和 added 都是 0，1 > 0 成立，一次正常的删除
-     * 被当成误操作拦下，更新直接走不通。 */
+    /* 删除保护只统计「有分量的文件」：空文件、只有几行字的测试文件删掉
+     * 不影响软件运行，不该被当成误选目录。真正危险的是程序目录里大批带
+     * 实际内容的文件同时消失，那多半是开发目录选错了。 */
+    const seriousRemoved = d.removed.filter(
+      (rel) => contentWeight(path.join(appDir, rel), rel) >= 2,
+    );
     const totalFiles = Number(d.totalFiles) || 0;
-    const mostlyDeleting = totalFiles > 0 && d.removed.length / totalFiles > 0.5;
+    const mostlyDeleting = totalFiles > 0 && seriousRemoved.length / totalFiles > 0.5;
     if (mostlyDeleting && d.changed.length + d.added.length === 0) {
       throw new Error(
-        `要删除的文件有 ${d.removed.length} 个，超过程序目录的一半，`
+        `要删除的文件里有 ${seriousRemoved.length} 个带实际内容，超过程序目录的一半，`
         + '开发目录可能选错了，已中止。请检查「开发目录」设置。',
       );
     }
-    /* 另一个方向的误选：程序目录里的文件和开发目录几乎对不上名，说明两边
-     * 根本不是同一个项目（整个拷错文件夹就会这样）。判据用「对得上的比例」，
-     * 而不是「新增/删除各占多少」—— 小项目里正常改一两个文件，新增和删除
-     * 的比例都会瞬间超过三成，那样反而把正常更新拦死。 */
-    const matched = totalFiles - d.removed.length;
-    const matchRatio = totalFiles ? matched / totalFiles : 1;
-    if (totalFiles >= 5 && matchRatio < 0.34) {
+    /* 另一个方向的误选：开发目录里冒出大批程序目录没有的文件，说明两边不是
+     * 同一个项目（整个拷错文件夹时就是这样）。只看新增不看删除 —— 用户真的
+     * 删掉一批文件时 removed 本来就会很大，拿它做判据会把正常清理拦死。 */
+    const alienRatio = totalFiles ? d.added.length / totalFiles : 0;
+    if (totalFiles >= 5 && alienRatio > 0.5) {
       throw new Error(
-        `程序目录里只有 ${matched} 个文件能在开发目录里找到（共 ${totalFiles} 个），`
+        `开发目录里多出 ${d.added.length} 个程序目录没有的文件（共 ${totalFiles} 个在程序目录），`
         + '两边可能不是同一个项目，已中止。请检查「开发目录」设置。',
       );
     }
@@ -417,6 +445,7 @@ module.exports = {
   loadCache,
   saveCache,
   pruneBackups,
+  contentWeight,
   depsChanged,
   SOURCE_EXT,
   SKIP_DIRS,
