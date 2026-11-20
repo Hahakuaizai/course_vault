@@ -137,16 +137,49 @@ function extractFromDiff(oldText, newText) {
     const t = line.trim();
     if (t) bag.set(t, (bag.get(t) || 0) + 1);
   }
-  let added = 0;
   let removed = 0;
+  const newLines = String(newText || '').split('\n');
+
+  /* 先给新版每一行标出「它属于哪个注释块、这个块的摘要行是哪一行」。
+   * 必须预标记，不能只看新增行：行级对比用的是多重集，像块注释开符这种
+   * 文件里到处都是的行会被旧版配掉，新增行里往往只剩块内正文。单看新增
+   * 行就不知道自己在不在块里，「删除保护只统计 2 分以上的文件」这种解释性
+   * 续行就会被当成一条独立的更新说明摘出去。 */
+  const headOf = new Map();
+  let blockHead = -1;
+  let inBlockScan = false;
+  for (let i = 0; i < newLines.length; i++) {
+    const raw = newLines[i];
+    const t = raw.trim();
+    if (!t) continue;
+    const opens = t.startsWith('/*') || t.startsWith('<!--');
+    const closes = /\*\/\s*$/.test(t) || /-->\s*$/.test(t);
+    if (opens) {
+      inBlockScan = !closes;
+      blockHead = commentText(raw) ? i : -1;
+      if (blockHead >= 0) headOf.set(i, i);
+      continue;
+    }
+    if (inBlockScan) {
+      if (!t.startsWith('*')) { inBlockScan = false; blockHead = -1; continue; }
+      if (blockHead < 0 && commentText(raw)) blockHead = i;
+      if (blockHead >= 0) headOf.set(i, blockHead);
+      if (closes) { inBlockScan = false; blockHead = -1; }
+      continue;
+    }
+    if (t.startsWith('//')) headOf.set(i, i);
+  }
+
+  let added = 0;
   const addedLines = [];
-  for (const line of String(newText || '').split('\n')) {
+  for (let i = 0; i < newLines.length; i++) {
+    const line = newLines[i];
     const t = line.trim();
     if (!t) continue;
     const n = bag.get(t) || 0;
     if (n > 0) { bag.set(t, n - 1); continue; }
     added++;
-    addedLines.push(line);
+    addedLines.push({ line, idx: i });
   }
   for (const n of bag.values()) removed += n;
 
@@ -159,87 +192,42 @@ function extractFromDiff(oldText, newText) {
     seen.add(key);
     candidates.push({ type, text, star: !!star, curated: !!curated });
   };
-  /* 跨行注释先攒着：上一行以顿号/逗号/冒号结尾、下一行还是注释行时，
-   * 两行本是一句话，拼完整再提炼免得拆成两条、后半句还带着符号 */
-  let buf = null;
-  let bufStar = false;
-  /* 是否正处在一个多行块注释里。块的首行是这条改动的摘要，
-   * 块内后续行属于解释和举例，不单独成为更新条目 */
-  let inBlock = false;
-  /* 这个块里是否已经取过摘要行。块注释开符单独占一行时，第一行正文
-   * 才是摘要，之后的行只用来补全没写完的句子 */
-  let blockHasSummary = false;
-  const flush = () => {
-    if (buf == null) return;
-    pushCand(classify(buf), firstClause(buf), bufStar, false);
-    buf = null;
-    bufStar = false;
-  };
   /* 这句话还没说完，下一行会接着写 */
   const CONTINUES = /[、，：:]$/;
-  const CLOSES = /\*\/\s*$/;
-  for (const line of addedLines) {
+
+  for (const { line, idx } of addedLines) {
     /* 优先采信手写说明：app.js 里 RELEASE_NOTES 新增的条目本身就是
      * 人工总结好的更新说明（{ type, text } 一行一条），比从注释里
-     * 猜目的准得多，排在所有注释候选之前。没有手写条目时（比如
-     * 用户自己改的代码）才靠下面的注释提取兜底 */
+     * 猜目的准得多。没有手写条目时才靠下面的注释提取兜底 */
     const note = line.match(/type:\s*'(fix|new|improve)'[^}]*text:\s*'([^']{8,})'/);
     if (note) {
-      flush();
       pushCand(note[1], firstClause(note[2]), true, true);
-      inBlock = false;
       continue;
     }
+
     const body = commentText(line);
-    const t = line.trim();
-    const opensBlock = t.startsWith('/*') || t.startsWith('<!--');
-    const closedHere = CLOSES.test(t) || /-->\s*$/.test(t);
+    if (!body) continue;
 
-    if (opensBlock) {
-      /* 块注释开符出现：这个块只贡献一条摘要。以前逐行都当候选，
-       * 块里的解释性续行会被摘成「漏了它，改过的动画……」这种半句。 */
-      flush();
-      inBlock = !closedHere;
-      blockHasSummary = false;
-      if (line.includes('★')) bufStar = true;
-      if (body) {
-        buf = body;
-        blockHasSummary = true;
-        if (closedHere || !CONTINUES.test(body)) flush();
-      }
-      continue;
-    }
+    /* 只认注释块的摘要行，块内续行整行丢弃 —— 它们是对摘要的补充说明，
+     * 单独摘出来就是半截话。摘要行没写完时，把紧跟其后、同属这个块的
+     * 续行接上，凑成一句完整的再提炼。 */
+    const head = headOf.get(idx);
+    if (head === undefined || head !== idx) continue;
 
-    if (inBlock) {
-      if (!body) {
-        /* 空注释行（只有装饰符）标志句子结束 */
-        flush();
-        if (closedHere) inBlock = false;
-        continue;
-      }
-      if (!blockHasSummary) {
-        /* 开符单独占一行时，块里第一行正文才是摘要 */
-        buf = body;
-        blockHasSummary = true;
-        if (line.includes('★')) bufStar = true;
-        if (!CONTINUES.test(body)) flush();
-        if (closedHere) inBlock = false;
-        continue;
-      }
-      /* 摘要之后的续行：只在上一句没写完时接上，否则丢弃 */
-      if (buf != null) {
-        buf += body;
-        if (!CONTINUES.test(body)) flush();
-      }
-      if (closedHere) inBlock = false;
-      continue;
+    let text = body;
+    let star = line.includes('★');
+    let j = idx + 1;
+    while (CONTINUES.test(text) && j < newLines.length) {
+      const nb = commentText(newLines[j]);
+      if (!nb) break;
+      if (headOf.get(j) !== head) break;
+      text += nb;
+      if (newLines[j].includes('★')) star = true;
+      j++;
     }
-    /* 单行注释（双斜杠）：一行就是一条 */
-    buf = buf == null ? body : buf + body;
-    if (line.includes('★')) bufStar = true;
-    if (!CONTINUES.test(body)) flush();
+    pushCand(classify(text), firstClause(text), star, false);
   }
-  flush();
+
   /* 手写说明条目（curated）最优先，其次带 ★ 的重点注释，其余保持出现顺序 */
   candidates.sort((a, b) => ((b.curated ? 1 : 0) - (a.curated ? 1 : 0)) || ((b.star ? 1 : 0) - (a.star ? 1 : 0)));
   return { candidates, added, removed };
