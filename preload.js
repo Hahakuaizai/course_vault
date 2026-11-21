@@ -47,7 +47,7 @@ contextBridge.exposeInMainWorld('vault', {
   files: {
     pickFiles: () => invoke('dialog:pickFiles'),
     pickFolder: () => invoke('dialog:pickFolder'),
-    scan: (paths) => invoke('files:scan', { paths }),
+    scan: (paths, opts) => invoke('files:scan', { paths, ...(opts || {}) }),
     search: (payload) => invoke('files:search', payload),
     import: (paths, courseId, mode, dupMode, buildTree, nameOverride) => invoke(
       'files:import', { paths, courseId, mode, dupMode, buildTree, nameOverride },
@@ -89,12 +89,6 @@ contextBridge.exposeInMainWorld('vault', {
   changelog: {
     get: () => invoke('changelog:get'),
     seen: (id) => invoke('changelog:seen', id),
-  },
-
-  /* 系统剪贴板。走主进程，不依赖窗口是否聚焦 —— 渲染进程的
-   * navigator.clipboard 在窗口失焦时会抛异常，但内容其实已经写进去了 */
-  clipboard: {
-    write: (text) => invoke('clipboard:write', text),
   },
 
   /* 插件二（仅本机）：发布助手门禁（见 src/plugin2-main.js） */

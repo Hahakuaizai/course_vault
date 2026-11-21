@@ -104,8 +104,8 @@
 .card-course i,
 .card.is-selected::after,
 body.select-mode .card[data-dir]::before,
-.dupe-radio,
-.dupe-file.is-keep .dupe-radio::after,
+.dupe-check,
+.dupe-file.is-del .dupe-check::after,
 .theme-btn,
 .theme-track,
 .switch,
@@ -2034,10 +2034,7 @@ button:focus-visible {
   --ed-pad-y: 22px;
   --ed-font: 'Cascadia Code', 'Consolas', 'Microsoft YaHei UI', monospace;
   --ed-size: 13px;
-  /* 行高必须是整数像素。原来写的是倍数 1.75，13px × 1.75 = 22.75px 带小数，
-   * textarea 内部的行盒取整和高亮层的 <pre> 不一致，每行攒零点几像素的差，
-   * 越往下越明显 —— 表现就是光标跑到了别的那一行上 */
-  --ed-line: 24px;
+  --ed-line: 1.75;
 
   position: relative;
   flex: 1;
@@ -2051,9 +2048,6 @@ button:focus-visible {
   margin: 0;
   padding: var(--ed-pad-y) var(--ed-pad-x);
   border: none;
-  /* 两层都用 border-box：textarea 默认是 content-box，加完内边距会比容器
-   * 宽出一圈，文字起点和高亮层差开一点，行越长越容易看出来 */
-  box-sizing: border-box;
   font-family: var(--ed-font);
   font-size: var(--ed-size);
   line-height: var(--ed-line);
@@ -3688,23 +3682,29 @@ body.is-marquee .card { pointer-events: none; }
 }
 .dupe-file:last-child { border-bottom: 0; }
 .dupe-file:hover { background: var(--bg-3); }
-.dupe-file input[type='radio'] { display: none; }
-.dupe-radio {
+.dupe-file input[type='checkbox'] { display: none; }
+/* 勾选框：方形小框，和「勾上 = 要删」的语义配红色填充。以前是圆形
+   单选点、选中的是「保留」，和底部删除按钮对不上，用户容易误删
+   （2026-11-21 改勾选删除模型）。 */
+.dupe-check {
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
-  border-radius: 50%;
+  border-radius: 4px;
   border: 1.5px solid var(--line-3);
   position: relative;
-  transition: border-color 0.15s var(--ease-out);
+  transition: border-color 0.15s var(--ease-out), background 0.15s var(--ease-out);
 }
-.dupe-file.is-keep .dupe-radio { border-color: var(--accent); }
-.dupe-file.is-keep .dupe-radio::after {
+.dupe-file.is-del .dupe-check {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+.dupe-file.is-del .dupe-check::after {
   content: '';
   position: absolute;
   inset: 2.5px;
-  border-radius: 50%;
-  background: var(--accent);
+  border-radius: 2px;
+  background: var(--danger);
 }
 .dupe-file-body {
   flex: 1;
@@ -3739,6 +3739,17 @@ body.is-marquee .card { pointer-events: none; }
   background: rgba(240, 164, 79, 0.14);
   color: #e0954a;
 }
+/* 一组重复文件分布在多个目录时挂在组头的标记：跨目录的副本删起来
+   最容易删错地方，先让用户注意到它们不在同一个目录（2026-11-21）。 */
+.dupe-cross {
+  flex: 0 0 auto;
+  font-size: 10.2px;
+  font-weight: 550;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(91, 141, 239, 0.14);
+  color: #7ea6f0;
+}
 .dupe-path {
   font-size: 11px;
   color: var(--fg-3);
@@ -3754,9 +3765,9 @@ body.is-marquee .card { pointer-events: none; }
   background: var(--bg-3);
   color: var(--fg-3);
 }
-.dupe-file.is-keep .dupe-tag {
-  background: var(--accent-soft);
-  color: var(--accent);
+.dupe-file.is-del .dupe-tag {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
 }
 .dupe-foot-note {
   margin-right: auto;
@@ -3800,29 +3811,6 @@ body.is-marquee .card { pointer-events: none; }
    更新内容公告
    ============================================================ */
 .changelog-modal { max-width: 560px; }
-
-/* ---------- 项目架构图（应用内全屏嵌入） ---------- */
-/* 尽量铺满窗口，让图里的画布有足够宽度；四周留 2vw 喘口气 */
-.arch-modal {
-  width: 96vw;
-  max-width: 1800px;
-  height: 92vh;
-  max-height: 92vh;
-}
-.arch-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  padding: 0;
-  overflow: hidden;
-  border-radius: 0 0 var(--radius-xl) var(--radius-xl);
-}
-.arch-body iframe {
-  width: 100%;
-  height: 100%;
-  border: 0;
-  display: block;
-  background: #0f1116;
-}
 .changelog-body {
   padding: 16px 22px 20px;
   overflow-y: auto;

@@ -47,7 +47,7 @@ contextBridge.exposeInMainWorld('vault', {
   files: {
     pickFiles: () => invoke('dialog:pickFiles'),
     pickFolder: () => invoke('dialog:pickFolder'),
-    scan: (paths) => invoke('files:scan', { paths }),
+    scan: (paths, opts) => invoke('files:scan', { paths, ...(opts || {}) }),
     search: (payload) => invoke('files:search', payload),
     import: (paths, courseId, mode, dupMode, buildTree, nameOverride) => invoke(
       'files:import', { paths, courseId, mode, dupMode, buildTree, nameOverride },

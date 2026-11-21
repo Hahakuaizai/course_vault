@@ -1341,6 +1341,27 @@ function makePathIndex(files) {
   return map;
 }
 
+/**
+ * 路径多重索引：绝对路径 → 记录数组（保持插入顺序）。
+ *
+ * 2026-11-21 起，同一个磁盘文件允许在多个目录里各登记一条（导入时
+ * 只有「目标目录里已有同一条」才算重复，别的目录里有不算 —— 见
+ * importFiles 里 existing 的判定）。makePathIndex 一条路径只留一条
+ * 记录，表达不了这种关系，所以导入预检和导入本体改用这个多重版；
+ * 只问「登记过没有」的老调用方继续用 makePathIndex。
+ * 口径和 makePathIndex 一致：入库副本（storage='copy'）不参与。
+ */
+function makePathMultiIndex(files) {
+  const map = new Map();
+  for (const f of files) {
+    if (f.storage === 'copy') continue;
+    const key = path.resolve(f.path);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(f);
+  }
+  return map;
+}
+
 /** 在指定父级下按名字找目录，没有就建一个（导入文件夹时用来复刻层级） */
 function ensureCourse(name, parentId, sourcePath, index) {
   const clean = String(name || '').trim() || '未命名';
@@ -1480,6 +1501,104 @@ async function forkIfShared(f) {
   return true;
 }
 
+/**
+ * 磁盘文件夹的「内容签名」：相对路径 → 文件大小。
+ *
+ * 用来判断「同名文件夹到底是不是同一份内容」。只比相对路径和大小，
+ * 不算哈希：导入时每个撞名的文件夹都全量算哈希太慢，而路径+大小
+ * 已经足够区分「同一批文件」和「只是恰好重名」（2026-11-21 用户要求：
+ * 重名但内容不同要走改名，不能把文件灌进旧文件夹）。
+ * 复用 collectFiles 收集，所以依赖目录（node_modules 之类）的跳过
+ * 口径和真正导入完全一致。
+ */
+async function diskFolderSignature(dirAbs) {
+  const { files } = await collectFiles([dirAbs]);
+  const sig = new Map();
+  for (const f of files) {
+    let size;
+    try {
+      size = fs.statSync(f).size;
+    } catch {
+      continue; // 读不到大小的文件不进签名，下面的比对会因此判「不同」
+    }
+    sig.set(path.relative(dirAbs, f).split(path.sep).join('/'), size);
+  }
+  return sig;
+}
+
+/**
+ * 库里一个目录（含全部后代目录）的内容签名，口径和 diskFolderSignature
+ * 对齐：key 是相对这个目录的路径（目录名链 + 文件名，分隔符统一 '/'），
+ * value 是记录里的文件大小。注意 key 用的是库里显示的文件名 —— 导入时
+ * 改过名的记录会让签名对不上、被判成「内容不同」，方向是保守的：
+ * 宁可多建一个「原名（1）」，也不把文件静默灌进可能不相干的目录。
+ */
+function courseSubtreeSignature(course) {
+  // 后代目录集合（含自身）：id → 相对 course 的目录路径（自身为 ''）
+  const relOf = new Map([[course.id, '']]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const c of state.courses) {
+      if (c.parentId && relOf.has(c.parentId) && !relOf.has(c.id)) {
+        const parentRel = relOf.get(c.parentId);
+        relOf.set(c.id, parentRel ? `${parentRel}/${c.name}` : c.name);
+        grew = true;
+      }
+    }
+  }
+  const sig = new Map();
+  for (const f of state.files) {
+    if (!relOf.has(f.courseId)) continue;
+    const rel = relOf.get(f.courseId);
+    sig.set(rel ? `${rel}/${f.name}` : f.name, f.size);
+  }
+  return sig;
+}
+
+/**
+ * 磁盘文件夹和库里同名目录是不是同一份内容。
+ * 磁盘侧读不出来就返回 false —— 拿不准一律当「内容不同」走改名，
+ * 绝不静默合并（合并错了是把两个文件夹搅在一起，改名错了只是多一个
+ * （1），代价完全不对等）。
+ */
+async function sameFolderContent(dirAbs, course) {
+  let disk;
+  try {
+    disk = await diskFolderSignature(dirAbs);
+  } catch {
+    return false;
+  }
+  const lib = courseSubtreeSignature(course);
+  if (disk.size !== lib.size) return false;
+  for (const [k, v] of disk) {
+    if (lib.get(k) !== v) return false;
+  }
+  return true;
+}
+
+/**
+ * 导入一个文件夹时，它在库里的落点决策（importFiles 真正建目录、
+ * scanImport 只读估算落点，共用这一套，免得两边判断漂移）：
+ *   - 'new'   ：目标层级下没有同名目录，新建一个就是。
+ *   - 'merge' ：已有同名目录，且就是这个磁盘文件夹本人（sourcePath 对上），
+ *               或者内容签名一致 —— 并入它，文件再逐个走同目录重复判定。
+ *   - 'fresh' ：已有同名目录但内容不同（或用户选了「允许重复」）——
+ *               另建「原名（1）」，整棵树挂在新目录下（ensureFreshCourse）。
+ * course 是找到的同名目录（'new' 时为 null）。
+ */
+async function planBaseFolder(dirName, parentId, abs, dup, courseIdx) {
+  const found = courseIdx.get(dirName, parentId);
+  if (!found) return { mode: 'new', course: null };
+  if (dup === 'allow') return { mode: 'fresh', course: found };
+  // 同一个磁盘文件夹重复导入：sourcePath 对得上就是本人，直接并入
+  if (found.sourcePath && path.resolve(found.sourcePath) === abs) {
+    return { mode: 'merge', course: found };
+  }
+  if (await sameFolderContent(abs, found)) return { mode: 'merge', course: found };
+  return { mode: 'fresh', course: found };
+}
+
 async function importFiles({ paths, courseId, mode, dupMode, buildTree, nameOverride = null }) {
   /* 导入弹窗里改的名字（只在恰好选了一项时给）：只改库里显示的
    * 名字，磁盘上的原文件/文件夹不动，记录的路径也还是真实路径，
@@ -1511,6 +1630,8 @@ async function importFiles({ paths, courseId, mode, dupMode, buildTree, nameOver
   const replaced = [];
   const skipped = [];
   const failed = [];
+  // 因「重名但内容不同」被另建为「原名（1）」的文件夹，导入完要告诉用户
+  const renamedDirs = [];
 
   // 每个被选中的文件夹在库里的落点。
   //
@@ -1524,14 +1645,25 @@ async function importFiles({ paths, courseId, mode, dupMode, buildTree, nameOver
     try { isDir = (await fsp.stat(p)).isDirectory(); } catch { /* 忽略 */ }
     if (!isDir) continue;
     const abs = path.resolve(p);
-    // 导入到某个目录里 → 在它下面建同名子目录；导入到「全部文件」→ 建顶层目录
-    // 「允许重复」时不并入已有同名目录，另建 原名（1）（见 ensureFreshCourse）
+    // 导入到某个目录里 → 在它下面建同名子目录；导入到「全部文件」→ 建顶层目录。
+    // 落点由 planBaseFolder 决策，三种：
+    //   merge —— 同名目录就是这个文件夹本人、或内容签名一致，并入它；
+    //   fresh —— 同名但内容不同（或选了「允许重复」），另建 原名（1）
+    //            （见 ensureFreshCourse），不再把文件灌进旧目录
+    //            （2026-11-21 用户要求）；
+    //   new   —— 没有同名目录，新建。
     // 弹窗里改了名（单选文件夹时）就用新名建目录，磁盘原名不动。
     const dirName = useOverride && singleIsDir ? useOverride : path.basename(abs);
-    const baseCourseId = (dup === 'allow'
+    const plan = await planBaseFolder(dirName, courseId || null, abs, dup, courseIdx);
+    const baseCourse = plan.mode === 'fresh'
       ? ensureFreshCourse(dirName, courseId || null, abs, courseIdx)
-      : ensureCourse(dirName, courseId || null, abs, courseIdx)).id;
-    bases.push({ base: abs, baseCourseId });
+      : ensureCourse(dirName, courseId || null, abs, courseIdx);
+    // 撞名被另建的要记下来，导入完在界面上说一声，不然用户找不到
+    // 这批文件会以为导丢了。「允许重复」是用户自己选的，不用记。
+    if (plan.mode === 'fresh' && plan.course && dup !== 'allow') {
+      renamedDirs.push({ name: dirName, newName: baseCourse.name });
+    }
+    bases.push({ base: abs, baseCourseId: baseCourse.id });
   }
 
   // 直接选中的散文件没有自己的文件夹，导入到顶层时先收进「未分类」
@@ -1559,9 +1691,10 @@ async function importFiles({ paths, courseId, mode, dupMode, buildTree, nameOver
     return looseDir();
   };
 
-  // 路径 → 记录。导入过程中新登记的文件也要放进去，
+  // 路径 → 记录数组。导入过程中新登记的文件也要放进去，
   // 否则同一次导入里出现两次的路径会各记一条。
-  const pathIdx = makePathIndex(state.files);
+  // 用多重索引是因为同一路径现在可以在多个目录各有一条（见 existing）。
+  const pathMulti = makePathMultiIndex(state.files);
 
   // 目录 → 已占用名字集合（缓存）。导入途中分配掉的名字会写回
   // 集合里，同一批次导入的同名文件依次避让成（1）（2）。
@@ -1592,8 +1725,13 @@ async function importFiles({ paths, courseId, mode, dupMode, buildTree, nameOver
 
     const targetCourseId = resolveTarget(real);
 
-    // 已登记过的同一真实路径（只比对链接模式的记录，入库文件路径是库内副本）
-    const existing = pathIdx.get(real);
+    // 「重复」只认目标目录里的那一条（只比对链接模式的记录，入库文件
+    // 路径是库内副本，不参与）。其他目录里登记过同一个磁盘文件不算
+    // 这里的重复 —— 照常在目标目录新建一条（2026-11-21 用户要求：
+    // 导入文件夹时，里面的文件和已导入的其他目录中的文件是同一份，
+    // 不该再弹窗提示重复）。
+    const existing = (pathMulti.get(real) || [])
+      .find((r) => (r.courseId || null) === (targetCourseId || null));
 
     if (existing && dup === 'skip') {
       skipped.push(name);
@@ -1627,7 +1765,8 @@ async function importFiles({ paths, courseId, mode, dupMode, buildTree, nameOver
       storage,
     };
     state.files.push(rec);
-    if (!pathIdx.has(real)) pathIdx.set(real, rec);
+    if (!pathMulti.has(real)) pathMulti.set(real, []);
+    pathMulti.get(real).push(rec);
     added.push(rec);
   }
 
@@ -1640,6 +1779,7 @@ async function importFiles({ paths, courseId, mode, dupMode, buildTree, nameOver
     count: added.length,
     mode: storage,
     skippedDirs,
+    renamedDirs,
   };
 }
 
@@ -1758,14 +1898,31 @@ async function searchFiles({ query, scope, kinds, courseId, deep }) {
 }
 
 /**
- * 导入前预检：把将要导入的路径和库里已有记录比对，
- * 返回重复项，让界面弹窗询问用户如何处理。
+ * 导入前预检：把将要导入的路径和库里已有记录比对，分类成三份：
+ *   - fresh：没登记过的；
+ *   - duplicates：目标目录里已经有同一条 —— 只有这份要弹窗问用户；
+ *   - crossDir：只在别的目录里登记过同一个磁盘文件 —— 不弹窗，
+ *     导入时会在目标目录里照常新建一条（2026-11-21 用户要求）。
+ *
+ * 分类的前提是先只读地估算每个文件导入后会落在哪个目录：落点算法
+ * 和 importFiles 保持一致（文件夹落点共用 planBaseFolder），但这里
+ * 绝不建目录 —— 还没导入就把目录建出来，用户取消导入会留下一堆空壳。
+ * 近似点：预检不知道导入弹窗里改的名字（nameOverride），单选文件夹
+ * 改名时按原名估算；改名后的目录必然是新建的，分类结论不变，无碍。
+ *
+ * opts: { courseId, buildTree, dupMode } —— 渲染层把导入目标、是否
+ * 保留文件夹结构、设置里的重复处理方式传进来，缺省按导入到顶层、
+ * 不建树、跳过重复处理。
  */
-async function scanImport(paths) {
+async function scanImport(paths, opts = {}) {
+  const { courseId = null, buildTree = false } = opts || {};
+  // 和 importFiles 同一套归一化：只有 allow / replace 是特殊值，其余按 skip
+  const dup = ['allow', 'replace'].includes(opts?.dupMode) ? opts.dupMode : 'skip';
   const { files: raw, skippedDirs } = await collectFiles(paths);
   const seen = new Set();
   const fresh = [];
   const duplicates = [];
+  const crossDir = [];
   // 告诉渲染层这次选里有没有文件夹，用来决定要不要显示「保留文件夹结构」
   const dirs = [];
   for (const p of paths) {
@@ -1776,25 +1933,79 @@ async function scanImport(paths) {
 
   // 预检和真正导入用的是同一套索引，别在这里又退回线性查找 ——
   // 两万条记录时 5000 个文件要扫 24 秒，用户会以为软件卡死了。
-  const pathIdx = makePathIndex(state.files);
+  const courseIdx = makeCourseIndex(state.courses);
+  const pathMulti = makePathMultiIndex(state.files);
+
+  // 每个被选中的文件夹的落点估算：merge 进已有目录的用它的 id；
+  // 要新建（new / fresh）的目录还没有 id，用 isNew 标记 —— 新目录里
+  // 不可能有旧记录，落进去的文件天然不算同目录重复。
+  const bases = [];
+  for (const p of paths) {
+    let isDir = false;
+    try { isDir = (await fsp.stat(p)).isDirectory(); } catch { /* 忽略 */ }
+    if (!isDir) continue;
+    const abs = path.resolve(p);
+    if (bases.some((b) => b.base === abs)) continue; // 同一文件夹选了两次只算一个落点
+    const plan = await planBaseFolder(path.basename(abs), courseId || null, abs, dup, courseIdx);
+    bases.push({
+      base: abs,
+      target: plan.mode === 'merge'
+        ? { id: plan.course.id, isNew: false }
+        : { id: null, isNew: true },
+    });
+  }
+
+  // 散文件的落点：导入到指定目录就落它；导入到顶层则收进「未分类」，
+  // 「未分类」还不存在时落点就是待新建的目录。
+  const looseTarget = () => {
+    if (courseId) return { id: courseId, isNew: false };
+    const un = courseIdx.get('未分类', null);
+    return un ? { id: un.id, isNew: false } : { id: null, isNew: true };
+  };
+
+  /** 估算某个源文件导入后落在哪个目录（只查已有目录，不建） */
+  const resolveTargetScan = (real) => {
+    for (const { base, target } of bases) {
+      if (real !== base && !real.startsWith(base + path.sep)) continue;
+      if (!buildTree || target.isNew) return target;
+      const relDir = path.dirname(path.relative(base, real));
+      if (!relDir || relDir === '.') return target;
+      // 保留文件夹结构时逐段按名字往下找已有子目录，任一段没有
+      // 就说明那一层导入时会新建，下面的文件都落在新目录里
+      let curId = target.id;
+      for (const seg of relDir.split(path.sep)) {
+        const next = courseIdx.get(seg, curId);
+        if (!next) return { id: null, isNew: true };
+        curId = next.id;
+      }
+      return { id: curId, isNew: false };
+    }
+    return looseTarget();
+  };
 
   for (const src of raw) {
     const real = path.resolve(src);
     if (seen.has(real)) continue; // 本次选择里自己重复的只算一次
     seen.add(real);
 
-    const hit = pathIdx.get(real);
-    if (hit) {
-      duplicates.push({ path: real, name: path.basename(real), fileId: hit.id });
-    } else {
+    const recs = pathMulti.get(real);
+    if (!recs || !recs.length) {
       fresh.push(real);
+      continue;
     }
+    const target = resolveTargetScan(real);
+    const sameDir = !target.isNew
+      && recs.some((r) => (r.courseId || null) === target.id);
+    const item = { path: real, name: path.basename(real), fileId: recs[0].id };
+    if (sameDir) duplicates.push(item);
+    else crossDir.push(item);
   }
 
   return {
-    total: fresh.length + duplicates.length,
+    total: fresh.length + duplicates.length + crossDir.length,
     fresh,
     duplicates,
+    crossDir,
     dirs,
     // 跳过的依赖目录数（node_modules / .venv 之类），界面上要说一声
     skippedDirs,
@@ -1881,9 +2092,14 @@ async function scanDuplicates({ courseId }) {
   const groups = [];
   for (const [, list] of byHash) {
     if (list.length < 2) continue;
+    // 这组文件分布在几个目录里：跨目录的重复最容易删错地方，
+    // 界面上要单独标出来（2026-11-21 用户要求）。
+    const dirIds = new Set(list.map((f) => f.courseId || ''));
     groups.push({
       hash: list[0].hash,
       size: list[0].realSize,
+      crossDir: dirIds.size > 1,
+      dirCount: dirIds.size,
       files: list.map((f) => ({
         id: f.id,
         name: f.name,
@@ -2956,7 +3172,7 @@ function registerIpc() {
   ipcMain.handle('files:search', (_e, payload) => searchFiles(payload));
 
   /* --- 导入 --- */
-  ipcMain.handle('files:scan', (_e, { paths }) => scanImport(paths));
+  ipcMain.handle('files:scan', (_e, payload) => scanImport(payload?.paths || [], payload || {}));
 
   ipcMain.handle('dialog:pickFiles', async () => {
     const res = await dialog.showOpenDialog(win, {

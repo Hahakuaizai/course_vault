@@ -246,6 +246,16 @@ function toast(msg, type = '') {
  * 旧的批留在数组里当历史，反正弹窗只取 slice(0, 1)。 */
 const RELEASE_NOTES = [
   {
+    date: '2026-11-21',
+    items: [
+      { type: 'improve', text: '导入时只有目标目录里已经有的同一个文件才会提示重复；其他目录里有同一个文件不再弹窗，直接在新目录里登记一份' },
+      { type: 'improve', text: '导入的文件夹和已有文件夹重名但内容不同时，不再把文件灌进旧文件夹：会提示并自动建「原名（1）」装这次导入的内容；内容相同的仍合并' },
+      { type: 'fix', text: '修复重复文件检测把同名文件误标「名字不同」：名字一样、只是放在不同目录的不会再误报；分布在不同目录的重复组会标出「跨目录」' },
+      { type: 'improve', text: '重复文件改成勾选要删除的副本（默认已勾好多余的，保留最早导入的一份），和底部「删除 N 个」对得上，不容易误删' },
+      { type: 'fix', text: '文本编辑时 Ctrl+滚轮缩放以前被直接挡掉：现在编辑中也能缩放，改成同步调输入层和高亮层的字号，可见行数随字号自适应，不再有内容被挡住看不到' },
+    ],
+  },
+  {
     date: '2026-11-20',
     items: [
       { type: 'improve', text: '框选优化：拖出线框但没有选中任何文件或文件夹时，松开鼠标不再进入选择模式' },
@@ -762,11 +772,8 @@ function renderReleaseNotes(mode = 'latest') {
    * 看不出是哪一版改的；存量批次本身没记版本，只能这样推算 */
   const pm = /^(\d+)\.(\d+)\.(\d+)$/.exec(S.version || '');
   const verFor = (b, i) => {
-    /* 版本号取批次记录的原始值：扫描当时的版本最准确。按「当前版本
-     * 往回数」推算时，一旦中间跳号（手动改过 version.json、两次更新
-     * 之间未重启、旧批次被清理），后续批次会整体错位。 */
-    if (b.ver) return `v${b.ver}`;
     if (pm && Number(pm[3]) - i >= 0) return `v${pm[1]}.${pm[2]}.${Number(pm[3]) - i}`;
+    if (b.ver) return `v${b.ver}`;
     return i === 0 ? cur : '更早';
   };
   /* 设置里的历史只显示近 10 次：更早的批次不渲染，但仍完整存放在
@@ -775,10 +782,7 @@ function renderReleaseNotes(mode = 'latest') {
   const moreNote = mode === 'all' && list.length > shown.length
     ? '<div class="cl-files">仅显示近 10 次更新，更早的记录仍保存在软件数据中。</div>'
     : '';
-  /* 说明条目为空时给出提示，避免弹窗渲染成空白面板；
-   * 手写说明被清空、插件批次尚未生成时会走到这里。 */
-  const emptyNote = shown.length ? '' : '<div class="cl-files">本次更新没有可展示的说明。</div>';
-  body.innerHTML = hint + emptyNote + shown.map((b, i) => releaseBlock(b, verFor(b, i), i === 0, i)).join('') + moreNote;
+  body.innerHTML = hint + shown.map((b, i) => releaseBlock(b, verFor(b, i), i === 0, i)).join('') + moreNote;
   /* 插件二（仅本机）：把最近一批交给发布助手挂按钮。更新弹窗和
    * 设置里的历史视图都挂——弹窗不小心关了，还能从设置里再打开，
    * 按钮生成的仍是最近一次更新的发布代码 */
@@ -805,46 +809,6 @@ function isToday(dateStr) {
 function openChangelog(mode = 'latest') {
   renderReleaseNotes(mode);
   $('#changelogModal').hidden = false;
-}
-
-/**
- * 把弹窗里正在展示的更新内容整理成纯文本，供「复制」按钮使用。
- *
- * 直接从渲染好的 DOM 里取，不重新计算：弹窗可能显示最新一批，也可能是
- * 设置里翻出来的历史，用户看到什么就该复制到什么。
- */
-function changelogAsText() {
-  const box = $('#changelogBody');
-  if (!box) return '';
-  const out = [];
-  for (const sec of box.querySelectorAll('.cl-batch')) {
-    const ver = sec.querySelector('.cl-ver')?.textContent?.trim() || '';
-    const date = sec.querySelector('.cl-date')?.textContent?.trim() || '';
-    out.push(date ? `${ver}  ${date}` : ver);
-    for (const li of sec.querySelectorAll('.cl-item')) {
-      const tag = li.querySelector('.cl-tag')?.textContent?.trim() || '';
-      const text = li.querySelector('.cl-text')?.textContent?.trim() || '';
-      out.push(`- ${tag ? `[${tag}] ` : ''}${text}`);
-    }
-    const files = sec.querySelector('.cl-files')?.textContent?.trim();
-    if (files) out.push(files);
-    out.push('');
-  }
-  return out.join('\n').trim();
-}
-
-/**
- * 写系统剪贴板。走主进程 —— 渲染进程的 navigator.clipboard 在窗口失焦时会
- * 抛异常，但内容其实已经写进去了，从返回值上根本分不清成败（点了复制显示
- * 「复制失败」，剪贴板里却是有内容的）。
- */
-async function copyPlainText(text) {
-  try {
-    await api.clipboard.write(text);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function closeChangelog() {
@@ -3037,6 +3001,10 @@ async function closePreview() {
 /* ---------- 编辑 ---------- */
 let isEditing = false;
 let editorEl = null;
+// 文本编辑的 Ctrl+滚轮缩放倍率与基准字号（进入编辑时从 .editor-wrap
+// 的 --ed-size 读回，见 enterEditMode / applyEditorZoom）
+let editorZoom = 1;
+let editorBaseSize = 13;
 
 function setEditMode(on) {
   isEditing = on;
@@ -3243,6 +3211,27 @@ function scheduleHighlight(ta, pre) {
   }, 90);
 }
 
+/**
+ * 文本编辑的 Ctrl+滚轮缩放落地：只改 .editor-wrap 上的 --ed-size。
+ * 输入层（textarea）和高亮层（pre）在 CSS 里共用这个字号变量
+ * （--ed-line 是无单位行高，随字号等比走），所以两层天然同步不错位，
+ * textarea 自动重排、可见行数随字号自适应，滚动高度也自动重算 ——
+ * 这正是不能用整层 style.zoom 的原因：zoom 只会把内容等比放大推出
+ * 可视区，下面的行直接被挡住看不到（2026-11-21 用户要求）。
+ * 改完把高亮层的滚动位置同步回输入层，保持两层对齐。
+ */
+function applyEditorZoom() {
+  if (!editorEl) return;
+  const wrap = editorEl.closest('.editor-wrap');
+  if (!wrap) return;
+  wrap.style.setProperty('--ed-size', `${editorBaseSize * editorZoom}px`);
+  const pre = wrap.querySelector('.editor-highlight');
+  if (pre) {
+    pre.scrollTop = editorEl.scrollTop;
+    pre.scrollLeft = editorEl.scrollLeft;
+  }
+}
+
 function enterEditMode() {
   if (!currentPreview?.editable) return;
   const body = $('#previewBody');
@@ -3269,6 +3258,11 @@ function enterEditMode() {
   wrap.appendChild(ta);
   body.appendChild(wrap);
   editorEl = ta;
+
+  // 每次进编辑都从 1 倍开始；基准字号读 CSS 里 .editor-wrap 的 --ed-size，
+  // 以后样式里改了字号，缩放基准跟着走，不写死在 JS 里
+  editorZoom = 1;
+  editorBaseSize = parseFloat(getComputedStyle(wrap).getPropertyValue('--ed-size')) || 13;
 
   // 首次渲染高亮（用预览已经算好的 html，省一次 IPC）
   if (currentPreview.html) {
@@ -4634,8 +4628,16 @@ async function doImport() {
   btn.textContent = '检查中…';
 
   try {
-    // 先预检：有重复就弹窗让用户自己决定
-    const scan = await api.files.scan(S.importPaths);
+    // 先预检：有重复就弹窗让用户自己决定。
+    // 「保留文件夹结构」开关要在预检前就读：预检得按它估算每个文件的
+    // 落点，才分得清「目标目录里已经有同一条」（要弹窗）和「只是别的
+    // 目录里有同一个文件」（不弹窗，2026-11-21 用户要求）。
+    const buildTreeWanted = $('#swBuildTree').classList.contains('is-on');
+    const scan = await api.files.scan(S.importPaths, {
+      courseId,
+      buildTree: buildTreeWanted,
+      dupMode: setting('duplicateMode'),
+    });
     // 选了文件夹才显示「保留文件夹结构」，默认打开
     const hasFolder = Array.isArray(scan.dirs) && scan.dirs.length > 0;
     $('#buildTreeRow').hidden = !hasFolder;
@@ -4684,6 +4686,14 @@ async function runImport(courseId, mode, dupMode, nameOverride = null) {
     if (res.skippedDirs) parts.push(`跳过 ${res.skippedDirs} 个依赖目录`);
     if (res.failed?.length) parts.push(`失败 ${res.failed.length} 个`);
     toast(parts.join('，'), res.failed?.length ? 'error' : 'ok');
+    // 有文件夹因「重名但内容不同」被另建为「原名（1）」：单独说一声，
+    // 不然用户在原文件夹里找不到这批文件，会以为导丢了。
+    if (res.renamedDirs?.length) {
+      toast(
+        res.renamedDirs.map((r) => `「${r.name}」与已有文件夹重名但内容不同，已作为「${r.newName}」导入`).join('；'),
+        'ok',
+      );
+    }
   } catch (err) {
     toast(err.message || '导入失败', 'error');
   } finally {
@@ -4701,8 +4711,10 @@ async function runImport(courseId, mode, dupMode, nameOverride = null) {
 async function importDroppedPaths(paths, destId) {
   if (!paths.length) return;
   try {
-    const scan = await api.files.scan(paths);
-    const found = (scan?.fresh?.length || 0) + (scan?.duplicates?.length || 0);
+    const scan = await api.files.scan(paths, { courseId: destId, buildTree: false, dupMode: 'skip' });
+    // crossDir（只在别的目录里有同一个文件）导入时会在这里新建一条，
+    // 也算「找到了可导入的文件」，要计进来
+    const found = (scan?.fresh?.length || 0) + (scan?.duplicates?.length || 0) + (scan?.crossDir?.length || 0);
     if (!found) {
       toast('这些位置里没有可导入的文件', 'error');
       return;
@@ -4723,6 +4735,13 @@ async function importDroppedPaths(paths, destId) {
     if (res.skippedDirs) parts.push(`跳过 ${res.skippedDirs} 个依赖目录`);
     if (res.failed?.length) parts.push(`失败 ${res.failed.length} 个`);
     toast(parts.join('，'), res.failed?.length ? 'error' : 'ok');
+    // 拖进来的文件夹撞名但内容不同被另建「原名（1）」时同样说一声
+    if (res.renamedDirs?.length) {
+      toast(
+        res.renamedDirs.map((r) => `「${r.name}」与已有文件夹重名但内容不同，已作为「${r.newName}」导入`).join('；'),
+        'ok',
+      );
+    }
   } catch (err) {
     toast(err.message || '导入失败', 'error');
   }
@@ -5112,8 +5131,6 @@ function handleEscape() {
   closeCtx();
   // 确认框自己在捕获阶段处理 ESC，这里不要重复处理
   if (!$('#confirmModal').hidden) return;
-  // 项目架构图是全屏覆盖，Esc 先把它收起来
-  if (!$('#archModal').hidden) { $('#archModal').hidden = true; return; }
   // 更新公告放最前面：它是启动时弹的，其他弹窗都还没开
   if (!$('#changelogModal').hidden) { closeChangelog(); return; }
   /* 图片编辑器里正框着裁剪区域：Esc 先取消这个选区，
@@ -5305,17 +5322,17 @@ function bindEvents() {
   $('#navDupes').addEventListener('click', () => findDuplicates(true));
 
   $('#dupeGroups').addEventListener('change', (e) => {
-    const input = e.target.closest('input[type="radio"]');
+    const input = e.target.closest('input[type="checkbox"]');
     if (!input) return;
-    const gi = Number(input.name.replace('keep-', ''));
-    dupeKeep.set(gi, input.value);
-    // 刷新该组的保留/删除标记
-    const group = $(`.dupe-group[data-group="${gi}"]`);
-    group.querySelectorAll('.dupe-file').forEach((row) => {
-      const isKeep = row.dataset.file === input.value;
-      row.classList.toggle('is-keep', isKeep);
-      row.querySelector('.dupe-tag').textContent = isKeep ? '保留' : '删除';
-    });
+    // 勾选 = 要删，取消勾选 = 保留（点整行都会触发 label 关联的勾选变化）
+    if (input.checked) dupeDelete.add(input.value);
+    else dupeDelete.delete(input.value);
+    // 同步这一行的样式和右侧标签
+    const row = input.closest('.dupe-file');
+    if (row) {
+      row.classList.toggle('is-del', input.checked);
+      row.querySelector('.dupe-tag').textContent = input.checked ? '删除' : '保留';
+    }
     updateDupeFooter();
   });
 
@@ -5947,12 +5964,20 @@ function bindEvents() {
 
   /* 预览缩放：Ctrl+滚轮放大/缩小当前预览（图片、视频、文档、代码、
    * 表格、幻灯片）。PDF 是跨源 iframe，滚轮事件进不了主文档，由它
-   * 内置阅读器自己处理；文本/图片编辑状态下不抢滚轮。 */
+   * 内置阅读器自己处理；图片编辑状态不抢滚轮（图片编辑器有自己的
+   * 缩放）；文本编辑状态走字号缩放（改 --ed-size，见 applyEditorZoom：
+   * 两层同步、行数自适应，不像整层 zoom 会把内容挡住）；其余预览
+   * 仍走 style.zoom。 */
   $('#previewBody').addEventListener('wheel', (e) => {
     if (!e.ctrlKey) return;
     if (imageEditor) return;
     const body = $('#previewBody');
-    if (body.classList.contains('is-editing')) return;
+    if (body.classList.contains('is-editing') && editorEl) {
+      e.preventDefault();
+      editorZoom = Math.min(4, Math.max(0.25, editorZoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+      applyEditorZoom();
+      return;
+    }
     const target = pvZoomTarget(body);
     if (!target) return;
     e.preventDefault();
@@ -6633,36 +6658,8 @@ function bindEvents() {
   /* 更新内容公告 */
   /* 设置 → 关于里点「查看」：显示全部历史，不只最新一批 */
   $('#btnShowChangelog').addEventListener('click', () => openChangelog('all'));
-
-  /* 关于页「项目架构图」：在应用内全屏内嵌展示，不另开窗口。
-     src 只在第一次打开时赋值，避免每次启动都白白加载 800KB 的图；
-     关闭只是隐藏，图里的交互状态（当前视图、滚动位置）下次打开还在 */
-  $('#btnShowArchitecture').addEventListener('click', () => {
-    const frame = $('#archFrame');
-    if (!frame.getAttribute('src') || frame.getAttribute('src') === 'about:blank') {
-      frame.src = '../assets/架构图.html';
-    }
-    $('#archModal').hidden = false;
-  });
-  $('#btnArchClose').addEventListener('click', () => { $('#archModal').hidden = true; });
-  $('#archModal').addEventListener('click', (e) => {
-    if (e.target.id === 'archModal') $('#archModal').hidden = true;
-  });
-
   $('#btnChangelogClose').addEventListener('click', closeChangelog);
   $('#btnChangelogOk').addEventListener('click', closeChangelog);
-  $('#btnChangelogCopy').addEventListener('click', async function () {
-    /* 复制当前展示的更新内容：弹窗里可能只显示最新一批（本次更新），
-     * 也可能是在设置里翻历史，所以直接从已经渲染好的 DOM 里取，
-     * 不重新算一遍 —— 看到什么就复制什么 */
-    const btn = this;
-    const text = changelogAsText();
-    if (!text) return;
-    const ok = await copyPlainText(text);
-    const old = btn.textContent;
-    btn.textContent = ok ? '已复制' : '复制失败';
-    setTimeout(() => { btn.textContent = old; }, 1200);
-  });
   $('#changelogModal').addEventListener('click', (e) => {
     if (e.target.id === 'changelogModal') closeChangelog();
   });
@@ -8111,20 +8108,26 @@ function stripCopyIndex(name) {
  *   - 「pr.png」和「roc.png」—— 名字毫不相干，虽然内容一样，但很可能是
  *     两次不同用途的导入，删之前必须让人确认一下。
  *
- * 所以判定标准是「和组内别的文件是不是同一个基名」。只要组里存在另一个
- * 文件剥掉编号后跟自己同名，就算自动编号副本，不提醒；否则提醒。
+ * 所以判定标准是「和组内别的文件是不是同一个基名」：完全同名、或只差
+ * 一个（1）编号，都算同基名 —— 组里只要有另一个文件和自己同基名，
+ * 就算自动编号副本，不提醒；否则提醒。
+ *
+ * 注意不能再要求「对方名字和自己不一样」：两个文件名字一模一样、只是
+ * 放在不同目录里，是最普通的重复（2026-11-21 用户截图：两个
+ * 「工作满意度分析.R」都被挂了「名字不同」，其实只是路径不同）。
+ * 旧条件里的 o.name !== file.name 会把这种同名文件互相排除，
+ * 结果全组都被误标。
  */
 function dupNeedsWarn(file, group) {
   const base = stripCopyIndex(file.name).toLowerCase();
   return !group.files.some((o) => (
     o !== file
-    && o.name !== file.name
     && stripCopyIndex(o.name).toLowerCase() === base
   ));
 }
 
 let dupeGroups = [];
-let dupeKeep = new Map(); // groupIndex -> 保留的 fileId
+let dupeDelete = new Set(); // 要删除的文件 id（勾选删除模型，见 findDuplicates）
 
 async function findDuplicates(fromNav = false) {
   const btn = fromNav ? $('#navDupes') : $('#btnFindDupes');
@@ -8147,9 +8150,14 @@ async function findDuplicates(fromNav = false) {
     }
 
     dupeGroups = res.groups;
-    dupeKeep = new Map();
-    // 每组默认保留最早导入的那份
-    dupeGroups.forEach((g, i) => dupeKeep.set(i, g.files[0].id));
+    // 勾选删除模型（2026-11-21 用户要求）：勾上的就是要删的，默认把每组
+    // 除第一份（最早导入）外的副本都勾好，第一份不勾 = 保留。这样勾选
+    // 状态和底部「删除 N 个」一一对应；旧的单选「保留」模型是反着的，
+    // 用户看着选中的那行标着「保留」、按钮却写「删除 1 个」，容易误删。
+    dupeDelete = new Set();
+    dupeGroups.forEach((g) => {
+      g.files.slice(1).forEach((f) => dupeDelete.add(f.id));
+    });
 
     renderDupeModal(res);
     $('#dupeModal').hidden = false;
@@ -8166,6 +8174,7 @@ async function findDuplicates(fromNav = false) {
 
 function renderDupeModal(res) {
   const totalDup = dupeGroups.reduce((n, g) => n + g.files.length - 1, 0);
+  const crossCount = dupeGroups.filter((g) => g.crossDir).length;
   $('#dupeSummary').innerHTML = `
     <div class="dupe-stat">
       <strong>${dupeGroups.length}</strong>
@@ -8179,23 +8188,25 @@ function renderDupeModal(res) {
       <strong>${fmtBytes(res.waste)}</strong>
       <small>可释放</small>
     </div>
-    <p class="dupe-tip">每组默认保留最早导入的那份，你可以点选要保留哪一份。</p>`;
+    <p class="dupe-tip">勾选的是要删除的副本，每组默认保留最早导入的那份，点任意一行可以改。${crossCount ? `其中 ${crossCount} 组分布在不同目录，组旁已标「跨目录」。` : ''}</p>`;
 
   $('#dupeGroups').innerHTML = dupeGroups.map((g, gi) => `
     <section class="dupe-group" data-group="${gi}">
       <header class="dupe-group-head">
         <span class="dupe-size">${fmtBytes(g.size)}</span>
         <span class="dupe-count">${g.files.length} 个相同文件</span>
+        ${g.crossDir ? `<span class="dupe-cross">跨目录 · ${g.dirCount} 个目录</span>` : ''}
       </header>
       <div class="dupe-files">
         ${g.files.map((f) => {
           // 名字和同组文件毫不相干时先标出来，别让人点删除按钮才发现
           const warn = dupNeedsWarn(f, g);
+          const toDel = dupeDelete.has(f.id);
           return `
-          <label class="dupe-file ${f.id === dupeKeep.get(gi) ? 'is-keep' : ''}" data-file="${f.id}">
-            <input type="radio" name="keep-${gi}" value="${f.id}"
-                   ${f.id === dupeKeep.get(gi) ? 'checked' : ''} />
-            <span class="dupe-radio"></span>
+          <label class="dupe-file ${toDel ? 'is-del' : ''}" data-file="${f.id}">
+            <input type="checkbox" data-group="${gi}" value="${f.id}"
+                   ${toDel ? 'checked' : ''} />
+            <span class="dupe-check"></span>
             <span class="dupe-file-body">
               <span class="dupe-name-row">
                 <span class="dupe-name">${escapeHtml(f.name)}</span>
@@ -8203,7 +8214,7 @@ function renderDupeModal(res) {
               </span>
               <span class="dupe-path" title="${escapeHtml(f.path)}">${escapeHtml(f.dirPath)}</span>
             </span>
-            <span class="dupe-tag">${f.id === dupeKeep.get(gi) ? '保留' : '删除'}</span>
+            <span class="dupe-tag">${toDel ? '删除' : '保留'}</span>
           </label>`;
         }).join('')}
       </div>
@@ -8213,8 +8224,9 @@ function renderDupeModal(res) {
 }
 
 function updateDupeFooter() {
+  // 待删数就是勾选数，和每行右侧的「删除」标签数完全一致
   const toDelete = dupeGroups.reduce(
-    (n, g, i) => n + g.files.filter((f) => f.id !== dupeKeep.get(i)).length,
+    (n, g) => n + g.files.filter((f) => dupeDelete.has(f.id)).length,
     0,
   );
   $('#btnDupeRemove').disabled = toDelete === 0;
@@ -8226,9 +8238,9 @@ async function removeDuplicates() {
   const ids = [];
   /** 待删文件里名字和同组不一样的 —— 这些要单独提醒 */
   const renamed = [];
-  dupeGroups.forEach((g, i) => {
+  dupeGroups.forEach((g) => {
     for (const f of g.files) {
-      if (f.id === dupeKeep.get(i)) continue;
+      if (!dupeDelete.has(f.id)) continue;
       ids.push(f.id);
       if (dupNeedsWarn(f, g)) renamed.push(f);
     }
