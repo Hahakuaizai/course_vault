@@ -16,13 +16,11 @@
     { id: 'deepy', label: '像素鲸鱼' },
     { id: 'clawd', label: '克码人生' },
     { id: 'kunkun', label: '坤坤' },
-    { id: 'maid', label: '蓝发小女仆' },
-    { id: 'gemini', label: 'Gemini·Q版' },
-    { id: 'gemini-std', label: 'Gemini·标准版' },
   ];
-
-  /* Gemini 娘的 Q 版与标准版是两个独立的宠物包，各自一张卡、
-     各自在菜单里占一行（形态切换功能已按用户要求移除） */
+  /* 蓝发小女仆 / Gemini·Q版 / Gemini·标准版 已从内置里移出
+   * （2026-11-25 用户要求），素材打成了可导入的 zip 放在
+   * course-vault-backup/pets-export/，需要时用「导入自己的桌宠」加回来。
+   * 它们对应的 pets/<id>/ 目录也一并删掉了，别再往 BUILTINS 里加回来。 */
   /* 大小三档是「内容高度」的目标像素，自定义在 40–200 之间拉滑块 */
   const SIZE_PRESETS = { small: 64, medium: 92, large: 128 };
 
@@ -65,13 +63,17 @@
      走文件（见 saveCfg / pet-main 的 pet:config-* 通道），
      localStorage 只留作同会话内的兜底。 */
   function normalizeCfg(c) {
-    const dflt = { pet: 'kunkun', pos: null, customName: '', size: 'medium', sizePx: 92, mode: 'inside', perPet: {} };
+    const dflt = { pet: 'kunkun', pos: null, customPets: [], size: 'medium', sizePx: 92, mode: 'inside', perPet: {} };
     const out = Object.assign(dflt, c || {});
     /* 每只宠物的大小/位置分开存（perPet[宠物id] = {size, sizePx, pos}）：
        每只宠物的基础大小不一样，共用一套设置来回切换就得反复调。
        顶层的 size/sizePx/pos 是旧版的共用设置，只作迁移种子：
        第一次升级时把它们记到当前宠物名下，之后不再读它们。 */
     if (!out.perPet || typeof out.perPet !== 'object' || Array.isArray(out.perPet)) out.perPet = {};
+    /* 导入的自定义桌宠清单：[{ id, name }]，可以有多只 */
+    if (!Array.isArray(out.customPets)) out.customPets = [];
+    out.customPets = out.customPets.filter((p) => p && p.id && typeof p.id === 'string');
+    /* 旧版单个自定义桌宠的字段，迁移逻辑见 migrateLegacyCustom */
     if (!out.perPet[out.pet]) {
       out.perPet[out.pet] = { size: out.size || 'medium', sizePx: out.sizePx || 92, pos: out.pos || null };
     }
@@ -193,18 +195,73 @@
     return { manifest, prefix, files };
   }
 
-  /* 自定义包解析结果缓存（设置页预览和舞台共用） */
-  let customCache = null;
-  let customCacheTried = false;
-  async function getCustom() {
-    if (customCache || customCacheTried) return customCache;
-    customCacheTried = true;
+  /* ---------------- 自定义桌宠（可以有多个） ----------------
+   *
+   * 每个导入的 zip 单独存在 IndexedDB 的 `customZip:<id>` 键下，
+   * 配置里用 cfg.customPets = [{ id, name }] 记住有哪几只、什么名字。
+   * 当前选中的宠物 id 是 `custom:<id>`，这样它和内置宠物的 id 在
+   * 同一套逻辑里走（perPet 设置、菜单勾选、卡片高亮都不用特判）。
+   *
+   * 以前只有一个槽位（固定键 customZip + 单个 customName），
+   * 再导入就覆盖上一次 —— 用户 2026-11-25 报的 bug。
+   */
+  const CUSTOM_PREFIX = 'custom:';
+  const isCustomId = (id) => typeof id === 'string' && id.startsWith(CUSTOM_PREFIX);
+  const customIndexOf = (id) => (isCustomId(id) ? id.slice(CUSTOM_PREFIX.length) : null);
+
+  /* 解析结果缓存：id → { manifest, prefix, files }。解 zip 慢，别重复解。 */
+  const customCache = new Map();
+  const customLoading = new Map();
+
+  async function getCustomPack(id) {
+    if (!id) return null;
+    if (customCache.has(id)) return customCache.get(id);
+    if (customLoading.has(id)) return customLoading.get(id);
+    const job = (async () => {
+      try {
+        const blob = await idbGet('customZip:' + id);
+        if (!blob) return null;
+        const parsed = parsePack(await unzipAll(await blob.arrayBuffer()));
+        if (parsed) customCache.set(id, parsed);
+        return parsed;
+      } catch {
+        return null;
+      } finally {
+        customLoading.delete(id);
+      }
+    })();
+    customLoading.set(id, job);
+    return job;
+  }
+
+  /** 当前选中的自定义包（不是自定义宠物时返回 null） */
+  async function getActiveCustom() {
+    const id = customIndexOf(cfg.pet);
+    return id ? getCustomPack(id) : null;
+  }
+
+  function customPetName(id) {
+    const m = (cfg.customPets || []).find((p) => p.id === id);
+    return m ? m.name : '自定义桌宠';
+  }
+
+  /* 老版本只有一个槽位：IDB 里是固定键 customZip，配置里是 customName。
+     第一次跑新版时把它搬成一个正常的自定义宠物，别让用户丢东西。 */
+  async function migrateLegacyCustom() {
+    if ((cfg.customPets || []).length) return;
+    if (!cfg.customName) return;
     try {
       const blob = await idbGet('customZip');
-      if (!blob) return null;
-      customCache = parsePack(await unzipAll(await blob.arrayBuffer()));
-    } catch { customCache = null; }
-    return customCache;
+      if (!blob) return;
+      const id = 'p' + Date.now().toString(36);
+      await idbSet('customZip:' + id, blob);
+      await idbDel('customZip').catch(() => {});
+      cfg.customPets = [{ id, name: cfg.customName }];
+      /* 旧配置里「当前是自定义」记成 pet === 'custom'，换成带 id 的形式 */
+      if (cfg.pet === 'custom') cfg.pet = CUSTOM_PREFIX + id;
+      delete cfg.customName;
+      saveCfg();
+    } catch { /* 迁移失败就当没有，不影响使用 */ }
   }
 
   /* ---------------- 舞台与播放器 ---------------- */
@@ -572,13 +629,102 @@
     return s;
   }
 
-  /* 子菜单显隐由 JS 控制（纯 CSS :hover 在斜向移动时容易断）：
-     同一层共用一个收起计时——进入带子菜单的条目就展开它并取消
-     本层待收起；进入普通条目或离开父条目，700ms 后才收起本层
-     展开中的子菜单。从条目移进它自己的子菜单不算离开（子菜单
-     是条目的子元素，pointerleave 不触发），700ms 也足够斜着
-     划过邻项再进入子菜单。 */
+  /* ---------- 级联子菜单的收起时机 ----------
+   *
+   * 两个互相矛盾的要求：斜着往子菜单移动时不能半路收掉（「还没移过去
+   * 就没了」），指针真的走开以后又要立刻收（用户报「移走后几秒才消失」）。
+   *
+   * 以前只有一个固定 700ms 的宽限：慢，而且指针停在菜单外的空白处
+   * 不再移动时根本没机会触发收起，子菜单就挂在那里不动。
+   *
+   * 现在用「安全三角形」：以父项右缘中点为顶点、子菜单左侧上下角为底边。
+   * 指针落在父项、子菜单或这个三角形里就一直保持；离开安全区 220ms 后
+   * 收掉。判定挂在 document 的 pointermove 上——指针停在空白处的那一次
+   * move 已经启动倒计时，照常会收，不会挂着不走。
+   */
+  const SUB_GRACE = 220;
+
+  function pointInRect(x, y, r, pad = 0) {
+    return x >= r.left - pad && x <= r.right + pad
+      && y >= r.top - pad && y <= r.bottom + pad;
+  }
+
+  function pointInTriangle(px, py, a, b, c) {
+    const d1 = (px - b.x) * (a.y - b.y) - (a.x - b.x) * (py - b.y);
+    const d2 = (px - c.x) * (b.y - c.y) - (b.x - c.x) * (py - c.y);
+    const d3 = (px - a.x) * (c.y - a.y) - (c.x - a.x) * (py - a.y);
+    const hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
+    const hasPos = d1 > 0 || d2 > 0 || d3 > 0;
+    return !(hasNeg && hasPos);
+  }
+
+  /** 指针是否还在「父项 → 子菜单」这条必经之路上 */
+  function inSubSafeZone(mi, x, y) {
+    const sub = mi.querySelector(':scope > .sub');
+    if (!sub) return false;
+    const b = mi.getBoundingClientRect();
+    /* 父项外扩 4px：子菜单常紧贴父菜单，那条极窄的缝不能让指针
+       一走进去就开始倒计时。 */
+    if (pointInRect(x, y, b, 4)) return true;
+    /* 指针进到子菜单、或更深层的孙菜单里都算安全。孙菜单是固定定位、
+       挂在子菜单外面，所以要逐层检查所有已展开的子孙面板 —— 只看直接
+       子菜单的话，指针移到第三层上会把前两层一起收掉。 */
+    const panels = sub.querySelectorAll(':scope .sub');
+    for (const p of panels) {
+      if (p.classList.contains('positioned') && pointInRect(x, y, p.getBoundingClientRect(), 2)) return true;
+    }
+    const s = sub.getBoundingClientRect();
+    if (pointInRect(x, y, s, 2)) return true;
+    /* 子菜单放不下时会翻到父项左边，底边位置跟着换 */
+    const onRight = s.left >= b.right - 12;
+    /* 父项和子菜单之间的竖直通道：子菜单贴得很紧时安全三角形会退化
+       成一条细线，指针横着往右挪第一下就落到三角形外了。 */
+    const gapL = onRight ? b.right - 2 : s.right;
+    const gapR = onRight ? s.left + 2 : b.left + 2;
+    if (gapR > gapL && x >= gapL && x <= gapR
+      && y >= Math.min(b.top, s.top) - 4 && y <= Math.max(b.bottom, s.bottom) + 4) return true;
+    const apex = { x: onRight ? b.right : b.left, y: b.top + b.height / 2 };
+    const cornerX = onRight ? s.left : s.right;
+    return pointInTriangle(x, y, apex, { x: cornerX, y: s.top }, { x: cornerX, y: s.bottom });
+  }
+
+  /** 收起某一层里展开中的子菜单 */
+  function closeSubIn(parent) {
+    clearTimeout(parent._petSubTimer);
+    parent._petSubTimer = 0;
+    parent.querySelectorAll(':scope > .mi.has-sub.sub-open').forEach((o) => {
+      o.classList.remove('sub-open');
+      o.querySelectorAll('.sub-open').forEach((d) => d.classList.remove('sub-open'));
+    });
+  }
+
+  /* 全局监听只装一次：菜单每次重建，监听器挂在 document 上不跟着走 */
+  let subAutoCloseInstalled = false;
+  function installSubAutoClose() {
+    if (subAutoCloseInstalled) return;
+    subAutoCloseInstalled = true;
+    document.addEventListener('pointermove', (e) => {
+      const open = document.querySelectorAll('.cv-pet-menu .mi.has-sub.sub-open');
+      if (!open.length) return;
+      const x = e.clientX;
+      const y = e.clientY;
+      open.forEach((mi) => {
+        const parent = mi.parentElement;
+        if (inSubSafeZone(mi, x, y)) {
+          clearTimeout(parent._petSubTimer);
+          parent._petSubTimer = 0;
+        } else if (!parent._petSubTimer) {
+          parent._petSubTimer = setTimeout(() => closeSubIn(parent), SUB_GRACE);
+        }
+      });
+    }, { passive: true });
+  }
+
+  /* 子菜单显隐由 JS 控制（纯 CSS :hover 在斜向移动时容易断）。
+     收起时机见上面 SUB_GRACE 处：这里只负责「进入带子菜单的条目
+     就展开它、并收起同层其它已展开的」。 */
   function wireSubMenus(root) {
+    installSubAutoClose();
     /* 子菜单用固定定位，但【绝不移动已经打开的菜单】——上一版的
        级联平移会把父菜单从指针下面挪走：条目滑走点不到、悬停目标
        突变还会让子菜单无故消失。定位规则：先向右展开；放不下翻到
@@ -618,32 +764,11 @@
       sub.style.left = x + 'px';
       sub.style.top = y + 'px';
     };
-    const closeIn = (parent) => {
-      parent.querySelectorAll(':scope > .mi.has-sub.sub-open').forEach((o) => {
-        o.classList.remove('sub-open');
-        o.querySelectorAll('.sub-open').forEach((d) => d.classList.remove('sub-open'));
-      });
-    };
-    /* 待收起计时按父级各存一份；指针落到任何子菜单面板自身
-       （边距、滚动条、分隔区这类「空白处」）时，把所有待收起计时
-       一并取消——斜着移向子菜单时不会再被半路收掉。 */
-    const armedParents = new Set();
-    const armClose = (parent) => {
-      clearTimeout(parent._petSubTimer);
-      armedParents.add(parent);
-      parent._petSubTimer = setTimeout(() => closeIn(parent), 700);
-    };
-    root.addEventListener('pointerover', (e) => {
-      if (e.target.closest && e.target.closest('.sub') && !e.target.closest('.mi')) {
-        armedParents.forEach((p) => clearTimeout(p._petSubTimer));
-        armedParents.clear();
-      }
-    });
     root.querySelectorAll('.mi.has-sub').forEach((mi) => {
       const parent = mi.parentElement;
       mi.addEventListener('pointerenter', () => {
         clearTimeout(parent._petSubTimer);
-        armedParents.delete(parent);
+        parent._petSubTimer = 0;
         parent.querySelectorAll(':scope > .mi.has-sub.sub-open').forEach((o) => {
           if (o !== mi) {
             o.classList.remove('sub-open');
@@ -653,11 +778,13 @@
         mi.classList.add('sub-open');
         placeSub(mi, mi.querySelector(':scope > .sub'));
       });
-      mi.addEventListener('pointerleave', () => armClose(parent));
+      /* 离开父项不再直接开始倒计时 —— 指针可能是斜着去子菜单，
+         交给全局 pointermove 的安全三角形判定。指针停在两菜单之间
+         的缝隙里不动时，那一次 move 已经判过不安全，倒计时会照常
+         走完，不会挂着不走。 */
     });
-    root.querySelectorAll('.mi:not(.has-sub)').forEach((mi) => {
-      mi.addEventListener('pointerenter', () => armClose(mi.parentElement));
-    });
+    /* 普通条目也不单独收起：指针移出子菜单的安全区后，由全局
+       pointermove 统一倒计时。 */
   }
 
   /* 播放动作：三级菜单 — 分组（模式）一层，组内动作再一层 */
@@ -758,8 +885,8 @@
     if (petId === 'none') return;
     let pk = null;
     let urlFor = null;
-    if (petId === 'custom') {
-      const custom = await getCustom();
+    if (isCustomId(petId)) {
+      const custom = await getCustomPack(customIndexOf(petId));
       if (!custom) return;
       pk = custom.manifest;
       urlFor = (n) => {
@@ -799,7 +926,10 @@
     for (const b of BUILTINS) {
       addItem(b.id, b.label, cfg.pet === b.id);
     }
-    if (cfg.customName) addItem('custom', cfg.customName, cfg.pet === 'custom');
+    for (const p of cfg.customPets || []) {
+      const id = CUSTOM_PREFIX + p.id;
+      addItem(id, p.name, cfg.pet === id);
+    }
     const sep = document.createElement('div');
     sep.className = 'sep';
     sub.appendChild(sep);
@@ -925,6 +1055,41 @@
     }, 30);
   }
 
+  /**
+   * 设置页里导入的桌宠卡片上右键弹出的菜单。
+   * 只给自定义桌宠用 —— 内置宠物没有「删除」这个概念（删了就没法恢复了）。
+   * 复用舞台那套 .cv-pet-menu 样式，菜单长得和桌宠身上右键一致。
+   */
+  function showCardMenu(x, y, card) {
+    closeMenu();
+    closeSizePop();
+    const id = card.dataset.petCard;
+    menuEl = document.createElement('div');
+    menuEl.className = 'cv-pet-menu';
+    const head = document.createElement('div');
+    head.className = 'mhead';
+    head.textContent = customPetName(customIndexOf(id)) || '自定义桌宠';
+    menuEl.appendChild(head);
+    menuEl.appendChild(menuItem('设为当前桌宠', {
+      onClick: () => setPet(id),
+    }));
+    const sep = document.createElement('div');
+    sep.className = 'sep';
+    menuEl.appendChild(sep);
+    const del = menuItem('删除这个桌宠', { onClick: () => confirmRemoveCustom(id) });
+    del.classList.add('is-danger');
+    menuEl.appendChild(del);
+    document.body.appendChild(menuEl);
+    const mw = menuEl.offsetWidth;
+    const mh = menuEl.offsetHeight;
+    const left = Math.min(Math.max(4, x), Math.max(4, window.innerWidth - mw - 8));
+    const top = Math.min(Math.max(4, y), Math.max(4, window.innerHeight - mh - 8));
+    menuEl.style.left = left + 'px';
+    menuEl.style.top = top + 'px';
+    document.addEventListener('pointerdown', onDocDown, true);
+    document.addEventListener('keydown', onMenuKey, true);
+  }
+
   /* ---------------- 大小 ---------------- */
 
   function setSize(key) {
@@ -970,11 +1135,22 @@
 
   async function buildExternalCfg() {
     const pc = petCfg();
-    const out = { pet: cfg.pet, size: pc.size, sizePx: pc.sizePx, customName: cfg.customName, custom: null };
+    /* customName：当前选中宠物若自定义，就是它的显示名；pets 清单给
+       桌面菜单的「更换宠物」子菜单用（外部窗口读不到 IndexedDB，
+       所以自定义宠物的名字和清单都得随配置一起送过去）。 */
+    const curIdx = customIndexOf(cfg.pet);
+    const out = {
+      pet: cfg.pet,
+      size: pc.size,
+      sizePx: pc.sizePx,
+      customName: curIdx ? customPetName(curIdx) : '',
+      customPets: (cfg.customPets || []).map((p) => ({ id: CUSTOM_PREFIX + p.id, name: p.name })),
+      custom: null,
+    };
     /* 桌面菜单窗口要跟随当前主题配色，把主题名一起带过去 */
     out.theme = document.documentElement.getAttribute('data-theme') || '';
-    if (cfg.pet === 'custom') {
-      const parsed = await getCustom();
+    if (curIdx) {
+      const parsed = await getActiveCustom();
       if (parsed) {
         const files = {};
         for (const [k, v] of parsed.files) files[k] = bytesToB64(v);
@@ -1046,9 +1222,17 @@
     closeExternal();
     ensureStage();
     stage.style.display = '';
-    if (cfg.pet === 'custom') {
-      const parsed = await getCustom();
-      if (!parsed) { cfg.pet = 'kunkun'; saveCfg(); syncSettingsUI(); return applyPet(); }
+    if (isCustomId(cfg.pet)) {
+      const parsed = await getActiveCustom();
+      if (!parsed) {
+        /* 包读不出来了（IDB 被清、包损坏）：退回内置，并把这只从清单里摘掉，
+           免得配置里一直挂着一条永远加载不出的记录 */
+        cfg.customPets = (cfg.customPets || []).filter((p) => CUSTOM_PREFIX + p.id !== cfg.pet);
+        cfg.pet = 'kunkun';
+        saveCfg();
+        syncSettingsUI();
+        return applyPet();
+      }
       pack = parsed.manifest;
       sheetURL = (name) => {
         const data = parsed.files.get(parsed.prefix + name);
@@ -1205,13 +1389,17 @@
       card.appendChild(nm);
       wrap.appendChild(card);
     }
-    const custom = await getCustom();
-    if (custom) {
-      const card = petCard('custom', cfg.customName || custom.manifest.name || '自定义桌宠');
+    /* 导入的桌宠：每只一张卡，可以有很多只。卡片上不再放 × 按钮
+       （用户 2026-11-25 要求去掉），删除统一走右键菜单。 */
+    for (const p of cfg.customPets || []) {
+      const id = CUSTOM_PREFIX + p.id;
+      const parsed = await getCustomPack(p.id);
+      if (!parsed) continue;   // 包坏了就先不显示，别留一张点不动的空卡
+      const card = petCard(id, p.name);
       const cv = document.createElement('canvas');
       card.appendChild(cv);
-      previewStops.push(startPreview(cv, custom.manifest, (n) => {
-        const data = custom.files.get(custom.prefix + n);
+      previewStops.push(startPreview(cv, parsed.manifest, (n) => {
+        const data = parsed.files.get(parsed.prefix + n);
         if (!data) return '';
         const url = URL.createObjectURL(new Blob([data], { type: 'image/png' }));
         blobURLs.push(url);
@@ -1219,14 +1407,8 @@
       }));
       const nm = document.createElement('div');
       nm.className = 'pet-card-name';
-      nm.textContent = cfg.customName || custom.manifest.name || '自定义桌宠';
+      nm.textContent = p.name;
       card.appendChild(nm);
-      const rm = document.createElement('button');
-      rm.className = 'pet-card-remove';
-      rm.dataset.removeCustom = '1';
-      rm.title = '移除自定义桌宠';
-      rm.textContent = '×';
-      card.appendChild(rm);
       wrap.appendChild(card);
     }
     const noneCard = petCard('none', '不显示');
@@ -1278,6 +1460,14 @@
 
   /* ---------------- 导入 / 移除自定义包 ---------------- */
 
+  /** 生成一个不重复的自定义宠物 id（配置里存的是不带前缀的部分） */
+  function newCustomId() {
+    let n = Date.now().toString(36);
+    const used = new Set((cfg.customPets || []).map((p) => p.id));
+    while (used.has(n)) n = (Date.now() + Math.floor(Math.random() * 1000)).toString(36);
+    return n;
+  }
+
   async function importZip(file) {
     const info = document.querySelector('#petCustomInfo');
     try {
@@ -1285,30 +1475,63 @@
       const files = await unzipAll(buf);
       const parsed = parsePack(files);
       if (!parsed) throw new Error('包里找不到有效的 pack.json（需要顶层或一层文件夹内、且包含 idle 动画）');
-      await idbSet('customZip', new Blob([buf], { type: 'application/zip' }));
-      customCache = parsed;
-      customCacheTried = true;
-      cfg.customName = parsed.manifest.name || parsed.manifest.id || file.name;
+
+      const id = newCustomId();
+      const name = parsed.manifest.name || parsed.manifest.id || file.name.replace(/\.zip$/i, '');
+      await idbSet('customZip:' + id, new Blob([buf], { type: 'application/zip' }));
+      customCache.set(id, parsed);
+      cfg.customPets = [...(cfg.customPets || []), { id, name }];
       saveCfg();
-      if (info) info.textContent = '已导入：' + cfg.customName + '（zip 宠物包，和 dsh-go 的宠物包通用）';
+      if (info) info.textContent = `已导入：${name}（zip 宠物包，和 dsh-go 的宠物包通用）`;
       await buildCards();
-      setPet('custom');
+      setPet(CUSTOM_PREFIX + id);
     } catch (err) {
       if (info) info.textContent = '导入失败：' + (err && err.message ? err.message : '文件读不了');
     }
   }
 
-  async function removeCustom() {
-    await idbDel('customZip').catch(() => {});
-    customCache = null;
-    customCacheTried = true;
-    cfg.customName = '';
+  /** 删除一只导入的桌宠（按 id，不再假设只有一只） */
+  async function removeCustom(id) {
+    const cfgId = customIndexOf(id) || id;
+    if (!cfgId) return;
+    await idbDel('customZip:' + cfgId).catch(() => {});
+    customCache.delete(cfgId);
+    customLoading.delete(cfgId);
+    cfg.customPets = (cfg.customPets || []).filter((p) => p.id !== cfgId);
+    /* 每只宠物自己的大小/位置设置也一起清掉，别在配置里留垃圾 */
+    delete cfg.perPet[CUSTOM_PREFIX + cfgId];
+    if (cfg.pet === CUSTOM_PREFIX + cfgId) cfg.pet = 'kunkun';
     saveCfg();
     const info = document.querySelector('#petCustomInfo');
     if (info) info.textContent = '';
-    if (cfg.pet === 'custom') setPet('kunkun');
     await buildCards();
     syncSettingsUI();
+    if (cfg.pet === 'kunkun') applyPet();
+    else syncExternal();
+  }
+
+  /** 右键菜单里的「删除这个桌宠」：先问一句再删。
+   *  用软件自己的确认框（app.js 通过 window.__vaultUi 暴露），
+   *  和删除文件、删除目录长得一致；拿不到桥接时（理论上不该发生）
+   *  才退回浏览器原生 confirm。 */
+  async function confirmRemoveCustom(id) {
+    const cfgId = customIndexOf(id) || id;
+    const name = customPetName(cfgId);
+    const ui = window.__vaultUi;
+    if (ui && ui.askConfirm) {
+      const ok = await ui.askConfirm({
+        title: '删除桌宠',
+        lead: `删除「${name}」？`,
+        note: '精灵图素材会一起删掉，之后想再用需要重新导入 zip。',
+        okText: '删除',
+        danger: true,
+      });
+      if (!ok) return;
+    } else {
+      // eslint-disable-next-line no-alert
+      if (!window.confirm(`删除「${name}」？\n\n精灵图素材会一起删掉，之后想再用需要重新导入 zip。`)) return;
+    }
+    await removeCustom(cfgId);
   }
 
   /* ---------------- 设置页绑定 ---------------- */
@@ -1316,7 +1539,6 @@
   function bindSettings() {
     const wrap = document.querySelector('#petCards');
     if (wrap) wrap.addEventListener('click', (e) => {
-      if (e.target.closest('[data-remove-custom]')) { removeCustom(); return; }
       const card = e.target.closest('.pet-card');
       if (!card) return;
       const id = card.dataset.petCard;
@@ -1326,6 +1548,18 @@
       } else {
         setPet(id);
       }
+    });
+    /* 设置页预览卡片上右键：只有**导入的**自定义桌宠才给删除项，
+     * 内置宠物不显示（2026-11-25 用户要求）。卡片上不再有 × 按钮，
+     * 删除只走这里（用户 2026-11-25 要求去掉叉号）。 */
+    if (wrap) wrap.addEventListener('contextmenu', (e) => {
+      const card = e.target.closest('.pet-card');
+      if (!card) return;
+      const id = card.dataset.petCard;
+      if (!isCustomId(id)) return;   // 内置 / 「不显示」/ 「导入」都不给
+      e.preventDefault();
+      e.stopPropagation();
+      showCardMenu(e.clientX, e.clientY, card);
     });
     const fileInput = document.querySelector('#petImportFile');
     if (fileInput) fileInput.addEventListener('change', () => {
@@ -1419,13 +1653,15 @@
     /* 再把文件里的权威配置读回来覆盖（localStorage 在这台机器上
        跨重启会丢，见 loadCfg 上方说明）：读到就以它为准刷新一遍 */
     if (vp && vp.loadConfig) {
-      vp.loadConfig().then((text) => {
+      vp.loadConfig().then(async (text) => {
         if (!text) return;
         let fileCfg = null;
         try { fileCfg = JSON.parse(text); } catch { /* 文件坏了就当没有 */ }
         if (!fileCfg || typeof fileCfg !== 'object') return;
         cfg = normalizeCfg(fileCfg);
         if (vp.debug) vp.debug('petboot-file pet=' + cfg.pet + ' perPet=' + JSON.stringify(cfg.perPet));
+        /* 老版本只存了一只自定义桌宠，搬成新格式再继续 */
+        await migrateLegacyCustom();
         syncSettingsUI();
         applyPet();
       }).catch(() => {});

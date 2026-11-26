@@ -272,10 +272,21 @@ function composeItems(details) {
       push(c.type, c.text);
     }
   }
-  /* 删除的文件：明确说一声 */
-  for (const d of details) {
-    if (items.length >= MAX_ITEMS) break;
-    if (d.kind === 'deleted') push('improve', `移除了文件 ${path.basename(d.rel)}`);
+  /* 删除的文件：合并成一条说，不要一个文件占一条。
+   * 以前是每个删除文件 push 一条「移除了文件 xxx.webp」，删一批素材
+   * 就能把 8 条名额全吃满，真正的改动反而被挤掉（2026-11-25 实测：
+   * 移出三个桌宠素材包时，弹窗里 8 条有 6 条是「移除了文件 *.webp」）。
+   * 只列前几个名字，其余说数量。 */
+  const deletedFiles = details.filter((d) => d.kind === 'deleted');
+  if (deletedFiles.length) {
+    const names = deletedFiles.slice(0, 3).map((d) => path.basename(d.rel));
+    const more = deletedFiles.length - names.length;
+    push(
+      'improve',
+      more > 0
+        ? `移除了 ${deletedFiles.length} 个文件（${names.join('、')} 等）`
+        : `移除了 ${names.join('、')}`,
+    );
   }
   /* 二进制资源（图片/动画等）只报数量 */
   const binCount = details.filter((d) => d.binary && d.kind !== 'deleted').length;

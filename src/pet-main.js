@@ -235,8 +235,10 @@ function register({ ipcMain, app, getWin }) {
       flip: anchor.x - x > width / 2,
       customPreview: null,
     };
-    /* 自定义包只带 idle 那一张精灵图给悬停预览用，免得整包转发 */
-    if (lastCfg && lastCfg.custom) {
+    /* 自定义包只带 idle 那一张精灵图给悬停预览用，免得整包转发。
+       只对「当前选中的那只」有效 —— 别的自定义宠物外部窗口拿不到内容。 */
+    const petId = lastCfg && lastCfg.pet;
+    if (lastCfg && lastCfg.custom && typeof petId === 'string' && petId.startsWith('custom:')) {
       const c = lastCfg.custom;
       const idle = c.manifest && c.manifest.animations && c.manifest.animations.idle;
       if (idle && idle.sheet) {

@@ -2034,8 +2034,15 @@ button:focus-visible {
   --ed-pad-y: 22px;
   --ed-font: 'Cascadia Code', 'Consolas', 'Microsoft YaHei UI', monospace;
   --ed-size: 13px;
-  --ed-line: 1.75;
-
+  /* 行高必须是整数像素。写倍数 1.75 时 13px × 1.75 = 22.75px 带小数，
+   * textarea 内部行盒取整和高亮层 <pre> 不一致，每行攒零点几像素，
+   * 往下几十行就差出一整行 —— 光标跑到别的行上（2026-11-21 修过一次，
+   * 后来被一次样式重写回退了，这里补回来）。 */
+  --ed-line: 24px;
+  /* 滚动条占的宽度。两层必须用同一个值：textarea 的滚动条会吃掉内容
+   * 宽度，高亮层没有滚动条，不补这一条两层的换行位置就不一样。
+   * 和下面全局 ::-webkit-scrollbar 的 10px 对应。 */
+  --ed-scrollbar: 10px;
   position: relative;
   flex: 1;
   min-height: 0;
@@ -2048,6 +2055,9 @@ button:focus-visible {
   margin: 0;
   padding: var(--ed-pad-y) var(--ed-pad-x);
   border: none;
+  /* 两层都用 border-box：textarea 默认 content-box，加完内边距会比容器
+   * 宽出一圈，文字起点和高亮层差开（同样是被回退过一次的修复） */
+  box-sizing: border-box;
   font-family: var(--ed-font);
   font-size: var(--ed-size);
   line-height: var(--ed-line);
@@ -2067,6 +2077,12 @@ button:focus-visible {
   background: transparent;
   color: var(--fg-1);
   user-select: none;
+  /* 和 textarea 的内容盒对齐：textarea 用 scrollbar-gutter: stable
+   * 常驻一条滚动条宽度（见下面 .editor），高亮层自己是 overflow:hidden
+   * 没有滚动条，所以要在右边补上同样的宽度。少这一条时，高亮层的
+   * 可用宽度比 textarea 多 10px，长行横向滚动后两层右边界对不上，
+   * 光标就会离文字越来越远（2026-11-25 修）。 */
+  padding-right: calc(var(--ed-pad-x) + var(--ed-scrollbar));
 }
 
 /* 上层：透明文字，只显示光标和选区 */
@@ -2078,6 +2094,10 @@ button:focus-visible {
   resize: none;
   outline: none;
   overflow: auto;
+  /* 常驻滚动条槽：否则内容短的时候没有滚动条、内容长了才出现，
+   * 一出现内容宽度就少 10px，两层排版会在那一刻跳一下。常驻之后
+   * 宽度始终不变，配合高亮层补的 padding-right 两层永远等宽。 */
+  scrollbar-gutter: stable;
   background: transparent;
   color: transparent;
   caret-color: var(--fg-1);
@@ -2087,6 +2107,17 @@ button:focus-visible {
 /* 透明文字上的选区要能看见 */
 .editor::selection { background: rgba(91, 141, 239, 0.32); }
 .editor::-moz-selection { background: rgba(91, 141, 239, 0.32); }
+
+/* 两层都不许用连字/字距微调：Cascadia Code 开了连字会把 -> 之类合成
+ * 一个字形，宽度和 textarea 里的逐字符排版对不上，行一长就错位。
+ * 关掉连字后两边都是纯等宽单字推进，光标才能和文字严丝合缝。 */
+.editor,
+.editor-highlight {
+  font-variant-ligatures: none;
+  font-feature-settings: 'liga' 0, 'calt' 0, 'dlig' 0, 'clig' 0;
+  font-kerning: none;
+  text-rendering: optimizeSpeed;
+}
 
 .preview-body.is-editing { background: var(--bg-1); }
 
@@ -3774,6 +3805,143 @@ body.is-marquee .card { pointer-events: none; }
   font-size: 11.2px;
   color: var(--fg-3);
 }
+
+/* ---------- 文件夹对（整两个目录在重复） ----------
+ * 几十个重复文件平铺成几十个组时列表没法看。这里把「同一对目录之间的
+ * 重复」收成一块，默认折叠，点标题展开（2026-11-25 用户要求）。 */
+.dupe-pair {
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-m);
+  overflow: hidden;
+  background: var(--bg-2);
+}
+.dupe-pair-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-3);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.14s var(--ease-out);
+}
+.dupe-pair-head:hover { background: var(--bg-4); }
+.dupe-pair.is-open .dupe-pair-head { border-bottom: 1px solid var(--line-1); }
+.dupe-pair-caret {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  stroke: var(--fg-3);
+  stroke-width: 2;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.16s var(--ease-out);
+}
+.dupe-pair.is-open .dupe-pair-caret { transform: rotate(90deg); }
+.dupe-pair-dirs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.2px;
+  font-weight: 550;
+  color: var(--fg-1);
+}
+.dupe-pair-dir {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dupe-pair-vs {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--accent);
+}
+.dupe-pair-tag {
+  flex: 0 0 auto;
+  font-size: 10.2px;
+  font-weight: 550;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(240, 164, 79, 0.14);
+  color: #e0954a;
+}
+/* 内容完全重复（两边每个文件都能在对方找到）—— 用中性的绿标，
+   和「部分重复」的橙标区分开 */
+.dupe-pair-tag.is-exact {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+.dupe-pair-stat {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.dupe-pair-pick {
+  flex: 0 0 auto;
+  font-size: 10.8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+  font-variant-numeric: tabular-nums;
+}
+/* 「部分重复」时补一句两边各剩多少独有文件，免得用户以为删完就一样了 */
+.dupe-pair-extra {
+  padding: 7px 12px 7px 33px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line-1);
+}
+.dupe-pair-note {
+  font-size: 11px;
+  color: var(--fg-3);
+  line-height: 1.5;
+}
+.dupe-pair-body { display: flex; flex-direction: column; }
+/* 折叠时用 hidden 属性收起：display:flex 会盖掉 [hidden] 自带的
+   display:none，必须显式写回来，否则折叠了内容还在 */
+.dupe-pair-body[hidden] { display: none; }
+.dupe-subgroup { border-bottom: 1px solid var(--line-1); }
+.dupe-subgroup:last-child { border-bottom: 0; }
+.dupe-subgroup-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 33px;
+  background: color-mix(in srgb, var(--bg-3) 60%, transparent);
+}
+.dupe-subgroup .dupe-file { padding-left: 33px; }
+
+/* 每行右侧的「打开」：先看一眼再决定删不删。
+   常驻显示（低对比），悬浮时提亮 —— 只在 hover 才出现的话，
+   用户根本不知道有这个功能（2026-11-25 用户要求能点开看）。 */
+.dupe-open {
+  flex: 0 0 auto;
+  font-size: 10.8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--fg-4);
+  cursor: pointer;
+  transition: color 0.14s var(--ease-out), border-color 0.14s var(--ease-out), background 0.14s var(--ease-out);
+}
+.dupe-file:hover .dupe-open {
+  color: var(--fg-2);
+  border-color: var(--line-3);
+  background: var(--bg-4);
+}
+.dupe-open:hover {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+/* 键盘可达：Tab 到按钮上也要看得见 */
+.dupe-open:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
 
 /* 回收站视图下隐藏搜索/筛选/导入，保持聚焦 */
 .trash-view .toolbar-right { display: none; }

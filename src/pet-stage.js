@@ -15,11 +15,9 @@
     { id: 'deepy', label: '像素鲸鱼' },
     { id: 'clawd', label: '克码人生' },
     { id: 'kunkun', label: '坤坤' },
-    { id: 'maid', label: '蓝发小女仆' },
-    { id: 'gemini', label: 'Gemini·Q版' },
-    { id: 'gemini-std', label: 'Gemini·标准版' },
   ];
-  /* Gemini 娘的 Q 版与标准版是两个独立的宠物包（形态切换已移除） */
+  /* 蓝发小女仆 / Gemini 两版已移出内置（2026-11-25），素材在
+     course-vault-backup/pets-export/ 里，用「导入自己的桌宠」加回来 */
   const SIZE_PRESETS = { small: 64, medium: 92, large: 128 };
   const ANIM_LABELS = {
     idle: '待机', 'idle-look': '东张西望', 'idle-peck': '啄一啄', 'idle-spout': '喷水',
@@ -54,7 +52,9 @@
   const canvas = document.querySelector('#petCv');
   const ctx = canvas.getContext('2d');
 
-  let cfg = { pet: 'kunkun', size: 'medium', sizePx: 92, customName: '', custom: null };
+  /* pet 现在是 'custom:<id>' 的形式（可以有多只导入的桌宠）。
+     外部窗口读不到 IndexedDB，当前那只的整包内容随配置一起送过来。 */
+  let cfg = { pet: 'kunkun', size: 'medium', sizePx: 92, customName: '', customPets: [], custom: null };
   let pack = null;
   let sheetURL = null;
   let images = new Map();
@@ -248,7 +248,7 @@
     images = new Map();
     pack = null;
     lastWinSize = '';
-    if (cfg.pet === 'custom') {
+    if (typeof cfg.pet === 'string' && cfg.pet.startsWith('custom:')) {
       const c = cfg.custom;
       if (!c || !c.manifest) return;
       pack = c.manifest;
@@ -353,7 +353,9 @@
     }
     addGroup('其他动作', Object.keys(pack.animations));
     const pets = BUILTINS.map((b) => ({ id: b.id, label: b.label, tick: cfg.pet === b.id }));
-    if (cfg.customName) pets.push({ id: 'custom', label: cfg.customName, tick: cfg.pet === 'custom' });
+    for (const p of cfg.customPets || []) {
+      pets.push({ id: p.id, label: p.name, tick: cfg.pet === p.id });
+    }
     const sizes = [
       { key: 'small', label: '小', tick: cfg.size === 'small' },
       { key: 'medium', label: '中', tick: cfg.size === 'medium' },

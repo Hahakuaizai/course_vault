@@ -1,7 +1,0 @@
-Gemini 娘·标准版 素材来源与授权
-================================
-立绘素材：GeminiDesktopPet（github.com/xiaoxindada/GeminiDesktopPet）
-  Assets/Standard 目录，系 AI 生成的补充素材（见该目录 GENERATION.md）。
-原角色设定：ZipZipPipe（Gemini 娘角色档案）。
-Q 版素材（姊妹包 gemini）：CrossPet（lokicorvus），CC BY-NC-SA 4.0。
-本包由单帧立绘程序化合成帧动画，仅供个人非商业使用。

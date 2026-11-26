@@ -1143,7 +1143,9 @@ function toggleModal(id, open) {
 /** 重新从主进程拉一遍状态并重绘（Ctrl+R、右键「刷新」都用它） */
 async function refreshState(quiet = false) {
   try {
-    applyState(await api.getState());
+    /* 走 refreshState 而不是 getState：它会顺手跟随磁盘上的改名，
+     * 用户刚在资源管理器里改完名按 Ctrl+R 就能看到新名字 */
+    applyState(await api.refreshState());
     if (!quiet) toast('已刷新', 'ok');
   } catch (err) {
     toast(err.message || '刷新失败', 'error');
@@ -3265,9 +3267,18 @@ function enterEditMode() {
   editorBaseSize = parseFloat(getComputedStyle(wrap).getPropertyValue('--ed-size')) || 13;
 
   // 首次渲染高亮（用预览已经算好的 html，省一次 IPC）
-  if (currentPreview.html) {
+  /* 只有 type === 'code' 的 html 才是「源码上色」，可以直接垫在
+   * textarea 下面。markdown / word 的 html 是**渲染后的文档**
+   * （<h1>、<table>…），行数和缩进跟 textarea 里的源码完全对不上，
+   * 垫上去整层文字都是错位的 —— 用户看到的「光标和行对不齐」
+   * 就是这么来的（2026-11-25 修）。这种情况必须走 IPC 重新按
+   * 源码上色。 */
+  if (currentPreview.html && currentPreview.type === 'code') {
     syncHighlight(ta, pre, currentPreview.html);
   } else {
+    /* 先垫一份转义后的纯文本再异步上色：textarea 的字是透明的，
+     * 等 IPC 那 90ms 里高亮层要是空的，整个编辑区会白一下 */
+    syncHighlight(ta, pre, escapeHtml(ta.value));
     scheduleHighlight(ta, pre);
   }
 
@@ -4181,6 +4192,74 @@ function closeCtx() {
   closeAllCtx();
 }
 
+/* ---------- 级联子菜单的收起时机 ----------
+ *
+ * 两个互相矛盾的要求：
+ *   1. 鼠标从父项斜着移向子菜单时，中途会短暂离开父菜单矩形，
+ *      不能这时就收 —— 否则「还没移过去就没了」；
+ *   2. 鼠标真的移走以后要**立刻**收，不能挂着不动。
+ *
+ * 做法是经典的「安全三角形」：以父项右缘中点为顶点、子菜单左侧上下角
+ * 为底边，指针落在这个三角形里就当作「还在往子菜单走」。以前这里只有
+ * 一个固定 700ms 的宽限，既慢（用户报「移走后几秒才消失」）又不管
+ * 指针是不是真的离开了菜单 —— 指针走到桌面上根本没有任何监听，
+ * 子菜单会一直挂着。
+ *
+ * 现在：安全区内无条件保持；离开安全区 200ms 后收。判定挂在 document
+ * 的 pointermove 上，因为指针可能停在菜单外的空白处不再移动，那一次
+ * move 已经判定「不安全」，计时照常走完。
+ */
+const CTX_SUB_GRACE = 200;
+
+function pointInRect(x, y, r, pad = 0) {
+  return x >= r.left - pad && x <= r.right + pad
+    && y >= r.top - pad && y <= r.bottom + pad;
+}
+
+function pointInTriangle(px, py, a, b, c) {
+  const d1 = (px - b.x) * (a.y - b.y) - (a.x - b.x) * (py - b.y);
+  const d2 = (px - c.x) * (b.y - c.y) - (b.x - c.x) * (py - c.y);
+  const d3 = (px - a.x) * (c.y - a.y) - (c.x - a.x) * (py - a.y);
+  const hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
+  const hasPos = d1 > 0 || d2 > 0 || d3 > 0;
+  return !(hasNeg && hasPos);
+}
+
+/** 指针是否还在「父项 → 子菜单」这条必经之路上（含父项本身和子菜单本身） */
+function inCtxSafeZone(entry, x, y) {
+  const idx = openCtxMenus.indexOf(entry);
+  if (idx < 0) return false;
+  const btn = entry.el.querySelector('.ctx-item.is-sub-open');
+  if (!btn) return false;
+  const sub = openCtxMenus[idx + 1];
+  if (!sub) return false;
+  const b = btn.getBoundingClientRect();
+  /* 父项外扩 4px：子菜单常常紧贴父菜单（实测只差 1px），父项边缘和
+     子菜单之间那条极窄的缝不能让指针一走进去就开始倒计时。 */
+  if (pointInRect(x, y, b, 4)) return true;
+  /* 指针进到子菜单（或更深的孙菜单）里也算安全。子菜单是独立的 DOM
+     元素，孙菜单又挂在子菜单外面，所以这里要逐层检查 —— 只看直接
+     子菜单的话，指针移到第三层菜单上会把前两层一起收掉。 */
+  for (let i = idx + 1; i < openCtxMenus.length; i++) {
+    if (pointInRect(x, y, openCtxMenus[i].el.getBoundingClientRect(), 2)) return true;
+  }
+  const s = sub.el.getBoundingClientRect();
+  /* 子菜单放不下时会被翻到父菜单左边，底边的位置跟着换 */
+  const onRight = s.left >= b.right - 12;
+  /* 父项和子菜单之间那条竖直通道。子菜单贴得很紧时（实测只差 1.6px），
+     安全三角形会退化成一条几乎零宽的线 —— 指针从父项直接横着往右挪，
+     第一下就已经在三角形外了。所以先补一条从父项边缘到子菜单边缘、
+     上下各覆盖两者交集的带子，横向移动一律算安全。 */
+  const gapL = onRight ? b.right - 2 : s.right;
+  const gapR = onRight ? s.left + 2 : b.left + 2;
+  const gapT = Math.min(b.top, s.top) - 4;
+  const gapB = Math.max(b.bottom, s.bottom) + 4;
+  if (x >= gapL && x <= gapR && y >= gapT && y <= gapB) return true;
+  const apex = { x: onRight ? b.right : b.left, y: b.top + b.height / 2 };
+  const cornerX = onRight ? s.left : s.right;
+  return pointInTriangle(x, y, apex, { x: cornerX, y: s.top }, { x: cornerX, y: s.bottom });
+}
+
 /* ============================================================
    悬停信息浮层
    ============================================================ */
@@ -4444,12 +4523,10 @@ function showCtx(x, y, items, depth = 0) {
     }
   }
 
-  const entry = { el, x, y };
+  const entry = { el, x, y, depth };
 
-  /* 防消失机制：划过普通条目时不立刻收子菜单，先留 700ms 宽限；
-     宽限内指针进入子菜单（更深层菜单的 mouseover 会取消所有祖先
-     的待收起计时）或划回带子菜单的条目，就不收了。这样鼠标斜着
-     往子菜单移动、途中蹭过邻项时，子菜单不会闪没。 */
+  /* 收起计时的容器。真正的判定在下面的 document pointermove 里做，
+     这里只负责「按秒表」—— 见 CTX_SUB_GRACE 处的说明。 */
   entry.subCloseTimer = 0;
   entry.cancelSubClose = () => {
     clearTimeout(entry.subCloseTimer);
@@ -4459,6 +4536,7 @@ function showCtx(x, y, items, depth = 0) {
   /** 在某一项右边展开它的子菜单 */
   const openSub = (btn, item) => {
     closeCtxFrom(depth + 1);
+    entry.cancelSubClose();
     el.dataset.openSub = String(btn.dataset.i);
     el.querySelectorAll('.is-sub-open').forEach((b) => b.classList.remove('is-sub-open'));
     btn.classList.add('is-sub-open');
@@ -4468,18 +4546,14 @@ function showCtx(x, y, items, depth = 0) {
 
   /** 收起本菜单右边的子菜单 */
   const closeSub = () => {
+    entry.cancelSubClose();
     if (openCtxMenus.length > depth + 1) closeCtxFrom(depth + 1);
     if (el.dataset.openSub) {
       delete el.dataset.openSub;
       el.querySelectorAll('.is-sub-open').forEach((b) => b.classList.remove('is-sub-open'));
     }
   };
-
-  /** 延迟收起子菜单（防消失，见 entry.cancelSubClose 处的说明） */
-  const scheduleCloseSub = () => {
-    entry.cancelSubClose();
-    entry.subCloseTimer = setTimeout(closeSub, 700);
-  };
+  entry.closeSub = closeSub;
 
   el.addEventListener('click', (e) => {
     // 阻止冒泡到 document 的「点外部关闭」监听：菜单项的动作里可能同步
@@ -4503,19 +4577,10 @@ function showCtx(x, y, items, depth = 0) {
 
   // 悬停展开子菜单
   el.addEventListener('mouseover', (e) => {
-    // 指针在本菜单（或更深层菜单）里活动时，先取消所有祖先菜单
-    // 待执行的「收起子菜单」计时——这是防消失的关键一环
-    for (let d = 0; d < depth; d++) openCtxMenus[d]?.cancelSubClose?.();
     const btn = e.target.closest('.ctx-item');
     if (!btn) return;
     const item = actionable[Number(btn.dataset.i)];
-    if (!item?.children) {
-      // 移到普通条目上时，延迟收掉右边展开的子菜单（不立即收，
-      // 给斜向移动留宽限）；同时清掉展开标记的时机也随之推迟，
-      // 否则再划回原来那一项时因为「已经展开过」而不弹了
-      scheduleCloseSub();
-      return;
-    }
+    if (!item?.children) return;   // 普通条目交给下面的 pointermove 判定
     entry.cancelSubClose();
     if (el.dataset.openSub === String(btn.dataset.i)) return; // 已经展开了
     openSub(btn, item);
@@ -4523,6 +4588,24 @@ function showCtx(x, y, items, depth = 0) {
 
   openCtxMenus.push(entry);
 }
+
+/* 级联子菜单的收起由全局 pointermove 统一判定（判定规则见
+   CTX_SUB_GRACE 处）：指针在「父项 → 子菜单」的安全三角形里就一直
+   保持；出了安全区开始 200ms 倒计时，指针回来就取消。
+   指针停在菜单外的空白处不再移动时，那一次 move 已经把倒计时启动了，
+   照常会收掉，不会像以前那样挂着不走。 */
+document.addEventListener('pointermove', (e) => {
+  if (!openCtxMenus.length) return;
+  for (const m of openCtxMenus.slice()) {
+    if (!m.el.dataset.openSub) continue;      // 这一层没展开子菜单
+    if (!m.el.isConnected) continue;
+    if (inCtxSafeZone(m, e.clientX, e.clientY)) {
+      m.cancelSubClose();
+    } else if (!m.subCloseTimer) {
+      m.subCloseTimer = setTimeout(() => m.closeSub?.(), CTX_SUB_GRACE);
+    }
+  }
+}, { passive: true });
 
 document.addEventListener('click', (e) => {
   // 只要点在任何一个菜单外面，就把整串菜单都关掉。
@@ -4552,7 +4635,16 @@ window.addEventListener('blur', () => closeAllCtx());
 /* ============================================================
    导入
    ============================================================ */
-function openImportModal() {
+/**
+ * 打开导入弹窗。
+ *
+ * prefill 用来「先选好文件夹再弹窗」：右键「导入文件夹…」和 Ctrl+Shift+I
+ * 以前是选完文件夹就**直接导入**，既没有归入目录的选择、也没有
+ * 「保留文件夹结构」开关，结果文件全平铺到一个目录里（用户 2026-11-25
+ * 报的 bug）。现在改成选完文件夹把弹窗打开、路径填进去，和右上角
+ * 「导入」按钮走完全同一条路 —— 界面一致，结构也按开关来。
+ */
+function openImportModal(prefill = null) {
   // 没有目录也能导入：选「全部文件（顶层）」时，导入的文件夹本身会成为顶层目录
   S.importPaths = [];
   $('#pickedList').textContent = '未选择任何文件';
@@ -4569,7 +4661,19 @@ function openImportModal() {
     S.importCourseId = id;
   }, { allowRoot: true });
 
+  // 「保留文件夹结构」开关重置回默认开：这是导入文件夹时的默认行为，
+  // 上一次手动关掉不该影响到下一次
+  $('#swBuildTree').classList.add('is-on');
+  $('#buildTreeRow').hidden = true;
+
   $('#importModal').hidden = false;
+
+  // 预选的路径填进来源框（setPicked 会自己处理名字输入框、按钮可用状态
+  // 和「保留文件夹结构」的显示）
+  if (prefill && prefill.length) {
+    setPicked(prefill);
+    $('#buildTreeRow').hidden = false;
+  }
 }
 
 function setPicked(paths) {
@@ -5335,6 +5439,31 @@ function bindEvents() {
     }
     updateDupeFooter();
   });
+
+  /* 文件夹对的折叠 / 展开：点标题栏切换（里面的勾选框和「打开」不触发） */
+  $('#dupeGroups').addEventListener('click', (e) => {
+    const head = e.target.closest('[data-pair-toggle]');
+    if (head) {
+      const key = head.dataset.pairToggle;
+      if (dupePairsOpen.has(key)) dupePairsOpen.delete(key);
+      else dupePairsOpen.add(key);
+      const sec = head.closest('.dupe-pair');
+      const open = dupePairsOpen.has(key);
+      sec.classList.toggle('is-open', open);
+      const body = sec.querySelector('.dupe-pair-body');
+      if (body) body.hidden = !open;
+      return;
+    }
+    /* 每行的「打开」：用系统程序打开这个文件，先看一眼再决定删不删。
+     * 放在 label 里，所以要拦掉默认行为，否则会连带切换勾选。 */
+    const openBtn = e.target.closest('[data-open]');
+    if (openBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      api.files.openExternal(openBtn.dataset.open)
+        .catch((err) => toast(err.message || '打开失败', 'error'));
+    }
+  }, true);
 
   const closeDupe = () => { $('#dupeModal').hidden = true; };
   $('#btnDupeClose').addEventListener('click', closeDupe);
@@ -6437,7 +6566,11 @@ function bindEvents() {
               action: async () => {
                 const paths = await api.files.pickFolder();
                 if (!paths.length) return;
-                await importDroppedPaths(paths, destId);
+                /* 走导入弹窗，和右上角「导入」完全一致：能选归入目录、
+                 * 能控制「保留文件夹结构」。以前这里直接 importDroppedPaths，
+                 * 既不弹窗又强制平铺，用户看到的是一堆文件散在同一个目录里
+                 * （2026-11-25 报的 bug）。 */
+                openImportModal(paths);
               },
             },
         // 删除放整个菜单最后并用红色：删目录会连带里面的文件记录，
@@ -7026,10 +7159,9 @@ function bindEvents() {
     if (e.ctrlKey && e.key.toLowerCase() === 'i') {
       e.preventDefault();
       if (e.shiftKey) {
+        /* 同样走导入弹窗：直接导入会平铺、也没有归入目录的选择 */
         api.files.pickFolder().then((paths) => {
-          if (paths.length) {
-            importDroppedPaths(paths, S.view.type === 'course' ? S.view.courseId : null);
-          }
+          if (paths.length) openImportModal(paths);
         }).catch((x) => toast(x.message, 'error'));
       } else {
         toggleModal('importModal', openImportModal);
@@ -8127,6 +8259,10 @@ function dupNeedsWarn(file, group) {
 }
 
 let dupeGroups = [];
+/** 两个目录之间成批重复的文件夹对（见 scanDuplicates 的目录对聚类） */
+let dupePairs = [];
+/** 展开着的文件夹对（key 集合）。默认全折叠 */
+let dupePairsOpen = new Set();
 let dupeDelete = new Set(); // 要删除的文件 id（勾选删除模型，见 findDuplicates）
 
 async function findDuplicates(fromNav = false) {
@@ -8144,12 +8280,14 @@ async function findDuplicates(fromNav = false) {
     const scopeId = !fromNav && S.view.type === 'course' ? S.view.courseId : null;
     const res = await api.dupes.scan(scopeId);
 
-    if (!res.groups.length) {
+    if (!res.groups.length && !res.folderPairs?.length) {
       toast(`已检测 ${res.scanned} 个文件，没有发现重复`, 'ok');
       return;
     }
 
     dupeGroups = res.groups;
+    dupePairs = res.folderPairs || [];
+    dupePairsOpen = new Set(); // 每次重新检测都从折叠状态开始
     // 勾选删除模型（2026-11-21 用户要求）：勾上的就是要删的，默认把每组
     // 除第一份（最早导入）外的副本都勾好，第一份不勾 = 保留。这样勾选
     // 状态和底部「删除 N 个」一一对应；旧的单选「保留」模型是反着的，
@@ -8157,6 +8295,12 @@ async function findDuplicates(fromNav = false) {
     dupeDelete = new Set();
     dupeGroups.forEach((g) => {
       g.files.slice(1).forEach((f) => dupeDelete.add(f.id));
+    });
+    // 文件夹对里同样「每对每文件只留一份」：默认保留先出现的那一份
+    dupePairs.forEach((p) => {
+      p.groups.forEach((g) => {
+        g.files.slice(1).forEach((f) => dupeDelete.add(f.id));
+      });
     });
 
     renderDupeModal(res);
@@ -8172,12 +8316,48 @@ async function findDuplicates(fromNav = false) {
   }
 }
 
+/** 一行重复文件。folderKey 不为空时，勾选框要连带更新文件夹头的汇总 */
+function dupeFileRow(f, groupIdx, folderKey) {
+  const warn = dupNeedsWarn(f, groupOf(f, folderKey));
+  const toDel = dupeDelete.has(f.id);
+  return `
+    <label class="dupe-file ${toDel ? 'is-del' : ''}" data-file="${f.id}">
+      <input type="checkbox" data-group="${groupIdx}" ${folderKey ? `data-folder="${escapeHtml(folderKey)}"` : ''}
+             value="${f.id}" ${toDel ? 'checked' : ''} />
+      <span class="dupe-check"></span>
+      <span class="dupe-file-body">
+        <span class="dupe-name-row">
+          <span class="dupe-name">${escapeHtml(f.name)}</span>
+          ${warn ? '<span class="dupe-warn" title="它和这一组里其他文件名字不一样，只是内容完全相同">名字不同</span>' : ''}
+        </span>
+        <span class="dupe-path" title="${escapeHtml(f.path)}">${escapeHtml(f.dirPath)}</span>
+      </span>
+      <button type="button" class="dupe-open" data-open="${f.id}"
+              title="用系统程序打开，确认是不是同一份">打开</button>
+      <span class="dupe-tag">${toDel ? '删除' : '保留'}</span>
+    </label>`;
+}
+
+/** 按 id 找回它所在的那一组（文件夹对里的行也要能算「名字不同」） */
+function groupOf(f, folderKey) {
+  if (!folderKey) return dupeGroups.find((g) => g.files.includes(f)) || { files: [f] };
+  const pair = dupePairs.find((p) => p.key === folderKey);
+  return (pair?.groups.find((g) => g.files.some((x) => x.id === f.id))) || { files: [f] };
+}
+
 function renderDupeModal(res) {
-  const totalDup = dupeGroups.reduce((n, g) => n + g.files.length - 1, 0);
+  const allGroups = [
+    ...dupeGroups,
+    ...dupePairs.flatMap((p) => p.groups),
+  ];
+  const totalDup = allGroups.reduce((n, g) => n + g.files.length - 1, 0);
   const crossCount = dupeGroups.filter((g) => g.crossDir).length;
+  const pairNote = dupePairs.length
+    ? `其中 ${dupePairs.length} 处是整两个文件夹在重复，已按文件夹折叠显示。`
+    : '';
   $('#dupeSummary').innerHTML = `
     <div class="dupe-stat">
-      <strong>${dupeGroups.length}</strong>
+      <strong>${res.groupCount ?? allGroups.length}</strong>
       <small>组重复</small>
     </div>
     <div class="dupe-stat">
@@ -8188,9 +8368,51 @@ function renderDupeModal(res) {
       <strong>${fmtBytes(res.waste)}</strong>
       <small>可释放</small>
     </div>
-    <p class="dupe-tip">勾选的是要删除的副本，每组默认保留最早导入的那份，点任意一行可以改。${crossCount ? `其中 ${crossCount} 组分布在不同目录，组旁已标「跨目录」。` : ''}</p>`;
+    <p class="dupe-tip">勾选的是要删除的副本，每组默认保留最早导入的那份，点任意一行可以改。每行右边有「打开」，可以先看看是不是同一份。${crossCount ? `其中 ${crossCount} 组分布在不同目录，组旁已标「跨目录」。` : ''}${pairNote}</p>`;
 
-  $('#dupeGroups').innerHTML = dupeGroups.map((g, gi) => `
+  // 文件夹对（默认折叠）
+  const pairHtml = dupePairs.map((p) => {
+    const open = dupePairsOpen.has(p.key);
+    const dupInPair = p.groups.reduce(
+      (n, g) => n + g.files.filter((f) => dupeDelete.has(f.id)).length, 0,
+    );
+    const tag = p.exact
+      ? '<span class="dupe-pair-tag is-exact">内容完全重复</span>'
+      : '<span class="dupe-pair-tag">部分重复</span>';
+    const extra = p.exact
+      ? ''
+      : `<span class="dupe-pair-note">另有「${escapeHtml(p.a.dirPath.split(' / ').pop())}」独有 ${p.aOnly} 个、「${escapeHtml(p.b.dirPath.split(' / ').pop())}」独有 ${p.bOnly} 个，删除只处理重复的那部分</span>`;
+    return `
+    <section class="dupe-pair ${open ? 'is-open' : ''}" data-pair="${escapeHtml(p.key)}">
+      <header class="dupe-pair-head" data-pair-toggle="${escapeHtml(p.key)}">
+        <svg class="dupe-pair-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        <span class="dupe-pair-dirs">
+          <span class="dupe-pair-dir" title="${escapeHtml(p.a.dirPath)}">${escapeHtml(p.a.dirPath)}</span>
+          <span class="dupe-pair-vs">⇄</span>
+          <span class="dupe-pair-dir" title="${escapeHtml(p.b.dirPath)}">${escapeHtml(p.b.dirPath)}</span>
+        </span>
+        ${tag}
+        <span class="dupe-pair-stat">${p.dupGroups} 组 · ${p.dupFiles} 个文件重复 · ${fmtBytes(p.dupSize)}</span>
+        <span class="dupe-pair-pick">待删 ${dupInPair}</span>
+      </header>
+      ${extra ? `<div class="dupe-pair-extra">${extra}</div>` : ''}
+      <div class="dupe-pair-body" ${open ? '' : 'hidden'}>
+        ${p.groups.map((g, gi) => `
+          <div class="dupe-subgroup">
+            <div class="dupe-subgroup-head">
+              <span class="dupe-size">${fmtBytes(g.size)}</span>
+              <span class="dupe-count">${g.files.length} 个相同文件</span>
+            </div>
+            <div class="dupe-files">
+              ${g.files.map((f) => dupeFileRow(f, `p${dupePairs.indexOf(p)}-${gi}`, p.key)).join('')}
+            </div>
+          </div>`).join('')}
+      </div>
+    </section>`;
+  }).join('');
+
+  // 平铺的组
+  const groupHtml = dupeGroups.map((g, gi) => `
     <section class="dupe-group" data-group="${gi}">
       <header class="dupe-group-head">
         <span class="dupe-size">${fmtBytes(g.size)}</span>
@@ -8198,47 +8420,44 @@ function renderDupeModal(res) {
         ${g.crossDir ? `<span class="dupe-cross">跨目录 · ${g.dirCount} 个目录</span>` : ''}
       </header>
       <div class="dupe-files">
-        ${g.files.map((f) => {
-          // 名字和同组文件毫不相干时先标出来，别让人点删除按钮才发现
-          const warn = dupNeedsWarn(f, g);
-          const toDel = dupeDelete.has(f.id);
-          return `
-          <label class="dupe-file ${toDel ? 'is-del' : ''}" data-file="${f.id}">
-            <input type="checkbox" data-group="${gi}" value="${f.id}"
-                   ${toDel ? 'checked' : ''} />
-            <span class="dupe-check"></span>
-            <span class="dupe-file-body">
-              <span class="dupe-name-row">
-                <span class="dupe-name">${escapeHtml(f.name)}</span>
-                ${warn ? '<span class="dupe-warn" title="它和这一组里其他文件名字不一样，只是内容完全相同">名字不同</span>' : ''}
-              </span>
-              <span class="dupe-path" title="${escapeHtml(f.path)}">${escapeHtml(f.dirPath)}</span>
-            </span>
-            <span class="dupe-tag">${toDel ? '删除' : '保留'}</span>
-          </label>`;
-        }).join('')}
+        ${g.files.map((f) => dupeFileRow(f, gi, null)).join('')}
       </div>
     </section>`).join('');
 
+  $('#dupeGroups').innerHTML = pairHtml + groupHtml;
   updateDupeFooter();
 }
 
 function updateDupeFooter() {
   // 待删数就是勾选数，和每行右侧的「删除」标签数完全一致
-  const toDelete = dupeGroups.reduce(
+  const allGroups = [...dupeGroups, ...dupePairs.flatMap((p) => p.groups)];
+  const toDelete = allGroups.reduce(
     (n, g) => n + g.files.filter((f) => dupeDelete.has(f.id)).length,
     0,
   );
   $('#btnDupeRemove').disabled = toDelete === 0;
   $('#btnDupeRemove').textContent = toDelete ? `删除 ${toDelete} 个` : '无需删除';
   $('#dupeFootNote').textContent = toDelete ? '删除的文件会先进回收站' : '';
+
+  // 文件夹头的「待删 N」跟着勾选实时变
+  $$('#dupeGroups .dupe-pair').forEach((el) => {
+    const key = el.dataset.pair;
+    const pair = dupePairs.find((p) => p.key === key);
+    if (!pair) return;
+    const n = pair.groups.reduce(
+      (s, g) => s + g.files.filter((f) => dupeDelete.has(f.id)).length, 0,
+    );
+    const pick = el.querySelector('.dupe-pair-pick');
+    if (pick) pick.textContent = `待删 ${n}`;
+  });
 }
 
 async function removeDuplicates() {
+  const allGroups = [...dupeGroups, ...dupePairs.flatMap((p) => p.groups)];
   const ids = [];
   /** 待删文件里名字和同组不一样的 —— 这些要单独提醒 */
   const renamed = [];
-  dupeGroups.forEach((g) => {
+  allGroups.forEach((g) => {
     for (const f of g.files) {
       if (!dupeDelete.has(f.id)) continue;
       ids.push(f.id);
@@ -8528,6 +8747,26 @@ async function boot() {
 
     renderGuide();
     maybeShowChangelog();
+
+    /* 窗口重新获得焦点时静默跟随一次本地改名（见主进程 followRenamedFiles）。
+     * 用户在资源管理器里改了文件名、切回软件，卡片上的名字/大小就跟着更新，
+     * 不用手动按 Ctrl+R。加了节流：频繁切窗口不要每次都扫目录。
+     * 只在「有文件丢失」时才真正去扫，主进程里已经判了，这里只管节流。 */
+    let lastFocusRefresh = 0;
+    window.addEventListener('focus', () => {
+      const now = Date.now();
+      if (now - lastFocusRefresh < 4000) return;
+      lastFocusRefresh = now;
+      // 有弹窗开着时不打扰（预览、设置、导入…都可能正改着东西）
+      if (document.querySelector('.modal-backdrop:not([hidden]), .overlay:not([hidden])')) return;
+      api.refreshState().then((st) => {
+        // 只在真的有变化时才重绘，避免无谓闪烁
+        const before = S.files.map((f) => `${f.id}:${f.name}:${f.size}:${f.exists}`).join('|');
+        applyState(st);
+        const after = S.files.map((f) => `${f.id}:${f.name}:${f.size}:${f.exists}`).join('|');
+        if (before !== after) render();
+      }).catch(() => { /* 跟随失败不影响使用 */ });
+    });
     /* 首屏已就绪：通知启动加载层退场（见 boot-loader.js） */
     document.body.classList.add('boot-done');
   } catch (err) {
@@ -8536,6 +8775,16 @@ async function boot() {
     toast(`初始化失败：${err.message}`, 'error');
   }
 }
+
+/* 给同一窗口里的独立脚本（pet.js）用的 UI 桥。
+ * pet.js 是 ES module、拿不到本文件的局部函数，但它和本文件跑在同一个
+ * 窗口里，所以挂到 window 上就能共用软件自己的确认框和提示条 ——
+ * 别再让桌宠那边退回去用浏览器原生的 confirm（那个框丑、样式也不跟主题，
+ * 用户 2026-11-25 报过）。 */
+window.__vaultUi = {
+  askConfirm,
+  toast,
+};
 
 // 调试/自动化钩子：供开发期脚本驱动界面，不参与业务逻辑
 window.__vaultDebug = {

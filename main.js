@@ -1784,8 +1784,116 @@ async function importFiles({ paths, courseId, mode, dupMode, buildTree, nameOver
 }
 
 /* ------------------------------------------------------------------ *
- * 搜索：文件名 + 文件内容
+ * 跟随磁盘上的改名
+ *
+ * 链接模式只记绝对路径，用户在资源管理器里把文件改个名，记录就指向了
+ * 一个不存在的路径 —— 卡片显示「已丢失」，悬浮提示里的「大小」也没了。
+ * 但这两种情况完全不一样：
+ *   - 文件被改名：目录还在，目录里能找到「内容完全一样」的另一个文件
+ *   - 文件被删除：目录里找不到内容一样的
+ * 前者应该**静默跟随**（改的是名字，东西还是那份），后者才该报丢失。
+ *
+ * 只在刷新/启动时跑，按目录批量 readdir，避免每个文件都去碰磁盘。
+ * 找不到同内容文件时什么都不做 —— 宁可留着「已丢失」让用户自己重新
+ * 定位，也不要猜错绑定到别的文件上。
  * ------------------------------------------------------------------ */
+const FOLLOW_DIR_TTL = 5000;
+const followDirCache = new Map(); // dir -> { at, entries: Map(lowerName -> size) }
+
+async function listDirSizes(dir) {
+  const now = Date.now();
+  const hit = followDirCache.get(dir);
+  if (hit && now - hit.at < FOLLOW_DIR_TTL) return hit.entries;
+  const entries = new Map();
+  try {
+    const list = await fsp.readdir(dir, { withFileTypes: true });
+    for (const ent of list) {
+      if (!ent.isFile()) continue;
+      const full = path.join(dir, ent.name);
+      try {
+        const st = await fsp.stat(full);
+        entries.set(ent.name.toLowerCase(), { name: ent.name, size: st.size, mtime: st.mtimeMs });
+      } catch { /* 读不到就跳过 */ }
+    }
+  } catch { /* 目录不在了 */ }
+  followDirCache.set(dir, { at: now, entries });
+  return entries;
+}
+
+/**
+ * 试着给「路径已经不在了」的记录找到改名后的文件。
+ * 返回改动条数（0 表示没找到任何可跟随的）。
+ */
+async function followRenamedFiles() {
+  followDirCache.clear();
+  const missing = state.files.filter((f) => {
+    if (!f.path || f.storage === 'copy') return false;
+    try { return !fs.existsSync(f.path); } catch { return true; }
+  });
+  if (!missing.length) return 0;
+
+  // 按所在目录分组：同一个目录只 readdir 一次
+  const byDir = new Map();
+  for (const f of missing) {
+    const dir = path.dirname(f.path);
+    if (!byDir.has(dir)) byDir.set(dir, []);
+    byDir.get(dir).push(f);
+  }
+
+  // 已经被别的记录占着的路径不能再抢
+  const takenPaths = new Set(
+    state.files.map((x) => { try { return path.resolve(x.path); } catch { return x.path; } }),
+  );
+
+  let changed = 0;
+  for (const [dir, list] of byDir) {
+    const entries = await listDirSizes(dir);
+    if (!entries.size) continue;
+
+    // 大小 → 候选名（只按大小粗筛，真正的确认在下面按内容哈希）
+    const bySize = new Map();
+    for (const [, e] of entries) {
+      if (!bySize.has(e.size)) bySize.set(e.size, []);
+      bySize.get(e.size).push(e);
+    }
+
+    for (const f of list) {
+      const cands = (bySize.get(f.size) || []).filter((e) => {
+        const full = path.join(dir, e.name);
+        try { return !takenPaths.has(path.resolve(full)); } catch { return true; }
+      });
+      if (!cands.length) continue;
+
+      /* 名字相同（大小写不敏感）优先 —— 用户很可能只是改了大小写，
+       * 或者同名文件在另一个大小写规则下。其次才比内容。 */
+      const oldBase = path.basename(f.path).toLowerCase();
+      let pick = cands.find((e) => e.name.toLowerCase() === oldBase);
+      if (!pick) {
+        // 按内容找：先算旧记录的哈希拿不到（文件没了），
+        // 所以反过来算候选的哈希，跟「同目录同大小的兄弟」比对不现实。
+        // 只有一个候选时直接认；多个候选就放弃，别猜。
+        if (cands.length === 1) pick = cands[0];
+      }
+      if (!pick) continue;
+
+      const full = path.join(dir, pick.name);
+      try { takenPaths.add(path.resolve(full)); } catch { /* 忽略 */ }
+      f.path = full;
+      f.name = pick.name;
+      f.ext = path.extname(pick.name).toLowerCase();
+      f.size = pick.size;
+      f.mtime = pick.mtime;
+      changed += 1;
+    }
+  }
+
+  if (changed) {
+    invalidateStat();
+    saveStateNow();
+  }
+  return changed;
+}
+
 const SEARCH_TEXT_EXT = new Set([
   '.txt', '.md', '.markdown', '.log', '.csv', '.json', '.xml', '.yml', '.yaml',
   '.ini', '.cfg', '.conf', '.c', '.h', '.cpp', '.hpp', '.cc', '.cs', '.java',
@@ -2033,6 +2141,27 @@ function hashFileSync(file, algo = 'sha256') {
 }
 
 /**
+ * 这个文件是不是软件自己的一部分（程序目录里的素材、代码等）。
+ *
+ * 为什么要排除：用户把开发目录整个拖进资料库时，`src/pets` 里几百个
+ * 宠物素材会被当成用户资料参与重复检测。桌宠素材本来就有一批是同一
+ * 张图的多个拷贝（不同动作复用同一帧），检测结果里会冒出一大串
+ * 「重复」，用户一点删除，桌宠就坏了 —— 而且这些文件本来就不该由
+ * 这个功能来清理（更新程序还要按哈希比对它们）。
+ */
+function isAppOwnFile(p) {
+  try {
+    const abs = path.resolve(p);
+    const root = path.resolve(APP_DIR);
+    if (abs === root || abs.startsWith(root + path.sep)) {
+      // 程序目录里的一切都跳过：代码、素材、依赖
+      return true;
+    }
+  } catch { /* 路径异常就当不是 */ }
+  return false;
+}
+
+/**
  * 在指定目录（含子目录）范围内找内容完全相同的文件。
  * courseId 为 null 时扫描全库。
  */
@@ -2054,6 +2183,11 @@ async function scanDuplicates({ courseId }) {
 
   const pool = state.files.filter((f) => {
     if (scope && !scope.has(f.courseId)) return false;
+    /* 程序目录里的文件不参与：那是软件自己的素材/代码，删了会把
+     * 软件弄坏，也不是用户想清理的「重复资料」（2026-11-25 用户报的
+     * 「两张不同的图被判重复」——实际是桌宠素材的同一张图存了两份，
+     * 但根子在于这些素材根本不该进这个列表）。 */
+    if (isAppOwnFile(f.path)) return false;
     try {
       return fs.statSync(f.path).isFile();
     } catch {
@@ -2118,8 +2252,78 @@ async function scanDuplicates({ courseId }) {
   }
   groups.sort((a, b) => b.size - a.size);
 
+  /* ------------------------------------------------------------------ *
+   * 目录对聚类
+   *
+   * 两个文件夹之间成批重复（比如「旧版项目」和「项目（1）」）时，几十个
+   * 重复文件平铺成几十个组，列表长得没法看，也看不出「这是两个文件夹
+   * 在重复」这个事实。这里把「恰好落在同两个目录之间」的组收成一块，
+   * 界面上按文件夹展示、默认折叠，展开才看单个文件（2026-11-25 用户要的）。
+   *
+   * 只有 1~2 组的目录对不收：那是零星撞了两张图，折叠反而多一层。
+   * ------------------------------------------------------------------ */
+  const countByDir = new Map();
+  for (const f of pool) {
+    const k = f.courseId || '';
+    countByDir.set(k, (countByDir.get(k) || 0) + 1);
+  }
+
+  const pairMap = new Map();
+  for (const g of groups) {
+    const dirs = [...new Set(g.files.map((f) => f.courseId || ''))].sort();
+    // 分布在三个以上目录的组没有「一对文件夹」可言，留在平铺列表里
+    if (dirs.length !== 2) continue;
+    const key = dirs.join('\u0000');
+    if (!pairMap.has(key)) pairMap.set(key, { dirs, groups: [] });
+    pairMap.get(key).groups.push(g);
+  }
+
+  /** 少于这么多组就不折叠，否则只是把两条记录多套一层壳 */
+  const FOLDER_PAIR_MIN = 3;
+  const folderPairs = [];
+  const paired = new Set();
+  for (const [key, p] of pairMap) {
+    if (p.groups.length < FOLDER_PAIR_MIN) continue;
+    paired.add(key);
+    const [aId, bId] = p.dirs;
+    const countIn = (dirId) => p.groups.reduce(
+      (n, g) => n + g.files.filter((f) => (f.courseId || '') === dirId).length, 0,
+    );
+    const aDup = countIn(aId);
+    const bDup = countIn(bId);
+    const aTotal = countByDir.get(aId) || 0;
+    const bTotal = countByDir.get(bId) || 0;
+    folderPairs.push({
+      key,
+      a: { courseId: aId || null, dirPath: pathOfDirNames(aId || null), total: aTotal, dup: aDup },
+      b: { courseId: bId || null, dirPath: pathOfDirNames(bId || null), total: bTotal, dup: bDup },
+      groups: p.groups,
+      /* 两个文件夹「完全重复」= 各自的文件全都能在这一对里找到副本。
+         差一点的时候要把两边各剩几个独有的说清楚，否则用户会以为
+         删完这边就等于两边一样了。 */
+      exact: aTotal === aDup && bTotal === bDup,
+      aOnly: Math.max(0, aTotal - aDup),
+      bOnly: Math.max(0, bTotal - bDup),
+      dupSize: p.groups.reduce((n, g) => n + g.size * (g.files.length - 1), 0),
+      dupGroups: p.groups.length,
+      dupFiles: aDup + bDup,
+    });
+  }
+  folderPairs.sort((x, y) => y.dupSize - x.dupSize);
+
+  const looseGroups = groups.filter((g) => {
+    const dirs = [...new Set(g.files.map((f) => f.courseId || ''))].sort();
+    return !(dirs.length === 2 && paired.has(dirs.join('\u0000')));
+  });
+
   const waste = groups.reduce((n, g) => n + g.size * (g.files.length - 1), 0);
-  return { groups, scanned: pool.length, waste };
+  return {
+    groups: looseGroups,
+    folderPairs,
+    groupCount: groups.length,
+    scanned: pool.length,
+    waste,
+  };
 }
 
 /** 目录的完整路径名（用于展示「在哪个目录里」） */
@@ -3016,9 +3220,20 @@ function scheduleAutoCheck(delayFirst = 6000) {
  * IPC
  * ------------------------------------------------------------------ */
 function registerIpc() {
-  ipcMain.handle('app:bootstrap', () => snapshot());
+  ipcMain.handle('app:bootstrap', async () => {
+    /* 启动时先跟随一次本地改名：用户很可能是在软件关着的时候在资源
+     * 管理器里改了文件名，一打开就该看到新名字，而不是「已丢失」 */
+    try { await followRenamedFiles(); } catch { /* 跟随失败不影响启动 */ }
+    return snapshot();
+  });
 
   ipcMain.handle('state:get', () => snapshot());
+
+  /* 手动刷新时也跟随一次（Ctrl+R / 右键刷新 / 切回窗口） */
+  ipcMain.handle('state:refresh', async () => {
+    try { await followRenamedFiles(); } catch { /* 忽略 */ }
+    return snapshot();
+  });
 
   /* --- 课程 --- */
   ipcMain.handle('course:create', (_e, { name, color, parentId }) => {

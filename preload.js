@@ -7,6 +7,8 @@ const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload);
 contextBridge.exposeInMainWorld('vault', {
   bootstrap: () => invoke('app:bootstrap'),
   getState: () => invoke('state:get'),
+  /** 刷新并顺便跟随磁盘上的改名（找不到路径时按同目录同内容认领） */
+  refreshState: () => invoke('state:refresh'),
 
   courses: {
     create: (name, color, parentId) => invoke('course:create', { name, color, parentId }),

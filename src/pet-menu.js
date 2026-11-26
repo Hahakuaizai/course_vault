@@ -147,10 +147,91 @@
     return s;
   }
 
+  /* ---------- 级联子菜单的收起时机 ----------
+   *
+   * 与 pet.js 的 SUB_GRACE 同一套规则：斜着往子菜单移动时不能半路收
+   * （「还没移过去就没了」），指针真的走开又要立刻收（「移走后几秒
+   * 才消失」）。判定用「安全三角形」——父项右缘中点为顶点、子菜单
+   * 左侧上下角为底边；指针在父项/子菜单/三角形里就一直保持，出了
+   * 安全区 220ms 后收。挂在 document 的 pointermove 上，指针停在
+   * 空白处不动时那次 move 已启动倒计时，不会挂着不走。
+   */
+  const SUB_GRACE = 220;
+
+  function pointInRect(x, y, r, pad = 0) {
+    return x >= r.left - pad && x <= r.right + pad
+      && y >= r.top - pad && y <= r.bottom + pad;
+  }
+
+  function pointInTriangle(px, py, a, b, c) {
+    const d1 = (px - b.x) * (a.y - b.y) - (a.x - b.x) * (py - b.y);
+    const d2 = (px - c.x) * (b.y - c.y) - (b.x - c.x) * (py - c.y);
+    const d3 = (px - a.x) * (c.y - a.y) - (c.x - a.x) * (py - a.y);
+    const hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
+    const hasPos = d1 > 0 || d2 > 0 || d3 > 0;
+    return !(hasNeg && hasPos);
+  }
+
+  /** 指针是否还在「父项 → 子菜单」这条必经之路上 */
+  function inSubSafeZone(mi, x, y) {
+    const sub = mi.querySelector(':scope > .sub');
+    if (!sub) return false;
+    const b = mi.getBoundingClientRect();
+    if (pointInRect(x, y, b, 4)) return true;
+    /* 孙菜单是固定定位、挂在子菜单外面，逐层检查所有已展开的子孙面板 */
+    const panels = sub.querySelectorAll(':scope .sub');
+    for (const p of panels) {
+      if (p.classList.contains('positioned') && pointInRect(x, y, p.getBoundingClientRect(), 2)) return true;
+    }
+    const s = sub.getBoundingClientRect();
+    if (pointInRect(x, y, s, 2)) return true;
+    const onRight = s.left >= b.right - 12;
+    /* 父项和子菜单之间的竖直通道（子菜单贴紧时三角形会退化） */
+    const gapL = onRight ? b.right - 2 : s.right;
+    const gapR = onRight ? s.left + 2 : b.left + 2;
+    if (gapR > gapL && x >= gapL && x <= gapR
+      && y >= Math.min(b.top, s.top) - 4 && y <= Math.max(b.bottom, s.bottom) + 4) return true;
+    const apex = { x: onRight ? b.right : b.left, y: b.top + b.height / 2 };
+    const cornerX = onRight ? s.left : s.right;
+    return pointInTriangle(x, y, apex, { x: cornerX, y: s.top }, { x: cornerX, y: s.bottom });
+  }
+
+  /** 收起某一层里展开中的子菜单 */
+  function closeSubIn(parent) {
+    clearTimeout(parent._petSubTimer);
+    parent._petSubTimer = 0;
+    parent.querySelectorAll(':scope > .mi.has-sub.sub-open').forEach((o) => {
+      o.classList.remove('sub-open');
+      o.querySelectorAll('.sub-open').forEach((d) => d.classList.remove('sub-open'));
+    });
+  }
+
+  let subAutoCloseInstalled = false;
+  function installSubAutoClose() {
+    if (subAutoCloseInstalled) return;
+    subAutoCloseInstalled = true;
+    document.addEventListener('pointermove', (e) => {
+      const open = document.querySelectorAll('.cv-pet-menu .mi.has-sub.sub-open');
+      if (!open.length) return;
+      const x = e.clientX;
+      const y = e.clientY;
+      open.forEach((mi) => {
+        const parent = mi.parentElement;
+        if (inSubSafeZone(mi, x, y)) {
+          clearTimeout(parent._petSubTimer);
+          parent._petSubTimer = 0;
+        } else if (!parent._petSubTimer) {
+          parent._petSubTimer = setTimeout(() => closeSubIn(parent), SUB_GRACE);
+        }
+      });
+    }, { passive: true });
+  }
+
   /* 子菜单展开/收起与摆位：与 pet.js 的 wireSubMenus 同规则
-     （JS 控制显隐 + 700ms 宽限；子菜单固定定位、先向右放不下
+     （JS 控制显隐 + 安全三角形判定；子菜单固定定位、先向右放不下
      翻左、翻左会压住祖先菜单就贴视口边缘，绝不移动已开菜单） */
   function wireSubMenus(root) {
+    installSubAutoClose();
     const placeSub = (mi, sub) => {
       if (!sub) return;
       sub.classList.add('positioned');
@@ -184,29 +265,11 @@
       sub.style.left = x + 'px';
       sub.style.top = y + 'px';
     };
-    const closeIn = (parent) => {
-      parent.querySelectorAll(':scope > .mi.has-sub.sub-open').forEach((o) => {
-        o.classList.remove('sub-open');
-        o.querySelectorAll('.sub-open').forEach((d) => d.classList.remove('sub-open'));
-      });
-    };
-    const armedParents = new Set();
-    const armClose = (parent) => {
-      clearTimeout(parent._petSubTimer);
-      armedParents.add(parent);
-      parent._petSubTimer = setTimeout(() => closeIn(parent), 700);
-    };
-    root.addEventListener('pointerover', (e) => {
-      if (e.target.closest && e.target.closest('.sub') && !e.target.closest('.mi')) {
-        armedParents.forEach((p) => clearTimeout(p._petSubTimer));
-        armedParents.clear();
-      }
-    });
     root.querySelectorAll('.mi.has-sub').forEach((mi) => {
       const parent = mi.parentElement;
       mi.addEventListener('pointerenter', () => {
         clearTimeout(parent._petSubTimer);
-        armedParents.delete(parent);
+        parent._petSubTimer = 0;
         parent.querySelectorAll(':scope > .mi.has-sub.sub-open').forEach((o) => {
           if (o !== mi) {
             o.classList.remove('sub-open');
@@ -216,11 +279,11 @@
         mi.classList.add('sub-open');
         placeSub(mi, mi.querySelector(':scope > .sub'));
       });
-      mi.addEventListener('pointerleave', () => armClose(parent));
+      /* 离开父项不直接倒计时 —— 指针可能是斜着去子菜单，交给全局
+         pointermove 的安全三角形判定（见 SUB_GRACE 处）。 */
     });
-    root.querySelectorAll('.mi:not(.has-sub)').forEach((mi) => {
-      mi.addEventListener('pointerenter', () => armClose(mi.parentElement));
-    });
+    /* 普通条目也不单独收起：指针移出安全区后由全局 pointermove
+       统一倒计时。 */
   }
 
   /* ---------------- 悬停动态预览 ---------------- */
@@ -290,9 +353,12 @@
     if (petId === 'none' || !data) return;
     let pk = null;
     let urlFor = null;
-    if (petId === 'custom') {
+    /* 自定义桌宠的 id 是 'custom:<id>' 形式（可以有多只）。
+       外部窗口读不到 IndexedDB，所以当前那只的 idle 精灵图由主进程
+       随菜单数据一起送过来（customPreview）。 */
+    if (typeof petId === 'string' && petId.startsWith('custom:')) {
       const cp = data.customPreview;
-      if (!cp || !cp.manifest) return;
+      if (!cp || !cp.manifest || petId !== data.pet) return;
       pk = cp.manifest;
       if (customBlobURL) URL.revokeObjectURL(customBlobURL);
       customBlobURL = URL.createObjectURL(new Blob([b64ToBytes(cp.b64)], { type: 'image/webp' }));
@@ -386,8 +452,7 @@
     const head = document.createElement('div');
     head.className = 'mhead';
     const cur = (model.pets || []).find((p) => p.tick);
-    head.textContent = cur ? cur.label : (data.customName || '桌宠');
-    menuEl.appendChild(head);
+    head.textContent = cur ? cur.label : (data.customName || '桌宠');    menuEl.appendChild(head);
 
     const groups = (model.groups || []).filter((g) => (g.items || []).length);
     if (groups.length) {
